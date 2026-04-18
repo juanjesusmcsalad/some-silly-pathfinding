@@ -38,6 +38,7 @@ local totalFishCaught = 0
 local cycleFishCaught = 0
 local targetFishCount = 1
 local fishByType = {}
+local counterLabel = nil
 
 local SELL_DESTINATION = Vector3.new(100.5, 107.5, -296.75)
 local RETURN_DESTINATION = Vector3.new(55, 97.5000153, -280)
@@ -104,6 +105,10 @@ local function setTargetFishCount(rawValue)
     targetFishCount = math.max(0, math.floor(parsed))
     player:SetAttribute("FishTargetCount", targetFishCount)
     print("[Fishing] Target fish count set to", targetFishCount)
+
+    if counterLabel then
+        counterLabel:SetText(string.format("%d/%d caught", cycleFishCaught, targetFishCount))
+    end
 end
 
 local function findSpot(maxDistance)
@@ -383,6 +388,9 @@ local function runSellCycle()
 
     cycleFishCaught = 0
     player:SetAttribute("FishCaughtCycle", cycleFishCaught)
+    if counterLabel then
+        counterLabel:SetText(string.format("%d/%d caught", cycleFishCaught, targetFishCount))
+    end
     cycleInTransit = false
 
     if shouldResumeAutoFish then
@@ -402,6 +410,10 @@ local function onFishCaught(data)
     player:SetAttribute("FishCaughtTotal", totalFishCaught)
     player:SetAttribute("FishCaughtCycle", cycleFishCaught)
     player:SetAttribute("FishCaught_" .. fishName, fishByType[fishName])
+
+    if counterLabel then
+        counterLabel:SetText(string.format("%d/%d caught", cycleFishCaught, targetFishCount))
+    end
 
     print("[Fishing] Fish caught:", fishName)
     print("[Fishing] Total:", totalFishCaught, "| Cycle:", cycleFishCaught, "|", fishName .. ":", fishByType[fishName])
@@ -479,9 +491,9 @@ task.spawn(function()
 end)
 
 -- MAIN TAB UI
-Tabs.Main:AddParagraph({
-    Title = "feesh",
-    Content = "Set fish target, then enable Auto Fish"
+counterLabel = Tabs.Main:AddParagraph({
+    Title = "Catch Counter",
+    Content = string.format("%d/%d caught", cycleFishCaught, targetFishCount)
 })
 
 local autoFishToggle = Tabs.Main:AddToggle("AutoFishToggle", {
@@ -510,14 +522,6 @@ targetInput:OnChanged(function()
         setTargetFishCount(targetInput.Value)
     end
 end)
-
-Tabs.Main:AddButton({
-    Title = "Run Sell Cycle Now",
-    Description = "Path to seller, sell, return",
-    Callback = function()
-        task.spawn(runSellCycle)
-    end
-})
 
 Fluent:Notify({
     Title = "Fishing Script",
