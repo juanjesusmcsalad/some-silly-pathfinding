@@ -38,7 +38,13 @@ local totalFishCaught = 0
 local cycleFishCaught = 0
 local targetFishCount = 1
 local fishByType = {}
-local counterLabel = nil
+local autoFishToggle = nil
+
+local function updateCounterDisplay()
+    if autoFishToggle then
+        autoFishToggle:SetDesc(string.format("%d/%d caught", cycleFishCaught, targetFishCount))
+    end
+end
 
 local SELL_DESTINATION = Vector3.new(100.5, 107.5, -296.75)
 local RETURN_DESTINATION = Vector3.new(55, 97.5000153, -280)
@@ -106,9 +112,7 @@ local function setTargetFishCount(rawValue)
     player:SetAttribute("FishTargetCount", targetFishCount)
     print("[Fishing] Target fish count set to", targetFishCount)
 
-    if counterLabel then
-        counterLabel:SetText(string.format("%d/%d caught", cycleFishCaught, targetFishCount))
-    end
+        updateCounterDisplay()
 end
 
 local function findSpot(maxDistance)
@@ -388,9 +392,7 @@ local function runSellCycle()
 
     cycleFishCaught = 0
     player:SetAttribute("FishCaughtCycle", cycleFishCaught)
-    if counterLabel then
-        counterLabel:SetText(string.format("%d/%d caught", cycleFishCaught, targetFishCount))
-    end
+        updateCounterDisplay()
     cycleInTransit = false
 
     if shouldResumeAutoFish then
@@ -411,9 +413,7 @@ local function onFishCaught(data)
     player:SetAttribute("FishCaughtCycle", cycleFishCaught)
     player:SetAttribute("FishCaught_" .. fishName, fishByType[fishName])
 
-    if counterLabel then
-        counterLabel:SetText(string.format("%d/%d caught", cycleFishCaught, targetFishCount))
-    end
+        updateCounterDisplay()
 
     print("[Fishing] Fish caught:", fishName)
     print("[Fishing] Total:", totalFishCaught, "| Cycle:", cycleFishCaught, "|", fishName .. ":", fishByType[fishName])
@@ -491,12 +491,7 @@ task.spawn(function()
 end)
 
 -- MAIN TAB UI
-counterLabel = Tabs.Main:AddParagraph({
-    Title = "Catch Counter",
-    Content = string.format("%d/%d caught", cycleFishCaught, targetFishCount)
-})
-
-local autoFishToggle = Tabs.Main:AddToggle("AutoFishToggle", {
+autoFishToggle = Tabs.Main:AddToggle("AutoFishToggle", {
     Title = "Auto Fish",
     Description = "Toggle fishing loop on/off",
     Default = autoFishEnabled
@@ -505,6 +500,8 @@ local autoFishToggle = Tabs.Main:AddToggle("AutoFishToggle", {
 autoFishToggle:OnChanged(function(value)
     setAutoFishEnabled(value, "ui")
 end)
+
+updateCounterDisplay()
 
 local targetInput = Tabs.Main:AddInput("FishTargetCount", {
     Title = "Fish Target Before Sell",
