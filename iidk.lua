@@ -39,12 +39,8 @@ local cycleFishCaught = 0
 local targetFishCount = 1
 local fishByType = {}
 local autoFishToggle = nil
-
-local function updateCounterDisplay()
-    if autoFishToggle then
-        autoFishToggle:SetDesc(string.format("%d/%d caught", cycleFishCaught, targetFishCount))
-    end
-end
+local currentFishingSpotId = nil
+local lastStartAttempt = 0
 
 local SELL_DESTINATION = Vector3.new(100.5, 107.5, -296.75)
 local RETURN_DESTINATION = Vector3.new(55, 97.5000153, -280)
@@ -55,6 +51,7 @@ local ARRIVAL_RADIUS = 2.5
 local RELAXED_ARRIVAL_RADIUS = 10
 local PREJUMP_MIN = 1.5
 local PREJUMP_MAX = 3.0
+local START_RETRY_DELAY = 0.7
 
 local AllFishes = {
     "Tire", "Rusty Can", "Old Boot",
@@ -99,6 +96,10 @@ local function setAutoFishEnabled(enabled, source)
     if not autoFishEnabled and isFishing then
         Fishing.quit.send()
     end
+
+    if not autoFishEnabled then
+        isFishing = false
+    end
 end
 
 local function setTargetFishCount(rawValue)
@@ -109,10 +110,10 @@ local function setTargetFishCount(rawValue)
     end
 
     targetFishCount = math.max(0, math.floor(parsed))
+    cycleFishCaught = 0
     player:SetAttribute("FishTargetCount", targetFishCount)
+    player:SetAttribute("FishCaughtCycle", cycleFishCaught)
     print("[Fishing] Target fish count set to", targetFishCount)
-
-        updateCounterDisplay()
 end
 
 local function findSpot(maxDistance)
@@ -139,6 +140,26 @@ local function findSpot(maxDistance)
     end
 
     return closestSpotId, closestPos
+end
+
+local function startFishingLoop()
+    if not autoFishEnabled or cycleInTransit or isFishing then
+        return false
+    end
+
+    if time() - lastStartAttempt < START_RETRY_DELAY then
+        return false
+    end
+
+    local id = select(1, findSpot(20)) or currentFishingSpotId
+    if not id then
+        return false
+    end
+
+    currentFishingSpotId = id
+    lastStartAttempt = time()
+    Fishing.start.send(id)
+    return true
 end
 
 local function clickCloseButton()
@@ -228,6 +249,7 @@ local function pathfindTo(destination, label)
     local function forceJump()
         humanoid.Jump = true
         humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+        return true
     end
 
     local function jumpRecovery()
@@ -392,7 +414,6 @@ local function runSellCycle()
 
     cycleFishCaught = 0
     player:SetAttribute("FishCaughtCycle", cycleFishCaught)
-        updateCounterDisplay()
     cycleInTransit = false
 
     if shouldResumeAutoFish then
@@ -413,8 +434,6 @@ local function onFishCaught(data)
     player:SetAttribute("FishCaughtCycle", cycleFishCaught)
     player:SetAttribute("FishCaught_" .. fishName, fishByType[fishName])
 
-        updateCounterDisplay()
-
     print("[Fishing] Fish caught:", fishName)
     print("[Fishing] Total:", totalFishCaught, "| Cycle:", cycleFishCaught, "|", fishName .. ":", fishByType[fishName])
 
@@ -423,7 +442,6 @@ local function onFishCaught(data)
     end
 end
 
--- Input controls
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then
         return
@@ -435,23 +453,30 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end
 end)
 
--- Fishing events
 Fishing.beginFishing.listen(function()
     isFishing = true
+    lastStartAttempt = 0
 end)
 
 Fishing.beginNetFishing.listen(function()
     isFishing = true
+    lastStartAttempt = 0
 end)
 
 Fishing.reward.listen(function(data)
     onFishCaught(data)
     task.spawn(clickCloseButton)
     isFishing = false
+    lastStartAttempt = 0
+
+    task.delay(0.2, function()
+        startFishingLoop()
+    end)
 end)
 
 Fishing.quit.listen(function()
     isFishing = false
+    lastStartAttempt = 0
 end)
 
 Fishing.playGame.listen(function(data)
@@ -475,22 +500,15 @@ Fishing.playGame.listen(function(data)
     Fishing.gameResult.send(true)
 end)
 
--- Old stable loop (kept simple)
 task.spawn(function()
     while true do
         task.wait(0.5)
 
-        if autoFishEnabled and not isFishing and not cycleInTransit then
-            local id = select(1, findSpot(20))
-            if id then
-                Fishing.start.send(id)
-                isFishing = true
-            end
-        end
+        startFishingLoop()
     end
 end)
 
--- MAIN TAB UI
+-- m ain tab
 autoFishToggle = Tabs.Main:AddToggle("AutoFishToggle", {
     Title = "Auto Fish",
     Description = "Toggle fishing loop on/off",
@@ -500,8 +518,6 @@ autoFishToggle = Tabs.Main:AddToggle("AutoFishToggle", {
 autoFishToggle:OnChanged(function(value)
     setAutoFishEnabled(value, "ui")
 end)
-
-updateCounterDisplay()
 
 local targetInput = Tabs.Main:AddInput("FishTargetCount", {
     Title = "Fish Target Before Sell",
@@ -514,15 +530,44 @@ local targetInput = Tabs.Main:AddInput("FishTargetCount", {
     end
 })
 
-targetInput:OnChanged(function()
-    if tonumber(targetInput.Value) then
-        setTargetFishCount(targetInput.Value)
+local function runJuanFeature()
+    local rolling = require(game:GetService("ReplicatedStorage"):WaitForChild("Packets"):WaitForChild("Rolling"))
+    rolling.SendResponse.send(1)
+end
+
+local juanLoopEnabled = false
+
+local function runJuanLoop()
+    local rolling = require(game:GetService("ReplicatedStorage"):WaitForChild("Packets"):WaitForChild("Rolling"))
+
+    while juanLoopEnabled do
+        rolling.SendResponse.send(1)
+        task.wait(0.001)
+    end
+end
+
+Tabs.Main:AddButton({
+    Title = "Doopr",
+    Description = "DOOPS THE LAST AURA U ROLLED",
+    Callback = function()
+        runJuanFeature()
+    end
+})
+
+Tabs.Main:AddToggle("JuanLoopToggle", {
+    Title = "dooping loop",
+    Description = "LOOP DOOPS THE LAST AURA U ROLLED VERY VERY VERY FAST BTW WARNIGN",
+    Default = false
+}):OnChanged(function(value)
+    juanLoopEnabled = value
+    if juanLoopEnabled then
+        task.spawn(runJuanLoop)
     end
 end)
 
 Fluent:Notify({
     Title = "Fishing Script",
-    Content = "Loaded. Configure target and enable Auto Fish.",
+    Content = "Loaded. Configure target and enable Auto Fish. ( it didnt load shit)",
     Duration = 6
 })
 
