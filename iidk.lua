@@ -4,7 +4,7 @@ local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/d
 local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
 
 local Window = Fluent:CreateWindow({
-    Title = "juanhub",
+    Title = "juanaeglebalimyspininblablablahubyaheard",
     SubTitle = "feesh and doop",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
@@ -511,7 +511,7 @@ end)
 -- m ain tab
 autoFishToggle = Tabs.Main:AddToggle("AutoFishToggle", {
     Title = "Auto Fish",
-    Description = "Toggle fishing loop on/off",
+    Description = "what the fuck do you think this does :sob:",
     Default = autoFishEnabled
 })
 
@@ -520,7 +520,7 @@ autoFishToggle:OnChanged(function(value)
 end)
 
 local targetInput = Tabs.Main:AddInput("FishTargetCount", {
-    Title = "Fish Target Before Sell",
+    Title = "amount of fish b4 selling",
     Default = tostring(targetFishCount),
     Placeholder = "Enter 0 or more",
     Numeric = true,
