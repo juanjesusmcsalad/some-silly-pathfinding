@@ -142,6 +142,41 @@ local function findSpot(maxDistance)
     return closestSpotId, closestPos
 end
 
+local function getSpotById(spotId)
+    if not spotId then
+        return nil
+    end
+
+    for _, spot in ipairs(workspace.Map.Miscs.FishingPoints:GetChildren()) do
+        if spot:GetAttribute("spotId") == spotId then
+            return spot
+        end
+    end
+
+    return nil
+end
+
+local function resolveFishingSpotId()
+    local nearestSpotId = select(1, findSpot(20))
+    if nearestSpotId then
+        return nearestSpotId
+    end
+
+    local currentSpot = getSpotById(currentFishingSpotId)
+    if currentSpot then
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then
+            local dist = (currentSpot:GetPivot().Position - root.Position).Magnitude
+            if dist <= 35 then
+                return currentFishingSpotId
+            end
+        end
+    end
+
+    return select(1, findSpot(nil))
+end
+
 local function startFishingLoop()
     if not autoFishEnabled or cycleInTransit or isFishing then
         return false
@@ -151,7 +186,7 @@ local function startFishingLoop()
         return false
     end
 
-    local id = select(1, findSpot(20)) or currentFishingSpotId
+    local id = resolveFishingSpotId()
     if not id then
         return false
     end
@@ -404,6 +439,8 @@ local function runSellCycle()
     cycleInTransit = true
     setAutoFishEnabled(false, "sell cycle")
     isFishing = false
+    currentFishingSpotId = nil
+    lastStartAttempt = 0
     Fishing.quit.send()
 
     local reachedSeller = pathfindTo(SELL_DESTINATION, "[Pathfinding] Seller path")
@@ -419,6 +456,9 @@ local function runSellCycle()
     if shouldResumeAutoFish then
         setAutoFishEnabled(true, "sell cycle complete")
         print("[Fishing] Resuming auto-fishing.")
+        task.delay(0.2, function()
+            startFishingLoop()
+        end)
     else
         print("[Fishing] Sell cycle complete. Auto-fishing remains off.")
     end
