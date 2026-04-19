@@ -15,6 +15,7 @@
 
     local Tabs = {
         Main = Window:AddTab({ Title = "Main", Icon = "home" }),
+        Eggs = Window:AddTab({ Title = "EGGS", Icon = "egg" }),
         Merchants = Window:AddTab({ Title = "MERCHANTS", Icon = "banknote" }),
         Tests = Window:AddTab({ Title = "TESTS", Icon = "flask-conical" }),
         Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
@@ -31,6 +32,16 @@
     local Fishing = require(ReplicatedStorage.Packets.Fishing)
     local rollp = require(game:GetService("ReplicatedStorage"):WaitForChild("Packets"):WaitForChild("Rolling"))
     local player = Players.LocalPlayer
+    local merchantStore = nil
+    local exchangeList = nil
+
+    pcall(function()
+        merchantStore = require(ReplicatedStorage:WaitForChild("Modules"):WaitForChild("UI"):WaitForChild("Quad")).Store("merchant_store")
+    end)
+
+    pcall(function()
+        exchangeList = require(ReplicatedStorage:WaitForChild("Storage"):WaitForChild("ExchangeList"))
+    end)
 
     local isFishing = false
     local autoFishEnabled = false
@@ -60,6 +71,7 @@
     }
     local merchantPingEnabled = true
     local merchantWebhookUrl = ""
+    local merchantStockPingEnabled = true
 
     local function saveMerchantRoles()
         if not writefile then
@@ -75,6 +87,7 @@
                 roles = MERCHANT_ROLES,
                 messages = MERCHANT_MESSAGES,
                 enabled = merchantPingEnabled,
+                stockEnabled = merchantStockPingEnabled,
                 webhookUrl = merchantWebhookUrl
             }))
         end)
@@ -117,6 +130,10 @@
 
         if typeof(decoded.enabled) == "boolean" then
             merchantPingEnabled = decoded.enabled
+        end
+
+        if typeof(decoded.stockEnabled) == "boolean" then
+            merchantStockPingEnabled = decoded.stockEnabled
         end
 
         if typeof(decoded.webhookUrl) == "string" then
@@ -688,6 +705,15 @@
         saveMerchantRoles()
     end)
 
+    Tabs.Merchants:AddToggle("MerchantStockPingEnabledToggle", {
+        Title = "include merchant stock in ping",
+        Description = "adds detected stock list to merchant spawn message",
+        Default = merchantStockPingEnabled
+    }):OnChanged(function(value)
+        merchantStockPingEnabled = value
+        saveMerchantRoles()
+    end)
+
     Tabs.Merchants:AddInput("MerchantWebhookUrl", {
         Title = "webhook url",
         Default = merchantWebhookUrl,
@@ -970,6 +996,112 @@
         return nil
     end
 
+    local function getMerchantDataRemote()
+        local remote = merchantFolder:FindFirstChild("GetData") or merchantFolder:WaitForChild("GetData", 3)
+        if remote and remote:IsA("RemoteFunction") then
+            return remote
+        end
+
+        return nil
+    end
+
+    local function getMerchantProductList(merchantName)
+        if typeof(merchantStore) ~= "table" then
+            return nil
+        end
+
+        local infos = merchantStore.merchant_infos
+        local info = infos and infos[merchantName]
+        local productList = info and info.product_list
+        if typeof(productList) ~= "table" then
+            return nil
+        end
+
+        return productList
+    end
+
+    local function getProductDisplayName(productData, fallbackKey)
+        if typeof(productData) == "table" then
+            local name = productData.ProductName or productData.productName or productData.Name or productData.name
+            if typeof(name) == "string" and name ~= "" then
+                return name
+            end
+        end
+
+        if typeof(fallbackKey) == "string" and fallbackKey ~= "" then
+            return fallbackKey
+        end
+
+        return "Unknown"
+    end
+
+    local function getMerchantStockEntries(merchantName)
+        local remote = getMerchantDataRemote()
+        local productList = getMerchantProductList(merchantName)
+        if not remote or not productList then
+            return nil
+        end
+
+        local entries = {}
+
+        for productIndex, productData in pairs(productList) do
+            local ok, quantityInfo = pcall(function()
+                return remote:InvokeServer("GetShopProductQuantityInfo", merchantName, productIndex)
+            end)
+
+            if ok and quantityInfo ~= nil then
+                local productName = getProductDisplayName(productData, tostring(productIndex))
+                local amount = nil
+
+                if typeof(quantityInfo) == "number" then
+                    amount = math.max(0, math.floor(quantityInfo))
+                elseif typeof(quantityInfo) == "table" then
+                    amount = tonumber(quantityInfo.Amount or quantityInfo.amount or quantityInfo.Quantity or quantityInfo.quantity or quantityInfo.Count or quantityInfo.count)
+                    if amount then
+                        amount = math.max(0, math.floor(amount))
+                    end
+                end
+
+                if amount ~= nil then
+                    entries[#entries + 1] = {
+                        name = productName,
+                        count = amount
+                    }
+                end
+            end
+        end
+
+        table.sort(entries, function(a, b)
+            return string.lower(a.name) < string.lower(b.name)
+        end)
+
+        return entries
+    end
+
+    local function formatMerchantStockSuffix(entries)
+        if not entries or #entries == 0 then
+            return ""
+        end
+
+        local parts = {}
+        local maxItems = 8
+
+        for i, entry in ipairs(entries) do
+            if i > maxItems then
+                parts[#parts + 1] = "+" .. tostring(#entries - maxItems) .. " more"
+                break
+            end
+
+            if entry.count and entry.count > 1 then
+                parts[#parts + 1] = entry.name .. " x" .. tostring(entry.count)
+            else
+                parts[#parts + 1] = entry.name
+            end
+        end
+
+        return " | stock: " .. table.concat(parts, ", ")
+    end
+
     local merchantSpawned = merchantFolder:FindFirstChild("MerchantSpawned") or merchantFolder:WaitForChild("MerchantSpawned", 5)
     if not merchantSpawned or not merchantSpawned:IsA("RemoteEvent") then
         warn("[Merchant] Missing or invalid RemoteEvent: MerchantSpawned")
@@ -994,23 +1126,538 @@
             return
         end
 
+        local stockSuffix = ""
+        if merchantStockPingEnabled and merchantName then
+            local stockEntries = getMerchantStockEntries(merchantName)
+            if stockEntries then
+                stockSuffix = formatMerchantStockSuffix(stockEntries)
+            end
+        end
+
         lastSpawnPingGlobalAt = now
         lastSpawnPingAt[cooldownKey] = now
 
         if merchantName then
             local roleId = MERCHANT_ROLES[merchantName]
-            local message = formatMerchantMessage(merchantName)
+            local message = formatMerchantMessage(merchantName) .. stockSuffix
             if roleId then
                 sendWebhook("<@&" .. roleId .. "> " .. message, roleId)
             else
                 sendWebhook(message)
             end
-            print("[Merchant] Spawned event received for", merchantName)
+            print("[Merchant] Spawned event received for", merchantName, stockSuffix ~= "" and stockSuffix or "")
         else
             local playerName = player and player.Name or "unknown"
-            sendWebhook("merchant spawned unknown type for " .. playerName)
+            sendWebhook("merchant spawned unknown type for " .. playerName .. stockSuffix)
             warn("[Merchant] Spawned event received but merchant type was not recognized.")
         end
     end)
 
     print("[Merchant] Spawn webhook notifier loaded.")
+
+    -- eggs section --
+    local EGG_NAMES = {
+        "point_egg_1",
+        "point_egg_2",
+        "point_egg_3",
+        "point_egg_4",
+        "point_egg_5",
+        "point_egg_6"
+    }
+
+    local eggAutoEnabled = false
+    local eggScannerRunning = false
+    local eggStopRequested = false
+    local eggScanInterval = 1
+
+    local EGG_MOVE_TIMEOUT = 3
+    local EGG_ARRIVAL_RADIUS = 4
+    local EGG_RELAXED_ARRIVAL_RADIUS = 10
+    local EGG_MAX_RETRIES = 5
+    local EGG_PREJUMP_MIN = 1.5
+    local EGG_PREJUMP_MAX = 3.0
+    local EGG_PICKUP_WAIT = 1.25
+    local EGG_BETWEEN_WAIT = 0.15
+    local EGG_PROMPT_ATTEMPTS = 3
+    local EGG_PROMPT_RETRY_DELAY = 0.2
+
+    local function shouldStopEggs()
+        return eggStopRequested or not eggAutoEnabled
+    end
+
+    local function setEggScanInterval(rawValue)
+        local parsed = tonumber(rawValue)
+        if not parsed then
+            warn("[Egg] Invalid scan interval:", rawValue)
+            return
+        end
+
+        eggScanInterval = math.max(0.2, parsed)
+        print("[Egg] Scan interval set to", eggScanInterval)
+    end
+
+    local function getIgnoredEgglandFolder()
+        local biomeHolder = workspace:FindFirstChild("BiomeStructureHolder")
+        if not biomeHolder then
+            return nil
+        end
+
+        return biomeHolder:FindFirstChild("Eggland")
+    end
+
+    local function isIgnoredEggInstance(instance)
+        if not instance then
+            return false
+        end
+
+        local ignoredFolder = getIgnoredEgglandFolder()
+        return ignoredFolder ~= nil and instance:IsDescendantOf(ignoredFolder)
+    end
+
+    local function getEggInstance(eggName)
+        local egg = workspace:FindFirstChild(eggName)
+        if egg and not isIgnoredEggInstance(egg) then
+            return egg
+        end
+
+        for _, child in ipairs(workspace:GetChildren()) do
+            if child.Name == eggName and not isIgnoredEggInstance(child) then
+                return child
+            end
+        end
+
+        for _, descendant in ipairs(workspace:GetDescendants()) do
+            if descendant.Name == eggName and not isIgnoredEggInstance(descendant) then
+                return descendant
+            end
+        end
+
+        return nil
+    end
+
+    local function getEggPart(egg)
+        if not egg then
+            return nil
+        end
+
+        if egg:IsA("BasePart") then
+            return egg
+        end
+
+        if egg:IsA("Model") then
+            if egg.PrimaryPart then
+                return egg.PrimaryPart
+            end
+
+            local part = egg:FindFirstChildWhichIsA("BasePart", true)
+            if part then
+                return part
+            end
+        end
+
+        return nil
+    end
+
+    local function eggPathfindTo(destination, label)
+        if shouldStopEggs() then
+            return false
+        end
+
+        local character = player.Character or player.CharacterAdded:Wait()
+        local humanoid = character:WaitForChild("Humanoid")
+        local root = character:WaitForChild("HumanoidRootPart")
+
+        humanoid.AutoJumpEnabled = true
+        humanoid.UseJumpPower = true
+        humanoid.JumpPower = 56
+
+        local rayParams = RaycastParams.new()
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        rayParams.FilterDescendantsInstances = { character }
+
+        local function atDestination(strict)
+            local radius = strict and EGG_ARRIVAL_RADIUS or EGG_RELAXED_ARRIVAL_RADIUS
+            return (root.Position - destination).Magnitude <= radius
+        end
+
+        local function forceJump()
+            humanoid.Jump = true
+            humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+        end
+
+        local function jumpRecovery()
+            for _ = 1, 2 do
+                if shouldStopEggs() then
+                    return
+                end
+                forceJump()
+                task.wait(0.08)
+            end
+        end
+
+        local function lowObstacleAhead()
+            local result = workspace:Raycast(
+                root.Position + Vector3.new(0, 2, 0),
+                root.CFrame.LookVector * 5,
+                rayParams
+            )
+
+            if not result or not result.Instance or not result.Instance.CanCollide then
+                return false
+            end
+
+            local part = result.Instance
+            local topY = part.Position.Y + part.Size.Y * 0.5
+            local feetY = root.Position.Y - 3
+            local climb = topY - feetY
+            return climb >= EGG_PREJUMP_MIN and climb <= 6.5
+        end
+
+        local function waitMove(timeout)
+            local finished = false
+            local reached = false
+            local conn = humanoid.MoveToFinished:Connect(function(ok)
+                finished = true
+                reached = ok
+            end)
+
+            local deadline = time() + timeout
+            while not finished and time() < deadline do
+                if shouldStopEggs() then
+                    break
+                end
+                task.wait()
+            end
+
+            conn:Disconnect()
+            return finished and reached
+        end
+
+        local function moveTo(position)
+            humanoid:MoveTo(position)
+            return waitMove(EGG_MOVE_TIMEOUT)
+        end
+
+        local function buildPath()
+            local path = PathfindingService:CreatePath({
+                AgentRadius = 1.5,
+                AgentHeight = 5,
+                AgentCanJump = true,
+                AgentJumpHeight = 14,
+                AgentMaxSlope = 45,
+                WaypointSpacing = 2
+            })
+
+            path:ComputeAsync(root.Position, destination)
+            return path
+        end
+
+        local retries = 0
+        while retries <= EGG_MAX_RETRIES and not atDestination(true) do
+            if shouldStopEggs() then
+                warn(label, "stopped.")
+                return false
+            end
+
+            local path = buildPath()
+            local ok = false
+
+            if path.Status == Enum.PathStatus.Success then
+                ok = true
+                local waypoints = path:GetWaypoints()
+
+                if #waypoints == 0 then
+                    forceJump()
+                    ok = moveTo(destination)
+                else
+                    for _, waypoint in ipairs(waypoints) do
+                        if shouldStopEggs() then
+                            warn(label, "stopped.")
+                            return false
+                        end
+
+                        local dy = waypoint.Position.Y - root.Position.Y
+                        if waypoint.Action == Enum.PathWaypointAction.Jump
+                            or (dy >= EGG_PREJUMP_MIN and dy <= EGG_PREJUMP_MAX)
+                            or lowObstacleAhead() then
+                            forceJump()
+                        end
+
+                        if not moveTo(waypoint.Position) then
+                            forceJump()
+                            ok = false
+                            break
+                        end
+
+                        if atDestination(true) then
+                            ok = true
+                            break
+                        end
+                    end
+                end
+            else
+                forceJump()
+                ok = moveTo(destination)
+            end
+
+            if ok or atDestination(true) then
+                break
+            end
+
+            retries += 1
+            if retries <= EGG_MAX_RETRIES then
+                jumpRecovery()
+            end
+        end
+
+        local reached = atDestination(true) or atDestination(false)
+        if reached then
+            print(label, atDestination(true) and "arrived." or "arrived (relaxed check).")
+        elseif retries > EGG_MAX_RETRIES then
+            warn(label, "stopped after max retries.")
+        else
+            warn(label, "stopped before arrival.")
+        end
+
+        return reached
+    end
+
+    local function holdEggPrompt(prompt)
+        local holdTime = tonumber(prompt and prompt.HoldDuration) or 0
+        holdTime = math.max(holdTime, 0.25)
+
+        if typeof(prompt) == "Instance" and prompt:IsA("ProximityPrompt") then
+            local ok = pcall(function()
+                prompt:FireProximityPrompt(holdTime + 0.1)
+            end)
+
+            if ok then
+                return true
+            end
+
+            local held = pcall(function()
+                prompt:InputHoldBegin()
+                task.wait(holdTime)
+                prompt:InputHoldEnd()
+            end)
+
+            if held then
+                return true
+            end
+        end
+
+        local began = false
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+            began = true
+        end)
+
+        if began then
+            local deadline = time() + holdTime
+            while time() < deadline do
+                if shouldStopEggs() then
+                    break
+                end
+                task.wait()
+            end
+
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+            end)
+
+            pcall(function()
+                VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+                task.wait(0.12)
+                VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+            end)
+
+            return true
+        end
+
+        return false
+    end
+
+    local function triggerEggPrompts(egg)
+        local found = false
+        local success = false
+
+        for _, descendant in ipairs(egg:GetDescendants()) do
+            if descendant:IsA("ProximityPrompt") then
+                found = true
+                local ok = false
+                pcall(function()
+                    ok = holdEggPrompt(descendant)
+                end)
+                if ok then
+                    success = true
+                end
+            end
+        end
+
+        return found, success
+    end
+
+    local function fallbackEggPickup(egg)
+        local clicked = false
+        if typeof(fireclickdetector) == "function" then
+            for _, descendant in ipairs(egg:GetDescendants()) do
+                if descendant:IsA("ClickDetector") then
+                    pcall(function()
+                        fireclickdetector(descendant)
+                    end)
+                    clicked = true
+                end
+            end
+        end
+
+        if typeof(firetouchinterest) == "function" then
+            local part = getEggPart(egg)
+            local character = player.Character
+            local root = character and character:FindFirstChild("HumanoidRootPart")
+            if root and part then
+                pcall(function()
+                    firetouchinterest(root, part, 0)
+                    firetouchinterest(root, part, 1)
+                end)
+            end
+        end
+
+        return clicked
+    end
+
+    local function collectEgg(egg)
+        if shouldStopEggs() or not egg or not egg.Parent then
+            return false
+        end
+
+        local part = getEggPart(egg)
+        if not part then
+            return false
+        end
+
+        local target = part.Position + Vector3.new(0, 2.5, 0)
+        if not eggPathfindTo(target, "[Egg] Path") then
+            return false
+        end
+
+        local attempt = 0
+        while attempt < EGG_PROMPT_ATTEMPTS and egg.Parent do
+            if shouldStopEggs() then
+                return false
+            end
+
+            attempt += 1
+            local foundPrompt, promptSuccess = triggerEggPrompts(egg)
+            if not foundPrompt then
+                fallbackEggPickup(egg)
+            end
+
+            if not egg.Parent then
+                return true
+            end
+
+            task.wait(promptSuccess and EGG_PICKUP_WAIT or EGG_PROMPT_RETRY_DELAY)
+        end
+
+        local start = time()
+        while time() - start < EGG_PICKUP_WAIT do
+            if shouldStopEggs() then
+                return false
+            end
+
+            if not egg.Parent then
+                return true
+            end
+
+            task.wait()
+        end
+
+        return not egg.Parent
+    end
+
+    local function collectAllEggs()
+        local seen = {}
+        local collected = 0
+
+        for _, eggName in ipairs(EGG_NAMES) do
+            if shouldStopEggs() then
+                return collected
+            end
+
+            local egg = getEggInstance(eggName)
+            if egg and not seen[egg] then
+                seen[egg] = true
+                print("[Egg] Heading to", eggName)
+                if collectEgg(egg) then
+                    collected += 1
+                end
+                task.wait(EGG_BETWEEN_WAIT)
+            end
+        end
+
+        return collected
+    end
+
+    local function runEggScanner()
+        if eggScannerRunning then
+            return
+        end
+
+        eggScannerRunning = true
+        task.spawn(function()
+            while eggAutoEnabled and not eggStopRequested do
+                local collectedThisScan = collectAllEggs()
+                if collectedThisScan > 0 then
+                    print("[Egg] Scan complete. Collected:", collectedThisScan)
+                end
+
+                local deadline = time() + eggScanInterval
+                while time() < deadline do
+                    if shouldStopEggs() then
+                        break
+                    end
+                    task.wait()
+                end
+            end
+
+            eggScannerRunning = false
+            if eggStopRequested then
+                print("[Egg] Scanner stopped by user.")
+            else
+                print("[Egg] Scanner stopped.")
+            end
+        end)
+    end
+
+    local function setEggAutoEnabled(enabled, source)
+        eggAutoEnabled = enabled
+        eggStopRequested = not enabled
+        print("[Egg] Auto collector", eggAutoEnabled and "ENABLED" or "DISABLED", source and ("(" .. source .. ")") or "")
+
+        if eggAutoEnabled then
+            runEggScanner()
+        end
+    end
+
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if gameProcessed then
+            return
+        end
+
+        if input.KeyCode == Enum.KeyCode.T and eggAutoEnabled then
+            setEggAutoEnabled(false, "T key")
+        end
+    end)
+
+    Tabs.Eggs:AddParagraph({
+        Title = "egg collector",
+        Content = "one click toggle: on to run, off to stop"
+    })
+
+    Tabs.Eggs:AddToggle("EggAutoCollectorToggle", {
+        Title = "auto egg collector",
+        Description = "one click on/off",
+        Default = eggAutoEnabled
+    }):OnChanged(function(value)
+        setEggAutoEnabled(value, "ui")
+    end)
