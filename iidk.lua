@@ -4,8 +4,8 @@ local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/d
 local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/dawid-scripts/Fluent/master/Addons/InterfaceManager.lua"))()
 
 local Window = Fluent:CreateWindow({
-    Title = "juanaeglebalimyspininblablablahubyaheard",
-    SubTitle = "feesh and doop",
+    Title = "juan hub",
+    SubTitle = "feeshing dooping and egging ya",
     TabWidth = 160,
     Size = UDim2.fromOffset(580, 460),
     Acrylic = false,
@@ -26,6 +26,7 @@ local PathfindingService = game:GetService("PathfindingService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 
 local Fishing = require(ReplicatedStorage.Packets.Fishing)
+local rollp = require(game:GetService("ReplicatedStorage"):WaitForChild("Packets"):WaitForChild("Rolling"))
 local player = Players.LocalPlayer
 
 local isFishing = false
@@ -38,9 +39,9 @@ local totalFishCaught = 0
 local cycleFishCaught = 0
 local targetFishCount = 1
 local fishByType = {}
-local autoFishToggle = nil
 local currentFishingSpotId = nil
-local lastStartAttempt = 0
+local rollpLoopEnabled = false
+local rollpLoopRunning = false
 
 local SELL_DESTINATION = Vector3.new(100.5, 107.5, -296.75)
 local RETURN_DESTINATION = Vector3.new(55, 97.5000153, -280)
@@ -52,6 +53,9 @@ local RELAXED_ARRIVAL_RADIUS = 10
 local PREJUMP_MIN = 1.5
 local PREJUMP_MAX = 3.0
 local START_RETRY_DELAY = 0.7
+local STALE_FISHING_TIMEOUT = 8
+local lastStartAttempt = 0
+local lastFishingActivity = time()
 
 local AllFishes = {
     "Tire", "Rusty Can", "Old Boot",
@@ -92,6 +96,7 @@ end
 local function setAutoFishEnabled(enabled, source)
     autoFishEnabled = enabled
     print("[Fishing] Auto-fishing", autoFishEnabled and "ENABLED" or "DISABLED", source and ("(" .. source .. ")") or "")
+    lastFishingActivity = time()
 
     if not autoFishEnabled and isFishing then
         Fishing.quit.send()
@@ -99,6 +104,7 @@ local function setAutoFishEnabled(enabled, source)
 
     if not autoFishEnabled then
         isFishing = false
+        lastStartAttempt = 0
     end
 end
 
@@ -110,9 +116,7 @@ local function setTargetFishCount(rawValue)
     end
 
     targetFishCount = math.max(0, math.floor(parsed))
-    cycleFishCaught = 0
     player:SetAttribute("FishTargetCount", targetFishCount)
-    player:SetAttribute("FishCaughtCycle", cycleFishCaught)
     print("[Fishing] Target fish count set to", targetFishCount)
 end
 
@@ -157,100 +161,24 @@ local function getSpotById(spotId)
 end
 
 local function resolveFishingSpotId()
-    local nearestSpotId = select(1, findSpot(20))
-    if nearestSpotId then
-        return nearestSpotId
+    local nearby = select(1, findSpot(20))
+    if nearby then
+        return nearby
     end
 
     local currentSpot = getSpotById(currentFishingSpotId)
     if currentSpot then
-        local char = player.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        if root then
-            local dist = (currentSpot:GetPivot().Position - root.Position).Magnitude
-            if dist <= 35 then
-                return currentFishingSpotId
-            end
-        end
+        return currentFishingSpotId
     end
 
-    return select(1, findSpot(nil))
-end
-
-local function startFishingLoop()
-    if not autoFishEnabled or cycleInTransit or isFishing then
-        return false
+    local anyUnoccupied = select(1, findSpot(nil))
+    if anyUnoccupied then
+        return anyUnoccupied
     end
 
-    if time() - lastStartAttempt < START_RETRY_DELAY then
-        return false
-    end
-
-    local id = resolveFishingSpotId()
-    if not id then
-        return false
-    end
-
-    currentFishingSpotId = id
-    lastStartAttempt = time()
-    Fishing.start.send(id)
-    return true
-end
-
-local function clickCloseButton()
-    task.wait(0.5)
-
-    local playerGui = player:FindFirstChild("PlayerGui")
-    local mainInterface = playerGui and playerGui:FindFirstChild("MainInterface")
-    if not mainInterface then
-        return false
-    end
-
-    local function tryClickButton()
-        local ok, target = pcall(function()
-            return mainInterface:GetChildren()[61]:GetChildren()[7].ImageButton
-        end)
-
-        if not ok or not target then
-            return false
-        end
-
-        if not target:IsA("GuiButton") then
-            local ancestor = target
-            while ancestor and not ancestor:IsA("GuiButton") do
-                ancestor = ancestor.Parent
-            end
-            target = ancestor
-        end
-
-        if not target or not target:IsA("GuiButton") then
-            return false
-        end
-
-        local center = target.AbsolutePosition + (target.AbsoluteSize / 2)
-
-        if typeof(mousemoveabs) == "function" and typeof(mouse1click) == "function" then
-            mousemoveabs(center.X, center.Y)
-            task.wait(0.08)
-            mouse1click()
-            return true
-        end
-
-        VirtualInputManager:SendMouseMoveEvent(center.X, center.Y, 0)
-        VirtualInputManager:SendMouseButtonEvent(center.X, center.Y, 0, true, game, 0)
-        task.wait(0.1)
-        VirtualInputManager:SendMouseButtonEvent(center.X, center.Y, 0, false, game, 0)
-        return true
-    end
-
-    for _ = 1, 3 do
-        if tryClickButton() then
-            return true
-        end
-        task.wait(0.15)
-    end
-
-    return false
+    local points = workspace.Map.Miscs.FishingPoints:GetChildren()
+    local fallbackSpot = points[1]
+    return fallbackSpot and fallbackSpot:GetAttribute("spotId") or nil
 end
 
 local function pathfindTo(destination, label)
@@ -284,7 +212,6 @@ local function pathfindTo(destination, label)
     local function forceJump()
         humanoid.Jump = true
         humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
-        return true
     end
 
     local function jumpRecovery()
@@ -422,9 +349,12 @@ end
 
 local function runSellSequence()
     print("[Fishing] Selling fish inventory...")
-    for _, fishName in ipairs(AllFishes) do
+    for i, fishName in ipairs(AllFishes) do
         Fishing.sellAllFish.send(fishName)
         Fishing.sellAllFishConfirm.send(true)
+        if i % 10 == 0 then
+            task.wait()
+        end
     end
     print("[Fishing] Sell sequence complete.")
 end
@@ -437,28 +367,34 @@ local function runSellCycle()
     local shouldResumeAutoFish = autoFishEnabled
 
     cycleInTransit = true
-    setAutoFishEnabled(false, "sell cycle")
-    isFishing = false
-    currentFishingSpotId = nil
-    lastStartAttempt = 0
-    Fishing.quit.send()
+    local ok, err = pcall(function()
+        setAutoFishEnabled(false, "sell cycle")
+        isFishing = false
+        lastStartAttempt = 0
+        currentFishingSpotId = nil
+        Fishing.quit.send()
 
-    local reachedSeller = pathfindTo(SELL_DESTINATION, "[Pathfinding] Seller path")
-    if reachedSeller then
-        runSellSequence()
-        pathfindTo(RETURN_DESTINATION, "[Pathfinding] Return path")
+        local reachedSeller = pathfindTo(SELL_DESTINATION, "[Pathfinding] Seller path")
+        if reachedSeller then
+            runSellSequence()
+            pathfindTo(RETURN_DESTINATION, "[Pathfinding] Return path")
+        end
+
+        cycleFishCaught = 0
+        player:SetAttribute("FishCaughtCycle", cycleFishCaught)
+    end)
+
+    cycleInTransit = false
+    pathfindingBusy = false
+    stopPathfinding = false
+
+    if not ok then
+        warn("[Fishing] Sell cycle error:", err)
     end
 
-    cycleFishCaught = 0
-    player:SetAttribute("FishCaughtCycle", cycleFishCaught)
-    cycleInTransit = false
-
     if shouldResumeAutoFish then
-        setAutoFishEnabled(true, "sell cycle complete")
+        setAutoFishEnabled(true, ok and "sell cycle complete" or "sell cycle recovered")
         print("[Fishing] Resuming auto-fishing.")
-        task.delay(0.2, function()
-            startFishingLoop()
-        end)
     else
         print("[Fishing] Sell cycle complete. Auto-fishing remains off.")
     end
@@ -477,11 +413,25 @@ local function onFishCaught(data)
     print("[Fishing] Fish caught:", fishName)
     print("[Fishing] Total:", totalFishCaught, "| Cycle:", cycleFishCaught, "|", fishName .. ":", fishByType[fishName])
 
-    if cycleFishCaught >= targetFishCount and not cycleInTransit then
+    if autoFishEnabled and targetFishCount > 0 and cycleFishCaught >= targetFishCount and not cycleInTransit then
         task.spawn(runSellCycle)
     end
 end
 
+local function runRollpLoop()
+    if rollpLoopRunning then
+        return
+    end
+
+    rollpLoopRunning = true
+    while rollpLoopEnabled do
+        rollp.SendResponse.send(1)
+        task.wait(0.001)
+    end
+    rollpLoopRunning = false
+end
+
+-- Input controls
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then
         return
@@ -493,36 +443,38 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end
 end)
 
+-- Fishing events
 Fishing.beginFishing.listen(function()
     isFishing = true
     lastStartAttempt = 0
+    lastFishingActivity = time()
 end)
 
 Fishing.beginNetFishing.listen(function()
     isFishing = true
     lastStartAttempt = 0
+    lastFishingActivity = time()
 end)
 
 Fishing.reward.listen(function(data)
     onFishCaught(data)
-    task.spawn(clickCloseButton)
     isFishing = false
     lastStartAttempt = 0
-
-    task.delay(0.2, function()
-        startFishingLoop()
-    end)
+    lastFishingActivity = time()
 end)
 
 Fishing.quit.listen(function()
     isFishing = false
     lastStartAttempt = 0
+    lastFishingActivity = time()
 end)
 
 Fishing.playGame.listen(function(data)
     if not autoFishEnabled or cycleInTransit then
         return
     end
+
+    lastFishingActivity = time()
 
     local endTime = tonumber(data.endTimestamp)
     if not endTime then
@@ -540,18 +492,53 @@ Fishing.playGame.listen(function(data)
     Fishing.gameResult.send(true)
 end)
 
+-- Old stable loop (kept simple)
 task.spawn(function()
     while true do
         task.wait(0.5)
 
-        startFishingLoop()
+        if autoFishEnabled and not isFishing and not cycleInTransit then
+            if time() - lastStartAttempt < START_RETRY_DELAY then
+                continue
+            end
+
+            local id = resolveFishingSpotId()
+            if id then
+                currentFishingSpotId = id
+                lastStartAttempt = time()
+                lastFishingActivity = time()
+                Fishing.start.send(id)
+            end
+        end
     end
 end)
 
--- m ain tab
-autoFishToggle = Tabs.Main:AddToggle("AutoFishToggle", {
-    Title = "Auto Fish",
-    Description = "what the fuck do you think this does :sob:",
+task.spawn(function()
+    while true do
+        task.wait(1)
+
+        if not autoFishEnabled or cycleInTransit then
+            continue
+        end
+
+        if isFishing and (time() - lastFishingActivity) > STALE_FISHING_TIMEOUT then
+            warn("[Fishing] Stale fishing state detected, recovering.")
+            isFishing = false
+            lastStartAttempt = 0
+            lastFishingActivity = time()
+        end
+    end
+end)
+
+-- MAIN TAB UI
+Tabs.Main:AddParagraph({
+    Title = "feesh",
+    Content = "set the amount then enable ez"
+})
+
+local autoFishToggle = Tabs.Main:AddToggle("AutoFishToggle", {
+    Title = "auto fish",
+    Description = "auto fishes duhh",
     Default = autoFishEnabled
 })
 
@@ -570,44 +557,43 @@ local targetInput = Tabs.Main:AddInput("FishTargetCount", {
     end
 })
 
-local function runJuanFeature()
-    local rolling = require(game:GetService("ReplicatedStorage"):WaitForChild("Packets"):WaitForChild("Rolling"))
-    rolling.SendResponse.send(1)
-end
-
-local juanLoopEnabled = false
-
-local function runJuanLoop()
-    local rolling = require(game:GetService("ReplicatedStorage"):WaitForChild("Packets"):WaitForChild("Rolling"))
-
-    while juanLoopEnabled do
-        rolling.SendResponse.send(1)
-        task.wait(0.001)
+targetInput:OnChanged(function()
+    if tonumber(targetInput.Value) then
+        setTargetFishCount(targetInput.Value)
     end
-end
+end)
 
 Tabs.Main:AddButton({
-    Title = "Doopr",
-    Description = "DOOPS THE LAST AURA U ROLLED",
+    Title = "if u just wanna sell it will pathfind to fisherman sam",
+    Description = "title",
     Callback = function()
-        runJuanFeature()
+        task.spawn(runSellCycle)
     end
 })
 
-Tabs.Main:AddToggle("JuanLoopToggle", {
-    Title = "dooping loop",
-    Description = "LOOP DOOPS THE LAST AURA U ROLLED VERY VERY VERY FAST BTW WARNIGN",
+Tabs.Main:AddButton({
+    Title = "doops the current aura",
+    Description = "doop",
+    Callback = function()
+        rollp.SendResponse.send(1)
+    end
+})
+
+Tabs.Main:AddToggle("DoopLoopToggle", {
+    Title = "doop loop",
+    Description = "super very super fast doop loop oke thx be careful",
     Default = false
 }):OnChanged(function(value)
-    juanLoopEnabled = value
-    if juanLoopEnabled then
-        task.spawn(runJuanLoop)
+    rollpLoopEnabled = value
+
+    if rollpLoopEnabled then
+        task.spawn(runRollpLoop)
     end
 end)
 
 Fluent:Notify({
     Title = "Fishing Script",
-    Content = "Loaded. Configure target and enable Auto Fish. ( it didnt load shit)",
+    Content = "Loaded. Configure target and enable Auto Fish.",
     Duration = 6
 })
 
