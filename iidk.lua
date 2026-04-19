@@ -647,7 +647,7 @@
     end)
 
     Tabs.Main:AddButton({
-        Title = "if u just wanna sell it will pathfind to fisherman sam",
+        Title = "if you want to sell without waiting for target count enable this",
         Description = "title",
         Callback = function()
             task.spawn(runSellCycle)
