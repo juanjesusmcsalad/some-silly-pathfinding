@@ -31,6 +31,64 @@
     local Fishing = require(ReplicatedStorage.Packets.Fishing)
     local rollp = require(game:GetService("ReplicatedStorage"):WaitForChild("Packets"):WaitForChild("Rolling"))
     local player = Players.LocalPlayer
+    local runSellCycle
+    local inventoryFishCount = 0
+    local inventoryReady = false
+    local inventoryAmounts = {}
+
+    local InventoryPackets = nil
+    do
+        local ok, result = pcall(function()
+            return require(ReplicatedStorage.Packets.Inventory)
+        end)
+        if ok then
+            InventoryPackets = result
+        else
+            local fallbackOk, fallbackResult = pcall(function()
+                return require(ReplicatedStorage:WaitForChild("Packets"):WaitForChild("Inventory"))
+            end)
+            if fallbackOk then
+                InventoryPackets = fallbackResult
+            else
+                warn("[Fishing] Inventory packet module not found, using catch-count fallback.")
+            end
+        end
+    end
+
+    local function recalcInventoryFishCount()
+        local total = 0
+        for _, amount in pairs(inventoryAmounts) do
+            if typeof(amount) == "number" and amount > 0 then
+                total += amount
+            end
+        end
+        inventoryFishCount = total
+    end
+
+    if InventoryPackets and InventoryPackets.UpdateItem and InventoryPackets.UpdateItem.listen then
+        InventoryPackets.UpdateItem.listen(function(payload)
+            local value = payload and payload.value
+            if typeof(value) ~= "table" then
+                return
+            end
+
+            local itemName = value.itemName
+            local amount = value.amount
+
+            if typeof(itemName) ~= "string" or typeof(amount) ~= "number" then
+                return
+            end
+
+            if amount <= 0 then
+                inventoryAmounts[itemName] = nil
+            else
+                inventoryAmounts[itemName] = amount
+            end
+
+            recalcInventoryFishCount()
+            inventoryReady = true
+        end)
+    end
 
     local isFishing = false
     local autoFishEnabled = false
@@ -191,6 +249,8 @@
         if not autoFishEnabled then
             isFishing = false
             lastStartAttempt = 0
+        elseif inventoryReady and targetFishCount > 0 and not cycleInTransit and inventoryFishCount >= targetFishCount then
+            task.spawn(runSellCycle)
         end
     end
 
@@ -203,7 +263,7 @@
 
         targetFishCount = math.max(0, math.floor(parsed))
         player:SetAttribute("FishTargetCount", targetFishCount)
-        print("[Fishing] Target fish count set to", targetFishCount)
+        print("[Fishing] Target inventory fish count set to", targetFishCount)
     end
 
     local function findSpot(maxDistance)
@@ -445,7 +505,7 @@
         print("[Fishing] Sell sequence complete.")
     end
 
-    local function runSellCycle()
+    runSellCycle = function()
         if cycleInTransit then
             return
         end
@@ -497,9 +557,13 @@
         player:SetAttribute("FishCaught_" .. fishName, fishByType[fishName])
 
         print("[Fishing] Fish caught:", fishName)
-        print("[Fishing] Total:", totalFishCaught, "| Cycle:", cycleFishCaught, "|", fishName .. ":", fishByType[fishName])
+        local liveInventoryCount = inventoryReady and inventoryFishCount or cycleFishCaught
+        print("[Fishing] Total:", totalFishCaught, "| Cycle:", cycleFishCaught, "| Inventory:", liveInventoryCount, "|", fishName .. ":", fishByType[fishName])
 
-        if autoFishEnabled and targetFishCount > 0 and cycleFishCaught >= targetFishCount and not cycleInTransit then
+        local shouldSellByInventory = inventoryReady and inventoryFishCount >= targetFishCount
+        local shouldSellByFallback = (not inventoryReady) and cycleFishCaught >= targetFishCount
+
+        if autoFishEnabled and targetFishCount > 0 and not cycleInTransit and (shouldSellByInventory or shouldSellByFallback) then
             task.spawn(runSellCycle)
         end
     end
@@ -635,7 +699,7 @@
     end)
 
     local targetInput = Tabs.Main:AddInput("FishTargetCount", {
-        Title = "amount of fish b4 selling",
+        Title = "inventory fish b4 selling",
         Default = tostring(targetFishCount),
         Placeholder = "Enter 0 or more",
         Numeric = true,
