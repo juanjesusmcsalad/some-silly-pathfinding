@@ -35,6 +35,38 @@
     local inventoryFishCount = 0
     local inventoryReady = false
     local inventoryAmounts = {}
+    local inventoryUiReady = false
+
+    local function getFishInventoryCapacity()
+        local current, max = 0, 0
+        local playerGui = Players.LocalPlayer:FindFirstChild("PlayerGui")
+        local main = playerGui and playerGui:FindFirstChild("MainInterface")
+
+        if not main then
+            return current, max
+        end
+
+        for _, v in pairs(main:GetDescendants()) do
+            if v:IsA("TextLabel") and v.Text and v.Text:find("Inventory %[") then
+                local capturedCurrent, capturedMax = v.Text:match("(%d+)%s*/%s*(%d+)")
+                current = tonumber(capturedCurrent) or 0
+                max = tonumber(capturedMax) or 0
+                inventoryUiReady = true
+                break
+            end
+        end
+
+        return current, max
+    end
+
+    local function getInventoryCount()
+        local current = getFishInventoryCapacity()
+        if inventoryUiReady and current and current > 0 then
+            return current
+        end
+
+        return inventoryFishCount
+    end
 
     local InventoryPackets = nil
     do
@@ -249,7 +281,7 @@
         if not autoFishEnabled then
             isFishing = false
             lastStartAttempt = 0
-        elseif inventoryReady and targetFishCount > 0 and not cycleInTransit and inventoryFishCount >= targetFishCount then
+        elseif targetFishCount > 0 and not cycleInTransit and getInventoryCount() >= targetFishCount then
             task.spawn(runSellCycle)
         end
     end
@@ -557,13 +589,10 @@
         player:SetAttribute("FishCaught_" .. fishName, fishByType[fishName])
 
         print("[Fishing] Fish caught:", fishName)
-        local liveInventoryCount = inventoryReady and inventoryFishCount or cycleFishCaught
+        local liveInventoryCount = getInventoryCount()
         print("[Fishing] Total:", totalFishCaught, "| Cycle:", cycleFishCaught, "| Inventory:", liveInventoryCount, "|", fishName .. ":", fishByType[fishName])
 
-        local shouldSellByInventory = inventoryReady and inventoryFishCount >= targetFishCount
-        local shouldSellByFallback = (not inventoryReady) and cycleFishCaught >= targetFishCount
-
-        if autoFishEnabled and targetFishCount > 0 and not cycleInTransit and (shouldSellByInventory or shouldSellByFallback) then
+        if autoFishEnabled and targetFishCount > 0 and not cycleInTransit and getInventoryCount() >= targetFishCount then
             task.spawn(runSellCycle)
         end
     end
