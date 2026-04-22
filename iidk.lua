@@ -135,6 +135,12 @@
     local currentFishingSpotId = nil
     local rollpLoopEnabled = false
     local rollpLoopRunning = false
+    local autoEggPathEnabled = false
+    local autoEggPathRunning = false
+    local autoEggPathPause = 0.4
+    local AUTO_EGG_MAX_DISTANCE = 500
+    local AUTO_EGG_RETRY_COOLDOWN = 20
+    local autoEggSkipUntil = {}
     local timingRng = Random.new()
 
     local merchantConfigDir = "FluentScriptHub"
@@ -151,6 +157,11 @@
     }
     local merchantPingEnabled = true
     local merchantWebhookUrl = ""
+    local merchantAutoBuyProductId = ""
+    local merchantAutoBuyAmount = 1
+    local merchantAutoBuyEnabled = false
+    local merchantAutoBuyRunning = false
+    local merchantAutoBuyInterval = 1.5
 
     local function saveMerchantRoles()
         if not writefile then
@@ -230,6 +241,8 @@
     local STALE_FISHING_TIMEOUT = 8
     local MIN_RESULT_THRESHOLD = 1.3
     local MAX_RESULT_THRESHOLD = 1.4
+    local JUMP_COOLDOWN = 0.25
+    local PATH_RESET_TIMEOUT = 120
     local lastStartAttempt = 0
     local lastFishingActivity = time()
 
@@ -365,10 +378,12 @@
         end
 
         pathfindingBusy = true
+        local pathStartedAt = time()
 
         local character = player.Character or player.CharacterAdded:Wait()
         local humanoid = character:WaitForChild("Humanoid")
         local root = character:WaitForChild("HumanoidRootPart")
+        local lastJumpAt = 0
 
         humanoid.AutoJumpEnabled = true
         humanoid.UseJumpPower = true
@@ -387,7 +402,17 @@
             return (root.Position - destination).Magnitude <= radius
         end
 
+        local function pathTimedOut()
+            return (time() - pathStartedAt) >= PATH_RESET_TIMEOUT
+        end
+
         local function forceJump()
+            local now = time()
+            if (now - lastJumpAt) < JUMP_COOLDOWN then
+                return
+            end
+
+            lastJumpAt = now
             humanoid.Jump = true
             humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
         end
@@ -430,7 +455,7 @@
 
             local deadline = time() + timeout
             while not finished and time() < deadline do
-                if cancelled() then
+                if cancelled() or pathTimedOut() then
                     break
                 end
                 task.wait()
@@ -460,6 +485,11 @@
 
         local retries = 0
         while retries <= MAX_RETRIES and not cancelled() and not atDestination(true) do
+            if pathTimedOut() then
+                warn(label, "reset after timeout.")
+                break
+            end
+
             local path = buildPath()
             local ok = false
 
@@ -472,7 +502,7 @@
                     ok = moveTo(destination)
                 else
                     for _, waypoint in ipairs(waypoints) do
-                        if cancelled() then
+                        if cancelled() or pathTimedOut() then
                             ok = false
                             break
                         end
@@ -608,6 +638,226 @@
             task.wait(0.001)
         end
         rollpLoopRunning = false
+    end
+
+    local function getIgnoredEgglandFolder()
+        local holder = workspace:FindFirstChild("BiomeStructureHolder")
+        return holder and holder:FindFirstChild("Eggland") or nil
+    end
+
+    local function isIgnoredEgglandDescendant(inst)
+        if not inst then
+            return false
+        end
+
+        local ignoredFolder = getIgnoredEgglandFolder()
+        return ignoredFolder ~= nil and inst:IsDescendantOf(ignoredFolder)
+    end
+
+    local function getValidEggModels()
+        local validModels = {}
+        pcall(function()
+            local eggRegistry = game:GetService("ReplicatedStorage"):FindFirstChild("Assets")
+            if eggRegistry then
+                eggRegistry = eggRegistry:FindFirstChild("EasterEvent2026")
+            end
+            if eggRegistry then
+                eggRegistry = eggRegistry:FindFirstChild("Eggs")
+            end
+            if eggRegistry then
+                for _, eggModel in ipairs(eggRegistry:GetChildren()) do
+                    validModels[eggModel.Name] = true
+                end
+                if #validModels > 0 then
+                    print("[Auto Egg] Loaded", #validModels, "valid egg models from registry")
+                end
+            end
+        end)
+        return validModels
+    end
+
+    local validEggModels = getValidEggModels()
+
+    local function isValidEggPoint(eggPoint)
+        if next(validEggModels) == nil then
+            return true
+        end
+
+        for modelName, _ in pairs(validEggModels) do
+            if eggPoint.Name == modelName or eggPoint.Parent.Name == modelName then
+                return true
+            end
+        end
+        return false
+    end
+
+    local function collectEggPoints()
+        local points = {}
+        local character = player.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        local now = time()
+
+        for _, inst in ipairs(workspace:GetDescendants()) do
+            if inst:IsA("BasePart")
+                and inst.Name:match("^point_egg_%d+$")
+                and not isIgnoredEgglandDescendant(inst)
+                and isValidEggPoint(inst) then
+                local key = inst:GetFullName()
+                local blockedUntil = autoEggSkipUntil[key] or 0
+
+                if blockedUntil <= now then
+                    if not root or (inst.Position - root.Position).Magnitude <= AUTO_EGG_MAX_DISTANCE then
+                        table.insert(points, inst)
+                    end
+                end
+            end
+        end
+
+        return points
+    end
+
+    local function markEggPointRetryCooldown(eggPoint)
+        autoEggSkipUntil[eggPoint:GetFullName()] = time() + AUTO_EGG_RETRY_COOLDOWN
+    end
+
+    local function canReachEggPoint(eggPoint)
+        local character = player.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if not root then
+            return true
+        end
+
+        if (eggPoint.Position - root.Position).Magnitude > AUTO_EGG_MAX_DISTANCE then
+            return false
+        end
+
+        local probePath = PathfindingService:CreatePath({
+            AgentRadius = 1.5,
+            AgentHeight = 5,
+            AgentCanJump = true,
+            AgentJumpHeight = 14,
+            AgentMaxSlope = 45,
+            WaypointSpacing = 2
+        })
+
+        local ok = pcall(function()
+            probePath:ComputeAsync(root.Position, eggPoint.Position)
+        end)
+
+        return ok and probePath.Status == Enum.PathStatus.Success
+    end
+
+    local function popNearestEggPoint(points)
+        local character = player.Character
+        local root = character and character:FindFirstChild("HumanoidRootPart")
+        if not root then
+            return table.remove(points, 1)
+        end
+
+        local nearestIndex = 1
+        local nearestDistance = math.huge
+
+        for i, eggPoint in ipairs(points) do
+            local dist = (eggPoint.Position - root.Position).Magnitude
+            if dist < nearestDistance then
+                nearestDistance = dist
+                nearestIndex = i
+            end
+        end
+
+        return table.remove(points, nearestIndex)
+    end
+
+    local function findPromptForEgg(eggPoint)
+        local attachment = eggPoint:FindFirstChild("Attachment")
+        if attachment then
+            local directPrompt = attachment:FindFirstChild("ProximityPrompt")
+            if directPrompt and directPrompt:IsA("ProximityPrompt") and directPrompt.Enabled and not isIgnoredEgglandDescendant(directPrompt) then
+                return directPrompt
+            end
+        end
+
+        return nil
+    end
+
+    local function triggerPrompt(prompt)
+        if not prompt then
+            return false
+        end
+
+        local okDirect = pcall(function()
+            prompt:FireProximityPrompt()
+        end)
+        if okDirect then
+            return true
+        end
+
+        if fireproximityprompt then
+            local ok = pcall(function()
+                fireproximityprompt(prompt)
+            end)
+
+            if not ok then
+                ok = pcall(function()
+                    fireproximityprompt(prompt, prompt.HoldDuration or 0)
+                end)
+            end
+
+            return ok
+        end
+
+        return false
+    end
+
+    local function runAutoEggPathLoop()
+        if autoEggPathRunning then
+            return
+        end
+
+        autoEggPathRunning = true
+        while autoEggPathEnabled do
+            local points = collectEggPoints()
+
+            if #points == 0 then
+                warn("[AutoEgg] No point_egg_* parts found.")
+                task.wait(1)
+                continue
+            end
+
+            while #points > 0 do
+                if not autoEggPathEnabled then
+                    break
+                end
+
+                local eggPoint = popNearestEggPoint(points)
+                if not eggPoint then
+                    break
+                end
+
+                if not canReachEggPoint(eggPoint) then
+                    markEggPointRetryCooldown(eggPoint)
+                    warn("[AutoEgg] Skipping unreachable egg point:", eggPoint:GetFullName())
+                    continue
+                end
+
+                local reached = pathfindTo(eggPoint.Position, "[AutoEgg] " .. eggPoint.Name)
+                if reached then
+                    local prompt = findPromptForEgg(eggPoint)
+                    if prompt then
+                        triggerPrompt(prompt)
+                    else
+                        warn("[AutoEgg] No proximity prompt found for", eggPoint:GetFullName())
+                        markEggPointRetryCooldown(eggPoint)
+                    end
+                else
+                    markEggPointRetryCooldown(eggPoint)
+                end
+
+                task.wait(autoEggPathPause)
+            end
+        end
+
+        autoEggPathRunning = false
     end
 
     -- Input controls
@@ -766,6 +1016,18 @@
         end
     end)
 
+    Tabs.Main:AddToggle("AutoEggPathToggle", {
+        Title = "auto egg path",
+        Description = "pathfinds to point_egg_1..6 one at a time",
+        Default = autoEggPathEnabled
+    }):OnChanged(function(value)
+        autoEggPathEnabled = value
+
+        if autoEggPathEnabled then
+            task.spawn(runAutoEggPathLoop)
+        end
+    end)
+
     Tabs.Merchants:AddParagraph({
         Title = "merchant pings",
         Content = "set role ids here. values are saved and auto-loaded next launch"
@@ -907,8 +1169,87 @@
     end
 
     local merchantFolder = ReplicatedStorage:WaitForChild("Remote"):WaitForChild("Merchant")
+    local purchaseProductRemote = merchantFolder:FindFirstChild("PurchaseProduct")
+    local promptPurchaseRemote = ReplicatedStorage:WaitForChild("Remote"):FindFirstChild("PromptPurchase")
     local lastSpawnPingAt = {}
     local lastSpawnPingGlobalAt = 0
+
+    local function callRemote(remote, ...)
+        if not remote then
+            return false, "missing remote"
+        end
+
+        local args = { ... }
+
+        if remote:IsA("RemoteEvent") then
+            local ok, err = pcall(function()
+                remote:FireServer(unpack(args))
+            end)
+            return ok, err
+        end
+
+        if remote:IsA("RemoteFunction") then
+            local ok, result = pcall(function()
+                return remote:InvokeServer(unpack(args))
+            end)
+            return ok, result
+        end
+
+        return false, "unsupported remote type"
+    end
+
+    local function tryMerchantAutoBuyOnce()
+        local productId = tostring(merchantAutoBuyProductId or "")
+        if productId == "" then
+            warn("[MerchantAutoBuy] Set a product id first.")
+            return false
+        end
+
+        local amount = math.max(1, math.floor(tonumber(merchantAutoBuyAmount) or 1))
+
+        if promptPurchaseRemote then
+            callRemote(promptPurchaseRemote, productId)
+        end
+
+        local attempts = {
+            function()
+                return callRemote(purchaseProductRemote, {
+                    id = productId,
+                    amount = amount
+                })
+            end,
+            function()
+                return callRemote(purchaseProductRemote, productId, amount)
+            end,
+            function()
+                return callRemote(purchaseProductRemote, productId)
+            end
+        }
+
+        for _, attempt in ipairs(attempts) do
+            local ok = attempt()
+            if ok then
+                print("[MerchantAutoBuy] purchase attempt sent:", productId, amount)
+                return true
+            end
+        end
+
+        warn("[MerchantAutoBuy] purchase attempt failed for", productId)
+        return false
+    end
+
+    local function runMerchantAutoBuyLoop()
+        if merchantAutoBuyRunning then
+            return
+        end
+
+        merchantAutoBuyRunning = true
+        while merchantAutoBuyEnabled do
+            tryMerchantAutoBuyOnce()
+            task.wait(math.max(0.5, merchantAutoBuyInterval))
+        end
+        merchantAutoBuyRunning = false
+    end
 
     local function sendWebhook(content, roleId)
         local allowedMentions = { parse = {} }
@@ -1001,6 +1342,55 @@
         end
     })
 
+    Tabs.Tests:AddParagraph({
+        Title = "merchant auto buy",
+        Content = "experimental auto purchase via PromptPurchase + PurchaseProduct"
+    })
+
+    Tabs.Tests:AddInput("MerchantAutoBuyProductId", {
+        Title = "auto buy product id",
+        Default = merchantAutoBuyProductId,
+        Placeholder = "enter merchant product id",
+        Numeric = false,
+        Finished = true,
+        Callback = function(value)
+            merchantAutoBuyProductId = tostring(value or "")
+        end
+    })
+
+    Tabs.Tests:AddInput("MerchantAutoBuyAmount", {
+        Title = "auto buy amount",
+        Default = tostring(merchantAutoBuyAmount),
+        Placeholder = "1",
+        Numeric = true,
+        Finished = true,
+        Callback = function(value)
+            local parsed = tonumber(value)
+            if parsed then
+                merchantAutoBuyAmount = math.max(1, math.floor(parsed))
+            end
+        end
+    })
+
+    Tabs.Tests:AddButton({
+        Title = "test auto buy once",
+        Description = "sends one purchase attempt with current product id",
+        Callback = function()
+            tryMerchantAutoBuyOnce()
+        end
+    })
+
+    Tabs.Tests:AddToggle("MerchantAutoBuyToggle", {
+        Title = "auto buy loop",
+        Description = "repeats purchase attempts while enabled",
+        Default = merchantAutoBuyEnabled
+    }):OnChanged(function(value)
+        merchantAutoBuyEnabled = value
+        if merchantAutoBuyEnabled then
+            task.spawn(runMerchantAutoBuyLoop)
+        end
+    end)
+
     local function detectMerchantNameFromValue(value)
         if value == nil then
             return nil
@@ -1009,13 +1399,28 @@
         local valueType = typeof(value)
         if valueType == "string" then
             local s = string.lower(value)
-            if s:find("mari", 1, true) then
+            s = s:gsub("[^%a%d]", " ")
+            s = s:gsub("%s+", " ")
+            s = s:gsub("^%s+", "")
+            s = s:gsub("%s+$", "")
+
+            if s == "mari" or s == "merchant mari" or s == "mari merchant" then
                 return "mari"
             end
-            if s:find("jester", 1, true) then
+            if s == "jester" or s == "merchant jester" or s == "jester merchant" then
                 return "jester"
             end
-            if s:find("rin", 1, true) then
+            if s == "rin" or s == "merchant rin" or s == "rin merchant" then
+                return "rin"
+            end
+
+            if s:find("%f[%a]mari%f[%A]") then
+                return "mari"
+            end
+            if s:find("%f[%a]jester%f[%A]") then
+                return "jester"
+            end
+            if s:find("%f[%a]rin%f[%A]") then
                 return "rin"
             end
             return nil
@@ -1079,7 +1484,11 @@
         end
 
         local merchantName = detectMerchantName(...)
-        local cooldownKey = merchantName or "unknown"
+        if not merchantName then
+            return
+        end
+
+        local cooldownKey = merchantName
         local lastPing = lastSpawnPingAt[cooldownKey] or 0
 
         if now - lastPing < SPAWN_PING_COOLDOWN then
@@ -1098,10 +1507,6 @@
                 sendWebhook(message)
             end
             print("[Merchant] Spawned event received for", merchantName)
-        else
-            local playerName = player and player.Name or "unknown"
-            sendWebhook("merchant spawned unknown type for " .. playerName)
-            warn("[Merchant] Spawned event received but merchant type was not recognized.")
         end
     end)
 
