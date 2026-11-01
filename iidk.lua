@@ -127,9 +127,11 @@ local Config = {
 
     -- Auto Automation Toggles (Disabled by default)
     AutoCollect = false,
+    SuperFastPickup = false,                       -- Rapid unconfirmed pickup mode (200 limit)
     AutoStatue = false,
     AutoVoteStatue = false,
     SafeStatuesOnly = false,
+    PrioritizeCollapsing = true,                   -- Prioritize gifts on falling/disappearing platforms
 
     -- Statue Blacklist Dictionary
     BlacklistedStatues = {
@@ -158,7 +160,6 @@ local Config = {
     EnemyDamageImmunity = true,                    -- Keeps enemies in workspace but prevents any damage/kills (Enabled by default)
     SelectedImmunityEnemies = {
         Baby = true,
-        BeaconImp = true,
         Celestial = true,
         DOG = true,
         Flesh = true,
@@ -192,7 +193,6 @@ local Config = {
     },
     SelectedEnemiesToDelete = {
         Baby = true,
-        BeaconImp = false,
         Celestial = false,
         DOG = true,
         Flesh = true,
@@ -326,9 +326,11 @@ local DefaultConfig = {
     PylonESP = false,
     PylonShowCompleted = false,
     AutoCollect = false,
+    SuperFastPickup = false,
     AutoStatue = false,
     AutoVoteStatue = false,
     SafeStatuesOnly = false,
+    PrioritizeCollapsing = true,
     BlacklistedStatues = {
         Chaos = true,
         Curses = true
@@ -351,7 +353,6 @@ local DefaultConfig = {
     EnemyDamageImmunity = true,
     SelectedImmunityEnemies = {
         Baby = true,
-        BeaconImp = true,
         Celestial = true,
         DOG = true,
         Flesh = true,
@@ -385,7 +386,6 @@ local DefaultConfig = {
     },
     SelectedEnemiesToDelete = {
         Baby = true,
-        BeaconImp = false,
         Celestial = false,
         DOG = true,
         Flesh = true,
@@ -477,12 +477,14 @@ local DefaultConfig = {
     PrioritizeGold = true,
     TeleportSweeper = false,
     TeleportSweepDelay = 0.05,
-    MaxHopsPerSweep = 45,
+    MaxHopsPerSweep = 50,
     ReturnToOrigin = true,
     SweepGoldenFirst = true,
+    PrioritizeCollapsing = true,
     SweepGetStarMart = false,
     SweepGetCadence = false,
     SweepGetStatues = false,
+    SuperFastPickup = false,
     AutoDispelWitherrot = false,
     AntiVoid = true,
     AntiVoidBuffer = 140,
@@ -494,7 +496,6 @@ local DefaultConfig = {
 
 local canonicalEnemyNames = {
     "Baby",
-    "BeaconImp",
     "Celestial",
     "DOG",
     "Flesh",
@@ -675,7 +676,9 @@ local function loadGameConfig()
         end
         table.clear(Config.SelectedEnemiesToDelete)
         for k, v in pairs(normalized) do
-            Config.SelectedEnemiesToDelete[k] = v
+            if k ~= "BeaconImp" then
+                Config.SelectedEnemiesToDelete[k] = v
+            end
         end
     end
 
@@ -691,7 +694,9 @@ local function loadGameConfig()
         end
         table.clear(Config.SelectedImmunityEnemies)
         for k, v in pairs(normalized) do
-            Config.SelectedImmunityEnemies[k] = v
+            if k ~= "BeaconImp" then
+                Config.SelectedImmunityEnemies[k] = v
+            end
         end
     end
 
@@ -715,7 +720,17 @@ local function loadGameConfig()
         pcall(function() UIControls.PylonShowCompleted:SetValue(Config.PylonShowCompleted, true) end)
     end
     if Config.CollectRadius then
-        Config.CollectRadius = math.clamp(Config.CollectRadius, 15, 45)
+        local maxR = Config.SuperFastPickup and 200 or 45
+        Config.CollectRadius = math.clamp(Config.CollectRadius, 15, maxR)
+    end
+    if UIControls.AutoVoteStatue and typeof(UIControls.AutoVoteStatue.SetValue) == "function" then
+        pcall(function() UIControls.AutoVoteStatue:SetValue(Config.AutoVoteStatue, true) end)
+    end
+    if UIControls.SuperFastPickup and typeof(UIControls.SuperFastPickup.SetValue) == "function" then
+        pcall(function() UIControls.SuperFastPickup:SetValue(Config.SuperFastPickup, true) end)
+    end
+    if UIControls.PrioritizeCollapsing and typeof(UIControls.PrioritizeCollapsing.SetValue) == "function" then
+        pcall(function() UIControls.PrioritizeCollapsing:SetValue(Config.PrioritizeCollapsing, true) end)
     end
     if UIControls.EnemyDamageImmunity and typeof(UIControls.EnemyDamageImmunity.SetValue) == "function" then
         pcall(function() UIControls.EnemyDamageImmunity:SetValue(Config.EnemyDamageImmunity, true) end)
@@ -747,7 +762,7 @@ local function loadGameConfig()
     if UIControls.SelectedImmunityEnemies and typeof(UIControls.SelectedImmunityEnemies.SetValue) == "function" then
         local immList = {}
         for name, imm in pairs(Config.SelectedImmunityEnemies) do
-            if imm then table.insert(immList, name) end
+            if imm and table.find(canonicalEnemyNames, name) then table.insert(immList, name) end
         end
         table.sort(immList, function(a, b) return string.lower(a) < string.lower(b) end)
         pcall(function() UIControls.SelectedImmunityEnemies:SetValue(immList, true) end)
@@ -757,7 +772,7 @@ local function loadGameConfig()
     if UIControls.SelectedEnemiesToDelete and typeof(UIControls.SelectedEnemiesToDelete.SetValue) == "function" then
         local delList = {}
         for name, del in pairs(Config.SelectedEnemiesToDelete) do
-            if del then table.insert(delList, name) end
+            if del and table.find(canonicalEnemyNames, name) then table.insert(delList, name) end
         end
         table.sort(delList, function(a, b) return string.lower(a) < string.lower(b) end)
         pcall(function() UIControls.SelectedEnemiesToDelete:SetValue(delList, true) end)
@@ -821,6 +836,15 @@ local function resetGameConfig()
     end
     if UIControls.GoldGatedBeacon and typeof(UIControls.GoldGatedBeacon.SetValue) == "function" then
         pcall(function() UIControls.GoldGatedBeacon:SetValue(DefaultConfig.GoldGatedBeacon, true) end)
+    end
+    if UIControls.AutoVoteStatue and typeof(UIControls.AutoVoteStatue.SetValue) == "function" then
+        pcall(function() UIControls.AutoVoteStatue:SetValue(DefaultConfig.AutoVoteStatue, true) end)
+    end
+    if UIControls.SuperFastPickup and typeof(UIControls.SuperFastPickup.SetValue) == "function" then
+        pcall(function() UIControls.SuperFastPickup:SetValue(DefaultConfig.SuperFastPickup, true) end)
+    end
+    if UIControls.PrioritizeCollapsing and typeof(UIControls.PrioritizeCollapsing.SetValue) == "function" then
+        pcall(function() UIControls.PrioritizeCollapsing:SetValue(DefaultConfig.PrioritizeCollapsing, true) end)
     end
 
     -- Reset individual upgrades
@@ -900,6 +924,12 @@ pcall(function()
                 Config[k] = settings[k]
             end
         end
+    end
+    if Config.SelectedImmunityEnemies then
+        Config.SelectedImmunityEnemies["BeaconImp"] = nil
+    end
+    if Config.SelectedEnemiesToDelete then
+        Config.SelectedEnemiesToDelete["BeaconImp"] = nil
     end
 end)
 
@@ -1836,12 +1866,15 @@ local function SetClass(className)
 end
 
 local BeneficialWhitelist = {
-    ["Cadence"]    = true,  -- Melody Boss / Instrument Spawner (Encore beacon unlock)
-    ["CadenceOld"] = true,
-    ["StarMart"]   = true,  -- +Speed, +2 Collection Range, 25s Debuff Immunity
-    ["Bell"]       = true,  -- Cleanses Flesh, Joined Symphony curse progression
-    ["BellOld"]    = true,
-    ["Hunk"]       = true,  -- Ouroboros curse survival objective (Collect or Die)
+    ["Cadence"]       = true,  -- Melody Boss / Instrument Spawner (Encore beacon unlock)
+    ["CadenceOld"]    = true,
+    ["StarMart"]      = true,  -- +Speed, +2 Collection Range, 25s Debuff Immunity
+    ["BeaconImp"]     = true,  -- Beacon Mart (Required for beacon runs - DO NOT TOUCH OR PACIFY)
+    ["BeaconMart"]    = true,
+    ["FakeBeaconImp"] = true,
+    ["Bell"]          = true,  -- Cleanses Flesh, Joined Symphony curse progression
+    ["BellOld"]       = true,
+    ["Hunk"]          = true,  -- Ouroboros curse survival objective (Collect or Die)
 }
 
 -- Client-side IFRAMES spoofing: neutralizes enemy attack routines that inspect LocalPlayer:FindFirstChild("IFRAMES")
@@ -1900,6 +1933,12 @@ do
             or lower == "collide2"
             or lower == "demonshockwave"
             or lower == "firearea"
+            or lower == "cylinder"
+            or lower == "kill"
+            or lower == "colliderpart"
+            or lower == "ragdoll"
+            or lower == "debris"
+            or lower == "fragment"
             or string.find(lower, "mark") ~= nil
     end
 
@@ -1932,7 +1971,7 @@ do
 
         if not part:GetAttribute("PacifiedOrigCanCollide") then
             local trueOrigCollide = part.CanCollide
-            if isNonCollidableEnemyPart(part.Name) then
+            if isNonCollidableEnemyPart(part.Name) or (part.Transparency >= 0.9 and part.Name ~= "HitBox") then
                 trueOrigCollide = false
             end
             part:SetAttribute("PacifiedOrigCanCollide", trueOrigCollide)
@@ -1970,7 +2009,7 @@ do
                         part.CanCollide = false
                         isSettingProp = false
                     end
-                elseif isNonCollidableEnemyPart(part.Name) and part.CanCollide then
+                elseif (isNonCollidableEnemyPart(part.Name) or (part.Transparency >= 0.9 and part.Name ~= "HitBox")) and part.CanCollide then
                     isSettingProp = true
                     part.CanCollide = false
                     isSettingProp = false
@@ -2003,7 +2042,8 @@ do
     pacifyEnemy = function(enemy)
         if not enemy or not enemy.Parent then return end
         local name = enemy.Name
-        if BeneficialWhitelist[name] then return end
+        local arrowType = enemy:GetAttribute("ArrowType")
+        if BeneficialWhitelist[name] or (arrowType and BeneficialWhitelist[arrowType]) then return end
 
         local immune = IsImmuneToEnemy(name)
         if not immune then
@@ -2099,9 +2139,10 @@ end
 local function RemoveEnemy(enemy)
     if not enemy or not enemy.Parent then return end
     local name = enemy.Name
+    local arrowType = enemy:GetAttribute("ArrowType")
 
-    -- Protect beneficial / objective entities (Cadence, StarMart, Bell, Hunk)
-    if BeneficialWhitelist[name] then
+    -- Protect beneficial / objective entities (Cadence, StarMart, BeaconImp / Beacon Mart, Bell, Hunk)
+    if BeneficialWhitelist[name] or (arrowType and BeneficialWhitelist[arrowType]) then
         pcall(function() highlightEnemy(enemy) end)
         return
     end
@@ -3619,8 +3660,14 @@ task.spawn(function()
     while ScriptRunning do
         pcall(function()
             if Config.AutoCollect then
-                local effectiveRadius = math.min(math.clamp(Config.CollectRadius or 35, 15, 80), GiftTracker.MaxRange)
-                _G.PICKUP_BONUS = math.min(effectiveRadius, 38)
+                local effectiveRadius
+                if Config.SuperFastPickup then
+                    effectiveRadius = math.clamp(Config.CollectRadius or 80, 15, 200)
+                    _G.PICKUP_BONUS = effectiveRadius
+                else
+                    effectiveRadius = math.min(math.clamp(Config.CollectRadius or 35, 15, 80), GiftTracker.MaxRange)
+                    _G.PICKUP_BONUS = math.min(effectiveRadius, 38)
+                end
                 local isRoundActive = (not InRound) or (InRound.Value == true)
                 local char = LocalPlayer.Character
                 local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -3633,7 +3680,14 @@ task.spawn(function()
                         local isTripmine = gift.Tripmine or gift.Type == "Tripmine"
                         local isSafe = (not isTripmine) or Config.TripmineDisabler
 
-                        if isSafe and GiftTracker:CanAttempt(gift, myPos, effectiveRadius) then
+                        local canAttempt = false
+                        if Config.SuperFastPickup then
+                            canAttempt = isSafe and (not gift.Collected) and (not gift.Destroyed) and gift.Position and ((gift.Position - myPos).Magnitude <= effectiveRadius)
+                        else
+                            canAttempt = isSafe and GiftTracker:CanAttempt(gift, myPos, effectiveRadius)
+                        end
+
+                        if canAttempt then
                             local dist = (gift.Position - myPos).Magnitude
                             table.insert(candidates, {
                                 gift = gift,
@@ -3656,7 +3710,7 @@ task.spawn(function()
                             local cand = candidates[i]
                             if cand and cand.gift and not cand.gift.Collected then
                                 local gId = cand.gift.Id
-                                if gId then
+                                if gId and not Config.SuperFastPickup then
                                     GiftTracker.Pending[gId] = os.clock()
                                 end
                                 pcall(function()
@@ -3725,6 +3779,18 @@ local function GetAttackingRazorbloom()
     end
     if not hasVisiblePart then
         return nil -- Bird is dead / dispelled / fully transparent!
+    end
+
+    -- Check for "AngryBird" curse (Razorbloom screams instantly upon landing!)
+    local isAngryBird = false
+    pcall(function()
+        local ch = require(game:GetService("ReplicatedFirst").ClientModules.CurseHandler)
+        if ch and typeof(ch.IsCurseEnabled) == "function" then
+            isAngryBird = (ch.IsCurseEnabled("AngryBird") == true)
+        end
+    end)
+    if isAngryBird then
+        return rb -- Instant attack triggered by AngryBird curse!
     end
 
     -- 2. Check if screaming or in open-petal attack state
@@ -3958,6 +4024,17 @@ local function HandleRazorbloomEmergency()
 
     return true
 end
+
+-- Independent Auto-Razorbloom (Witherrot) Emergency Loop
+-- Runs 24/7 independently of Auto-Farm so the player is always protected!
+task.spawn(function()
+    while ScriptRunning do
+        if Config.AutoDispelWitherrot and HasRazorbloom() then
+            pcall(HandleRazorbloomEmergency)
+        end
+        task.wait(0.15)
+    end
+end)
 
 -- 2. Star-Mart Auto-Buff Engine
 local function IsStarMartValid(sm)
@@ -4360,18 +4437,73 @@ local function RawPerformPresentSweep(overrideHops, overrideDelay, overrideRetur
         return getSafeGiftStandPosition(pos) ~= nil
     end
 
+    -- Helper to check if a gift is on an actively collapsing/disappearing platform
+    local function isPlatformCollapsing(g)
+        if not Config.PrioritizeCollapsing or not g then return false end
+        local roomId = g.RoomId
+        local cr = Workspace:FindFirstChild("CurrentRooms")
+        local df = Workspace:FindFirstChild("DestroyFolder")
+
+        if df and roomId then
+            local rInDf = df:FindFirstChild(tostring(roomId))
+            if rInDf then return true end
+        end
+
+        if cr and roomId then
+            local room = cr:FindFirstChild(tostring(roomId))
+            if room then
+                if room:HasTag("TileDestroy") or room:HasTag("TileDestroyed") or room:HasTag("TileCrack") then
+                    return true
+                end
+                local dmg = room:GetAttribute("Damage") or 0
+                local hp = room:GetAttribute("Health") or 2
+                if dmg > 0 and dmg >= hp then
+                    return true
+                end
+                local prim = room.PrimaryPart or room:FindFirstChildWhichIsA("BasePart")
+                if prim and (not prim.Anchored or prim.AssemblyLinearVelocity.Y < -1.5) then
+                    return true
+                end
+            end
+        end
+
+        if g.Position then
+            local rayParams = RaycastParams.new()
+            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+            if LocalPlayer.Character then rayParams.FilterDescendantsInstances = { LocalPlayer.Character } end
+            local r = Workspace:Raycast(Vector3.new(g.Position.X, g.Position.Y + 2, g.Position.Z), Vector3.new(0, -15, 0), rayParams)
+            if r and r.Instance then
+                if df and r.Instance:IsDescendantOf(df) then return true end
+                if not r.Instance.Anchored or r.Instance.AssemblyLinearVelocity.Y < -1.5 then return true end
+                if r.Instance:HasTag("TileDestroy") or r.Instance:HasTag("TileCrack") then return true end
+            end
+        end
+
+        return false
+    end
+
     -- Helper to instantly vacuum presents around any position (e.g. room cluster or start position)
     local function vacuumPresentsNear(pos, radius)
         if not pos or not GiftClientHandler or not GiftClientHandler.Gifts then return 0 end
-        radius = math.min(math.clamp(radius or Config.CollectRadius or 35, 15, 80), GiftTracker.MaxRange)
+        if Config.SuperFastPickup then
+            radius = math.clamp(radius or Config.CollectRadius or 80, 15, 200)
+        else
+            radius = math.min(math.clamp(radius or Config.CollectRadius or 35, 15, 80), GiftTracker.MaxRange)
+        end
         local count = 0
         pcall(function()
             for id, g in pairs(GiftClientHandler.Gifts) do
                 local isTripmine = g.Tripmine or g.Type == "Tripmine"
                 local isSafe = (not isTripmine) or Config.TripmineDisabler
                 local isAboveVoid = g.Position and g.Position.Y > (killY + 45)
-                if isSafe and isAboveVoid and GiftTracker:CanAttempt(g, pos, radius) then
-                    if g.Id then
+                local canGrab = false
+                if Config.SuperFastPickup then
+                    canGrab = isSafe and isAboveVoid and (not g.Collected) and (not g.Destroyed) and g.Position and ((g.Position - pos).Magnitude <= radius)
+                else
+                    canGrab = isSafe and isAboveVoid and GiftTracker:CanAttempt(g, pos, radius)
+                end
+                if canGrab then
+                    if g.Id and not Config.SuperFastPickup then
                         GiftTracker.Pending[g.Id] = os.clock()
                     end
                     pcall(function() g:Collect(false, true, 1) end)
@@ -4431,9 +4563,9 @@ local function RawPerformPresentSweep(overrideHops, overrideDelay, overrideRetur
         local myPos = curHrp.Position
         local bestGift = nil
         local bestDist = math.huge
-        local bestIsGold = false
+        local bestTier = 0 -- 3: collapsing/disappearing, 2: gold/passage, 1: normal
 
-        -- Direct global nearest-neighbor pathing (automatically prioritizing gold gifts)
+        -- Direct global pathing with multi-tier prioritization (Collapsing platforms > Gold > Distance)
         for id, g in pairs(GiftClientHandler.Gifts) do
             if not g.Collected and g.Position then
                 local isTripmine = g.Tripmine or g.Type == "Tripmine"
@@ -4441,19 +4573,16 @@ local function RawPerformPresentSweep(overrideHops, overrideDelay, overrideRetur
                 local isAboveVoid = isGiftPositionSafe(g.Position)
 
                 if isSafe and isAboveVoid then
+                    local isCollapsing = isPlatformCollapsing(g)
                     local isGold = (g.Golden or g.Type == "GoldenGift" or g.Type == "PassageGift")
+                    local tier = isCollapsing and 3 or (isGold and 2 or 1)
                     local dist = (g.Position - myPos).Magnitude
 
-                    if isGold and not bestIsGold then
-                        bestIsGold = true
+                    if tier > bestTier then
+                        bestTier = tier
                         bestDist = dist
                         bestGift = g
-                    elseif isGold and bestIsGold then
-                        if dist < bestDist then
-                            bestDist = dist
-                            bestGift = g
-                        end
-                    elseif not isGold and not bestIsGold then
+                    elseif tier == bestTier then
                         if dist < bestDist then
                             bestDist = dist
                             bestGift = g
@@ -4721,12 +4850,12 @@ end)
 if VoteRemote then
     trackConn(VoteRemote.OnClientEvent:Connect(function(action, title, canVote)
         if action == "New" or action == "CanVote" then
-            if Config.AutoVoteStatue then
-                task.wait(0.1)
-                pcall(function()
-                    VoteRemote:FireServer(true)
-                end)
-            end
+            if not Config.AutoVoteStatue then return end
+            task.wait(0.1)
+            if not Config.AutoVoteStatue or not ScriptRunning then return end
+            pcall(function()
+                VoteRemote:FireServer(true)
+            end)
         end
     end))
 end
@@ -4742,6 +4871,28 @@ task.spawn(function()
             pcall(ClearAllSeamines)
             pcall(ClearAllBlackHoles)
         end
+        -- Sanitize DestroyFolder rubble & dead player ragdoll ColliderParts to prevent invisible obstacles
+        pcall(function()
+            local df = Workspace:FindFirstChild("DestroyFolder")
+            if df then
+                for _, ch in ipairs(df:GetChildren()) do
+                    for _, d in ipairs(ch:GetDescendants()) do
+                        if d:IsA("BasePart") and (d.Transparency >= 0.5 or d.CanCollide) then
+                            d.CanCollide = false
+                        end
+                    end
+                end
+            end
+            for _, d in ipairs(Workspace:GetChildren()) do
+                if d.Name == "Dead" or string.find(string.lower(d.Name), "ragdoll") or string.find(string.lower(d.Name), "corpse") then
+                    for _, part in ipairs(d:GetDescendants()) do
+                        if part:IsA("BasePart") and (part.Name == "ColliderPart" or part.Transparency >= 0.9) then
+                            part.CanCollide = false
+                        end
+                    end
+                end
+            end
+        end)
     end
 end)
 
@@ -4971,12 +5122,22 @@ UIControls.AutoCollect = CollectSec:Toggle({
     end
 })
 
+UIControls.SuperFastPickup = CollectSec:Toggle({
+    Title = "Super Fast Mode (Old 200 Limit)",
+    Desc = "Bypasses server confirmation checks and expands collection radius up to 200 studs",
+    Value = Config.SuperFastPickup,
+    Callback = function(val)
+        Config.SuperFastPickup = val
+        debouncedSaveGameConfig()
+    end
+})
+
 UIControls.CollectRadius = CollectSec:Slider({
     Title = "Pickup Range (Studs)",
-    Desc = "Distance to pick up presents (45 max safe server limit)",
+    Desc = "Distance to pick up presents (up to 200 studs in Super Fast Mode)",
     Min = 15,
-    Max = 45,
-    Value = math.clamp(Config.CollectRadius or 35, 15, 45),
+    Max = 200,
+    Value = Config.CollectRadius or 35,
     Rounding = 0,
     Callback = function(val)
         Config.CollectRadius = val
@@ -5028,6 +5189,16 @@ UIControls.TeleportSweeper = TeleportSec:Toggle({
     end
 })
 
+UIControls.PrioritizeCollapsing = TeleportSec:Toggle({
+    Title = "Save Gifts on Collapsing Platforms",
+    Desc = "Prioritizes sweeping presents on disappearing tiles before they fall into the void",
+    Value = Config.PrioritizeCollapsing,
+    Callback = function(val)
+        Config.PrioritizeCollapsing = val
+        debouncedSaveGameConfig()
+    end
+})
+
 UIControls.TeleportSweepDelay = TeleportSec:Slider({
     Title = "Teleport Delay (Seconds)",
     Desc = "Time between each teleport (0.01s = fast, 0.05s = smooth)",
@@ -5043,9 +5214,9 @@ UIControls.TeleportSweepDelay = TeleportSec:Slider({
 
 UIControls.MaxHopsPerSweep = TeleportSec:Slider({
     Title = "Max Teleports Per Run",
-    Desc = "Maximum teleports in a single farm run",
+    Desc = "Maximum teleports in a single farm run (10 to 300)",
     Min = 10,
-    Max = 150,
+    Max = 300,
     Value = Config.MaxHopsPerSweep,
     Rounding = 0,
     Callback = function(val)
@@ -5066,7 +5237,7 @@ UIControls.ReturnToOrigin = TeleportSec:Toggle({
 
 UIControls.AutoDispelWitherrot = TeleportSec:Toggle({
     Title = "Auto-Scare Bird (Jump Pad)",
-    Desc = "Bounces on Jump Pad only when Razorbloom attacks your head",
+    Desc = "Bounces on Jump Pad only when Razorbloom attacks your head (Runs independently)",
     Value = Config.AutoDispelWitherrot,
     Callback = function(val)
         Config.AutoDispelWitherrot = val
@@ -5513,7 +5684,7 @@ UIControls.EnemyDamageImmunity = ThreatImmunitySec:Toggle({
 local initialImmunityEnemies = {}
 if type(Config.SelectedImmunityEnemies) == "table" then
     for name, sel in pairs(Config.SelectedImmunityEnemies) do
-        if sel then table.insert(initialImmunityEnemies, name) end
+        if sel and table.find(canonicalEnemyNames, name) then table.insert(initialImmunityEnemies, name) end
     end
     table.sort(initialImmunityEnemies, function(a, b) return string.lower(a) < string.lower(b) end)
 end
@@ -5620,7 +5791,7 @@ UIControls.AutoDisableEnemies = ThreatDeletionSec:Toggle({
 local initialSelectedEnemies = {}
 if type(Config.SelectedEnemiesToDelete) == "table" then
     for name, sel in pairs(Config.SelectedEnemiesToDelete) do
-        if sel then table.insert(initialSelectedEnemies, name) end
+        if sel and table.find(canonicalEnemyNames, name) then table.insert(initialSelectedEnemies, name) end
     end
     table.sort(initialSelectedEnemies, function(a, b) return string.lower(a) < string.lower(b) end)
 end
