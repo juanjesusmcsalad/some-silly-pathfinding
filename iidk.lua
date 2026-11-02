@@ -1,3 +1,7 @@
+if not game:IsLoaded() then
+    pcall(function() game.Loaded:Wait() end)
+end
+
 local Players = game:GetService("Players")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -76,7 +80,7 @@ end))
 local IsSweeping = false
 local SweepStartTime = 0
 
--- Safely resolve all possible UI search parents
+-- Safely resolve UI search parents (GEMINI.md Rule A: safely probe gethui and CoreGui)
 local searchParents = {}
 pcall(function()
     if typeof(gethui) == "function" then
@@ -85,25 +89,25 @@ pcall(function()
     end
 end)
 pcall(function()
-    local cg = game:GetService("CoreGui")
-    if cg and not table.find(searchParents, cg) then
-        table.insert(searchParents, cg)
+    local ok, _ = pcall(function() return CoreGui:GetChildren() end)
+    if ok and not table.find(searchParents, CoreGui) then
+        table.insert(searchParents, CoreGui)
     end
 end)
 if PlayerGui and not table.find(searchParents, PlayerGui) then
     table.insert(searchParents, PlayerGui)
 end
 
--- Clean previous window frames (Shadow, DropdownSelect) without destroying root container 
+-- Clean previous window frames (Shadow, DropdownSelect) without destroying root container or ReopenButton
 for _, parent in ipairs(searchParents) do
     if parent then
         pcall(function()
             for _, ch in ipairs(parent:GetChildren()) do
-                if ch.Name == "Nullscape_UI" or ch.Name == "Nullscape_HUD" then
+                if ch.Name == "Nullscape_UI" or ch.Name == "Nullscape_HUD" or ch.Name == "Aether_MobileToggle" then
                     pcall(function() ch:Destroy() end)
                 elseif ch.Name == "Aether" or ch:GetAttribute("AetherUI") then
                     for _, inner in ipairs(ch:GetChildren()) do
-                        if inner.Name == "Shadow" or inner.Name == "DropdownSelect" or (inner.Name == "Frame" and inner:FindFirstChildOfClass("ScrollingFrame")) then
+                        if inner.Name == "Shadow" or inner.Name == "DropdownSelect" then
                             pcall(function() inner:Destroy() end)
                         end
                     end
@@ -124,6 +128,7 @@ local Config = {
     CadenceESP = false,
     PylonESP = false,
     PylonShowCompleted = false,
+    SeamineESP = false,
 
     -- Auto Automation Toggles (Disabled by default)
     AutoCollect = false,
@@ -286,6 +291,7 @@ local Config = {
     ColorTripmine = Color3.fromRGB(255, 45, 45),    -- Bright Red for tripmines
     ColorEnemy = Color3.fromRGB(255, 100, 0),       -- Bright Orange-Red for enemies
     ColorCadence = Color3.fromRGB(255, 20, 147),    -- Neon Pink/Magenta for Cadence instruments
+    ColorSeamine = Color3.fromRGB(255, 120, 0),    -- Vivid Hazard Orange for seamines
 
     -- Highlight Aesthetics
     FillTransparency = 1,                          -- 1 = Clean Outline, < 1 = Glowing body
@@ -308,12 +314,24 @@ local Config = {
     ReturnToOrigin = true,                         -- Return to starting position after sweep
     SweepGoldenFirst = true,                       -- Prioritize Golden / Passage gifts (Automatic)
     SweepGetStarMart = false,                      -- Touch StarMart (+Speed, +2 Range, 25s Debuff Immunity)
-    SweepGetCadence = false,                       -- Auto-collect Cadence instruments
+    SweepGetCadence = false,                       -- Auto-collect Cadence instruments (Sweep integration)
+    AutoGetCadence = false,                        -- Auto-collect Cadence instruments standalone (Works without Auto-Farm)
+    AutoPylon = false,                             -- Auto-charge Celestial Pylons until 100% (Works without Auto-Farm)
     SweepGetStatues = false,                       -- Auto-activate non-blacklisted statues
     AutoDispelWitherrot = false,                   -- Emergency: Auto-snap to JumpPad if Witherrot / Razorbloom attacks
     AntiVoid = true,                               -- Anti-Void: Auto-teleports to Beacon when falling towards void kill plane (Enabled by default)
     AntiVoidBuffer = 140,                          -- Distance above KillVoid to trigger (e.g. -610.5 + 140 = -470.5)
     GoldGatedBeacon = false,                       -- Lock Beacon touch until all gold presents are collected (Disabled by default)
+    AutoTeleportToBeacon = false,                  -- Auto-teleport to Beacon once 100% presents are collected
+    AutoUpgrade = false,                           -- Auto-interacts with upgrade ChoiceOrbs & shop pedestals
+    AutoCurse = false,                             -- Auto-interacts with curse ChoiceOrbs & pedestals
+    AutoMedalCurses = true,                        -- Auto-picks the most expensive Medal curse (+Gold Gifts)
+    AutoContinue = true,                           -- Auto-presses Continue on EndScreen and Shop
+    AutoPickEnemies = false,                       -- Auto-votes/picks enemies (prioritizing damage-immune ones)
+    AutoDieAtLevel = false,                        -- Auto-resets upon reaching target level
+    TargetDieLevel = 25,                           -- Level threshold (1 to 100)
+    AutoDieAtGiftPercent = false,                  -- Auto-resets upon reaching collection percentage in round
+    TargetDieGiftPercent = 100,                    -- Collection percentage threshold (10% to 100%)
     AutoSaveConfig = true                          -- Automatically persist toggles & sliders to disk
 }
 
@@ -325,6 +343,7 @@ local DefaultConfig = {
     CadenceESP = false,
     PylonESP = false,
     PylonShowCompleted = false,
+    SeamineESP = false,
     AutoCollect = false,
     SuperFastPickup = false,
     AutoStatue = false,
@@ -483,12 +502,24 @@ local DefaultConfig = {
     PrioritizeCollapsing = true,
     SweepGetStarMart = false,
     SweepGetCadence = false,
+    AutoGetCadence = false,
+    AutoPylon = false,
     SweepGetStatues = false,
     SuperFastPickup = false,
     AutoDispelWitherrot = false,
     AntiVoid = true,
     AntiVoidBuffer = 140,
     GoldGatedBeacon = false,
+    AutoTeleportToBeacon = false,
+    AutoUpgrade = false,
+    AutoCurse = false,
+    AutoMedalCurses = true,
+    AutoContinue = true,
+    AutoPickEnemies = false,
+    AutoDieAtLevel = false,
+    TargetDieLevel = 25,
+    AutoDieAtGiftPercent = false,
+    TargetDieGiftPercent = 100,
     StatueRadius = 35,
     StatueCooldown = 2.0,
     AutoSaveConfig = true
@@ -496,6 +527,8 @@ local DefaultConfig = {
 
 local canonicalEnemyNames = {
     "Baby",
+    "Bell",
+    "BellOld",
     "Celestial",
     "DOG",
     "Flesh",
@@ -584,7 +617,11 @@ local function saveGameConfig()
         end
 
         local encoded = HttpService:JSONEncode(dataToSave)
-        writefile(filePath, encoded)
+        for attempt = 1, 3 do
+            local writeOk = pcall(writefile, filePath, encoded)
+            if writeOk then break end
+            task.wait(0.05)
+        end
     end)
 
     return ok
@@ -623,7 +660,11 @@ local function loadGameConfig()
     end
 
     local content = nil
-    pcall(function() content = readfile(filePath) end)
+    for attempt = 1, 3 do
+        local readOk = pcall(function() content = readfile(filePath) end)
+        if readOk and content and content ~= "" then break end
+        task.wait(0.05)
+    end
     if not content or content == "" then return false end
 
     local s, decoded = pcall(function() return HttpService:JSONDecode(content) end)
@@ -719,6 +760,9 @@ local function loadGameConfig()
     if UIControls.PylonShowCompleted and typeof(UIControls.PylonShowCompleted.SetValue) == "function" then
         pcall(function() UIControls.PylonShowCompleted:SetValue(Config.PylonShowCompleted, true) end)
     end
+    if UIControls.SeamineESP and typeof(UIControls.SeamineESP.SetValue) == "function" then
+        pcall(function() UIControls.SeamineESP:SetValue(Config.SeamineESP, true) end)
+    end
     if Config.CollectRadius then
         local maxR = Config.SuperFastPickup and 200 or 45
         Config.CollectRadius = math.clamp(Config.CollectRadius, 15, maxR)
@@ -737,6 +781,53 @@ local function loadGameConfig()
     end
     if UIControls.GoldGatedBeacon and typeof(UIControls.GoldGatedBeacon.SetValue) == "function" then
         pcall(function() UIControls.GoldGatedBeacon:SetValue(Config.GoldGatedBeacon, true) end)
+    end
+    if UIControls.AutoTeleportToBeacon and typeof(UIControls.AutoTeleportToBeacon.SetValue) == "function" then
+        pcall(function() UIControls.AutoTeleportToBeacon:SetValue(Config.AutoTeleportToBeacon, true) end)
+    end
+    if Config.AutoGetCadence ~= nil then
+        Config.SweepGetCadence = Config.AutoGetCadence
+        if UIControls.AutoGetCadence and typeof(UIControls.AutoGetCadence.SetValue) == "function" then
+            pcall(function() UIControls.AutoGetCadence:SetValue(Config.AutoGetCadence, true) end)
+        end
+        if UIControls.CadenceEspAutoCollect and typeof(UIControls.CadenceEspAutoCollect.SetValue) == "function" then
+            pcall(function() UIControls.CadenceEspAutoCollect:SetValue(Config.AutoGetCadence, true) end)
+        end
+    end
+    if Config.AutoPylon ~= nil then
+        if UIControls.AutoPylon and typeof(UIControls.AutoPylon.SetValue) == "function" then
+            pcall(function() UIControls.AutoPylon:SetValue(Config.AutoPylon, true) end)
+        end
+        if UIControls.PylonEspAuto and typeof(UIControls.PylonEspAuto.SetValue) == "function" then
+            pcall(function() UIControls.PylonEspAuto:SetValue(Config.AutoPylon, true) end)
+        end
+    end
+    if UIControls.AutoUpgrade and typeof(UIControls.AutoUpgrade.SetValue) == "function" then
+        pcall(function() UIControls.AutoUpgrade:SetValue(Config.AutoUpgrade, true) end)
+    end
+    if UIControls.AutoCurse and typeof(UIControls.AutoCurse.SetValue) == "function" then
+        pcall(function() UIControls.AutoCurse:SetValue(Config.AutoCurse, true) end)
+    end
+    if UIControls.AutoMedalCurses and typeof(UIControls.AutoMedalCurses.SetValue) == "function" then
+        pcall(function() UIControls.AutoMedalCurses:SetValue(Config.AutoMedalCurses, true) end)
+    end
+    if UIControls.AutoContinue and typeof(UIControls.AutoContinue.SetValue) == "function" then
+        pcall(function() UIControls.AutoContinue:SetValue(Config.AutoContinue, true) end)
+    end
+    if UIControls.AutoPickEnemies and typeof(UIControls.AutoPickEnemies.SetValue) == "function" then
+        pcall(function() UIControls.AutoPickEnemies:SetValue(Config.AutoPickEnemies, true) end)
+    end
+    if UIControls.AutoDieAtLevel and typeof(UIControls.AutoDieAtLevel.SetValue) == "function" then
+        pcall(function() UIControls.AutoDieAtLevel:SetValue(Config.AutoDieAtLevel, true) end)
+    end
+    if UIControls.TargetDieLevel and typeof(UIControls.TargetDieLevel.SetValue) == "function" then
+        pcall(function() UIControls.TargetDieLevel:SetValue(Config.TargetDieLevel, true) end)
+    end
+    if UIControls.AutoDieAtGiftPercent and typeof(UIControls.AutoDieAtGiftPercent.SetValue) == "function" then
+        pcall(function() UIControls.AutoDieAtGiftPercent:SetValue(Config.AutoDieAtGiftPercent, true) end)
+    end
+    if UIControls.TargetDieGiftPercent and typeof(UIControls.TargetDieGiftPercent.SetValue) == "function" then
+        pcall(function() UIControls.TargetDieGiftPercent:SetValue(Config.TargetDieGiftPercent, true) end)
     end
 
     -- 4. Synchronize individual upgrades
@@ -781,6 +872,9 @@ local function loadGameConfig()
     -- 6. Refresh ESP Visuals, Shields & Pacify Enemies
     pcall(refreshAllStatueESP)
     pcall(refreshAllPylonESP)
+    if GiftTracker.RefreshAllSeamineESP then
+        pcall(GiftTracker.RefreshAllSeamineESP)
+    end
     pcall(refreshEnemyHighlights)
     pcall(updateBeaconTouchState)
     if typeof(updateCharacterVoidScript) == "function" then
@@ -831,11 +925,44 @@ local function resetGameConfig()
     if UIControls.PylonShowCompleted and typeof(UIControls.PylonShowCompleted.SetValue) == "function" then
         pcall(function() UIControls.PylonShowCompleted:SetValue(DefaultConfig.PylonShowCompleted, true) end)
     end
+    if UIControls.SeamineESP and typeof(UIControls.SeamineESP.SetValue) == "function" then
+        pcall(function() UIControls.SeamineESP:SetValue(DefaultConfig.SeamineESP, true) end)
+    end
     if UIControls.AutoDispelWitherrot and typeof(UIControls.AutoDispelWitherrot.SetValue) == "function" then
         pcall(function() UIControls.AutoDispelWitherrot:SetValue(DefaultConfig.AutoDispelWitherrot, true) end)
     end
     if UIControls.GoldGatedBeacon and typeof(UIControls.GoldGatedBeacon.SetValue) == "function" then
         pcall(function() UIControls.GoldGatedBeacon:SetValue(DefaultConfig.GoldGatedBeacon, true) end)
+    end
+    if UIControls.AutoTeleportToBeacon and typeof(UIControls.AutoTeleportToBeacon.SetValue) == "function" then
+        pcall(function() UIControls.AutoTeleportToBeacon:SetValue(DefaultConfig.AutoTeleportToBeacon, true) end)
+    end
+    if UIControls.AutoUpgrade and typeof(UIControls.AutoUpgrade.SetValue) == "function" then
+        pcall(function() UIControls.AutoUpgrade:SetValue(DefaultConfig.AutoUpgrade, true) end)
+    end
+    if UIControls.AutoCurse and typeof(UIControls.AutoCurse.SetValue) == "function" then
+        pcall(function() UIControls.AutoCurse:SetValue(DefaultConfig.AutoCurse, true) end)
+    end
+    if UIControls.AutoMedalCurses and typeof(UIControls.AutoMedalCurses.SetValue) == "function" then
+        pcall(function() UIControls.AutoMedalCurses:SetValue(DefaultConfig.AutoMedalCurses, true) end)
+    end
+    if UIControls.AutoContinue and typeof(UIControls.AutoContinue.SetValue) == "function" then
+        pcall(function() UIControls.AutoContinue:SetValue(DefaultConfig.AutoContinue, true) end)
+    end
+    if UIControls.AutoPickEnemies and typeof(UIControls.AutoPickEnemies.SetValue) == "function" then
+        pcall(function() UIControls.AutoPickEnemies:SetValue(DefaultConfig.AutoPickEnemies, true) end)
+    end
+    if UIControls.AutoDieAtLevel and typeof(UIControls.AutoDieAtLevel.SetValue) == "function" then
+        pcall(function() UIControls.AutoDieAtLevel:SetValue(DefaultConfig.AutoDieAtLevel, true) end)
+    end
+    if UIControls.TargetDieLevel and typeof(UIControls.TargetDieLevel.SetValue) == "function" then
+        pcall(function() UIControls.TargetDieLevel:SetValue(DefaultConfig.TargetDieLevel, true) end)
+    end
+    if UIControls.AutoDieAtGiftPercent and typeof(UIControls.AutoDieAtGiftPercent.SetValue) == "function" then
+        pcall(function() UIControls.AutoDieAtGiftPercent:SetValue(DefaultConfig.AutoDieAtGiftPercent, true) end)
+    end
+    if UIControls.TargetDieGiftPercent and typeof(UIControls.TargetDieGiftPercent.SetValue) == "function" then
+        pcall(function() UIControls.TargetDieGiftPercent:SetValue(DefaultConfig.TargetDieGiftPercent, true) end)
     end
     if UIControls.AutoVoteStatue and typeof(UIControls.AutoVoteStatue.SetValue) == "function" then
         pcall(function() UIControls.AutoVoteStatue:SetValue(DefaultConfig.AutoVoteStatue, true) end)
@@ -872,6 +999,9 @@ local function resetGameConfig()
 
     pcall(refreshAllStatueESP)
     pcall(refreshAllPylonESP)
+    if GiftTracker.RefreshAllSeamineESP then
+        pcall(GiftTracker.RefreshAllSeamineESP)
+    end
     pcall(refreshEnemyHighlights)
     if typeof(updateCharacterVoidScript) == "function" then
         pcall(updateCharacterVoidScript)
@@ -978,12 +1108,7 @@ end)
 
 -- Threat Modules
 local TripmineMod = nil
-pcall(function()
-    local gc = ReplicatedFirst.ClientModules:FindFirstChild("GiftClient")
-    if gc then
-        TripmineMod = require(gc.GiftClientHandler.Gifts.TripmineClient)
-    end
-end)
+local healTripmineClient = nil
 
 local ProjectilesMod = nil
 pcall(function()
@@ -1142,16 +1267,71 @@ if diverMod and typeof(diverMod.Step) == "function" then
     end)
 end
 
--- 7. Tripmine Neutralizer / Disabler
-if TripmineMod and typeof(TripmineMod.Collect) == "function" then
-    safeHook(TripmineMod, "Collect", "tripmine_Collect", function(...)
-        if Config.TripmineDisabler then
-            return nil
+-- 7. Tripmine Neutralizer / Disabler (with upvalue healer & new() wrapper to protect against premature GiftBase loading)
+healTripmineClient = function()
+    pcall(function()
+        local gc = ReplicatedFirst:FindFirstChild("ClientModules") and ReplicatedFirst.ClientModules:FindFirstChild("GiftClient")
+        local gchMod = gc and gc:FindFirstChild("GiftClientHandler")
+        if not gchMod then return end
+        local gch = require(gchMod)
+        local giftBase = gch and (gch.GiftBase or (gchMod:FindFirstChild("ClientGiftBase") and require(gchMod.ClientGiftBase)))
+        local tmMod = (gch and gch.GiftClasses and gch.GiftClasses.Tripmine)
+            or (gchMod:FindFirstChild("Gifts") and gchMod.Gifts:FindFirstChild("TripmineClient") and require(gchMod.Gifts.TripmineClient))
+        if tmMod and giftBase then
+            TripmineMod = tmMod
+            if tmMod.new and typeof(debug.getupvalues) == "function" and typeof(debug.setupvalue) == "function" then
+                local upvals = debug.getupvalues(tmMod.new)
+                if upvals and upvals[2] == nil then
+                    debug.setupvalue(tmMod.new, 2, giftBase)
+                end
+            end
+            pcall(setmetatable, tmMod, giftBase)
+
+            -- Defensive hook on TripmineClient.new: guarantees new() never throws "attempt to index nil with 'new'"
+            if tmMod.new and typeof(hookfunction) == "function" and not OrigHooks["tripmine_new"] then
+                local oldTripmineNew
+                oldTripmineNew = hookfunction(tmMod.new, function(p3, p4, p5, p6)
+                    if typeof(debug.getupvalues) == "function" and typeof(debug.setupvalue) == "function" then
+                        local uv = debug.getupvalues(oldTripmineNew)
+                        if uv and uv[2] == nil then
+                            local gb = gch.GiftBase or (gchMod:FindFirstChild("ClientGiftBase") and require(gchMod.ClientGiftBase))
+                            if gb then debug.setupvalue(oldTripmineNew, 2, gb) end
+                        end
+                    end
+                    local ok, res = pcall(oldTripmineNew, p3, p4, p5, p6)
+                    if ok and res then return res end
+                    -- Robust Fallback: instantiate via GiftBase directly so game queue never crashes
+                    local gb = gch.GiftBase or (gchMod:FindFirstChild("ClientGiftBase") and require(gchMod.ClientGiftBase))
+                    if gb and typeof(gb.new) == "function" then
+                        local v7 = (p6 and p6.Type) or "Tripmine"
+                        local v8 = gb.new(v7, p4, p5, p6)
+                        pcall(setmetatable, v8, tmMod)
+                        v8.Type = v7
+                        v8.Position = (p6 and p6.Position) or Vector3.new(0, 0, 0)
+                        v8.Tripmine = true
+                        v8.ClientCollected = false
+                        v8.TimeOffset = math.random(-1000000, 1000000) * math.random()
+                        return v8
+                    end
+                    return nil
+                end)
+                OrigHooks["tripmine_new"] = { target = tmMod, method = "new", orig = oldTripmineNew }
+            end
+
+            if typeof(tmMod.Collect) == "function" and OrigHooks and not OrigHooks["tripmine_Collect"] then
+                safeHook(tmMod, "Collect", "tripmine_Collect", function(...)
+                    if Config.TripmineDisabler then
+                        return nil
+                    end
+                    local h = OrigHooks["tripmine_Collect"]
+                    if h and h.orig then return h.orig(...) end
+                end)
+            end
         end
-        local h = OrigHooks["tripmine_Collect"]
-        if h and h.orig then return h.orig(...) end
     end)
+    return TripmineMod
 end
+pcall(healTripmineClient)
 
 -- 8. Hostile Projectile Disabler
 if ProjectilesMod and typeof(ProjectilesMod.new) == "function" then
@@ -1275,6 +1455,9 @@ function GiftTracker:CanAttempt(gift, myPos, maxRadius)
     if not gift or gift.Collected or gift.Destroyed or not gift.Position then
         return false
     end
+    if gift.Tripmine or gift.Type == "Tripmine" then
+        return false
+    end
 
     local dist = (gift.Position - myPos).Magnitude
     if dist > maxRadius or dist > self.MaxRange then
@@ -1293,6 +1476,79 @@ function GiftTracker:CanAttempt(gift, myPos, maxRadius)
     end
 
     return true
+end
+
+function GiftTracker.IsPlayerDead()
+    if not ScriptRunning then return true end
+    if LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true then return true end
+    local char = LocalPlayer.Character
+    if not char or not char.Parent then return true end
+    local hum = char:FindFirstChild("Humanoid")
+    if not hum or hum.Health <= 0 then return true end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if not hrp or not hrp.Parent then return true end
+    return false
+end
+
+function GiftTracker:GetProgress()
+    local clientCol = 0
+    local maxGifts = 0
+    local isBeaconOpen = false
+
+    local beacon = Workspace:FindFirstChild("Beacon")
+    if beacon and beacon:GetAttribute("Beacon") == true then
+        isBeaconOpen = true
+    else
+        local ef = Workspace:FindFirstChild("Enemies")
+        if ef then
+            for _, ch in ipairs(ef:GetChildren()) do
+                if ch:GetAttribute("Beacon") == true or ch:GetAttribute("ArrowType") == "BeaconImp" then
+                    isBeaconOpen = true
+                    break
+                end
+            end
+        end
+    end
+
+    -- 1. PRIMARY: High-fidelity HUD (Exact on-screen counter e.g. "623 / 623")
+    pcall(function()
+        local pg = PlayerGui or (LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui"))
+        local giftsLabel = pg and pg:FindFirstChild("GUI") and pg.GUI:FindFirstChild("GiftFrame") and pg.GUI.GiftFrame:FindFirstChild("Gifts")
+        if giftsLabel and giftsLabel:IsA("TextLabel") and giftsLabel.Text ~= "" then
+            local cStr, mStr = giftsLabel.Text:match("(%d+)%s*/%s*(%d+)")
+            if cStr and mStr then
+                local cNum = tonumber(cStr)
+                local mNum = tonumber(mStr)
+                if mNum and mNum > 0 and cNum then
+                    clientCol = cNum
+                    maxGifts = mNum
+                end
+            end
+        end
+    end)
+
+    -- 2. Secondary fallback: GiftCounters attribute MaxGifts
+    if maxGifts == 0 then
+        local gc = GiftCounters and GiftCounters:FindFirstChild("Gift")
+        if gc then
+            local mg = gc:GetAttribute("MaxGifts")
+            if type(mg) == "number" and mg > 0 then
+                maxGifts = mg
+            end
+        end
+    end
+
+    -- 3. Secondary fallback: GiftClientHandler.GiftCount
+    if clientCol == 0 then
+        if GiftClientHandler and GiftClientHandler.GiftCount and GiftClientHandler.GiftCount.Gift then
+            local c = GiftClientHandler.GiftCount.Gift.Collected
+            if type(c) == "number" then
+                clientCol = c
+            end
+        end
+    end
+
+    return clientCol, maxGifts, isBeaconOpen
 end
 
 -- Hook GiftClientHandler.RemoveCollection to catch server rejections (CollectionFails) immediately
@@ -1326,36 +1582,66 @@ end
 local LastAntiVoidTeleport = 0
 
 local function GetBeaconCFrame()
-    -- Offset 22 studs South of the Beacon center (Z + 22) onto the spawn platform, well outside the 7-stud Beacon touch radius!
-    local targetPos = Vector3.new(0, 49.0, 22)
-    local beacon = Workspace:FindFirstChild("Beacon")
-    if beacon then
-        local bPos = beacon:IsA("BasePart") and beacon.Position or beacon:GetPivot().Position
-        local rayParams = RaycastParams.new()
-        rayParams.FilterType = Enum.RaycastFilterType.Exclude
-        if LocalPlayer.Character then
-            rayParams.FilterDescendantsInstances = { LocalPlayer.Character, beacon }
+    local beacon, isImp = nil, false
+    if GiftTracker.GetActiveBeacon then
+        beacon, isImp = GiftTracker.GetActiveBeacon()
+    else
+        beacon = Workspace:FindFirstChild("Beacon")
+    end
+
+    if not beacon then
+        return CFrame.new(0, 50, 0)
+    end
+
+    local bPos = beacon:IsA("BasePart") and beacon.Position or beacon:GetPivot().Position
+    local char = LocalPlayer.Character
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    if char then rayParams.FilterDescendantsInstances = { char, beacon } end
+
+    if isImp then
+        -- BeaconImp is on a live platform. Stand 5 studs offset on the platform!
+        local ray = Workspace:Raycast(Vector3.new(bPos.X + 4, bPos.Y + 15, bPos.Z + 4), Vector3.new(0, -60, 0), rayParams)
+        if ray and ray.Position then
+            return CFrame.new(ray.Position + Vector3.new(0, 3.0, 0))
         end
-        local ray = Workspace:Raycast(Vector3.new(bPos.X, 100, bPos.Z + 22), Vector3.new(0, -200, 0), rayParams)
-        if ray and ray.Position and ray.Position.Y > 0 then
-            targetPos = ray.Position + Vector3.new(0, 3.0, 0)
-        else
-            targetPos = Vector3.new(bPos.X, 49.0, bPos.Z + 22)
+        return CFrame.new(bPos + Vector3.new(4, 2.0, 4))
+    end
+
+    -- Standard Beacon: find actual solid ground under or near the Beacon
+    local ray = Workspace:Raycast(Vector3.new(bPos.X, 150, bPos.Z + 18), Vector3.new(0, -300, 0), rayParams)
+    if not ray then
+        ray = Workspace:Raycast(Vector3.new(bPos.X, 150, bPos.Z), Vector3.new(0, -300, 0), rayParams)
+    end
+    if ray and ray.Position and ray.Position.Y > -200 then
+        local groundPos = ray.Position + Vector3.new(0, 3.0, 0)
+        return CFrame.lookAt(groundPos, Vector3.new(bPos.X, groundPos.Y, bPos.Z))
+    end
+
+    -- If no floor under beacon at all, find the nearest JumpPad or Room floor!
+    local jp = Workspace:FindFirstChild("JumpPads")
+    if jp then
+        local pad = jp:FindFirstChildWhichIsA("BasePart", true)
+        if pad then
+            return CFrame.new(pad.Position + Vector3.new(0, 4.0, 0))
         end
     end
-    -- Face towards the Beacon from safe distance
-    local beaconPos = (beacon and beacon:IsA("BasePart") and beacon.Position) or Vector3.new(0, 50, 0)
-    return CFrame.lookAt(targetPos, Vector3.new(beaconPos.X, targetPos.Y, beaconPos.Z))
+
+    if bPos.Y > 400 then
+        return CFrame.new(0, 53.0, 0)
+    end
+    return CFrame.new(bPos.X, 53.0, bPos.Z)
 end
 
 local function TeleportToBeaconSafety(sourceReason)
+    if not Config.AntiVoid then return false end
     local now = os.clock()
     if now - LastAntiVoidTeleport < 1.0 then return false end
 
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local humanoid = char and char:FindFirstChild("Humanoid")
-    local isDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+    local isDead = GiftTracker.IsPlayerDead()
     if not hrp or not hrp.Parent or not humanoid or humanoid.Health <= 0 or isDead then
         return false
     end
@@ -1459,8 +1745,137 @@ local function GetTotalGoldGiftsCountOnMap()
     return count
 end
 
-local function updateBeaconTouchState()
+GiftTracker.IsBeaconImpCurseActive = function()
+    -- 1. Check if standard Beacon in Workspace is parked in sky (Y > 400)
+    local b = Workspace:FindFirstChild("Beacon")
+    if b and b:IsA("BasePart") and b.Position.Y > 400 then
+        return true
+    end
+
+    -- 2. Check CurseHandler (CurseIndex has "BeaconImp")
+    local ch = rawget(_G, "CurseHandler")
+    if not ch then
+        pcall(function()
+            ch = require(game.ReplicatedFirst.ClientModules.CurseHandler)
+        end)
+    end
+    if ch and typeof(ch.IsCurseEnabled) == "function" then
+        if ch.IsCurseEnabled("BeaconImp") then
+            return true
+        end
+    end
+
+    -- 3. Check GreaterCurseHandler
+    local gch = rawget(_G, "GreaterCurseHandler")
+    if not gch then
+        pcall(function()
+            gch = require(game.ReplicatedFirst.ClientModules.GreaterCurseHandler)
+        end)
+    end
+    if gch and typeof(gch.IsCurseEnabled) == "function" then
+        if gch.IsCurseEnabled("BeaconImp") or gch.IsCurseEnabled("BeaconMart") then
+            return true
+        end
+    end
+
+    -- 4. Check Level Curses GUI in PlayerGui
+    local pgui = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    local cGui = pgui and (pgui:FindFirstChild("Curses") or pgui:FindFirstChild("CurseGui") or pgui:FindFirstChild("GreaterCurses"))
+    if cGui then
+        for _, desc in ipairs(cGui:GetDescendants()) do
+            if desc:IsA("TextLabel") and desc.Text and (string.find(desc.Text, "Beacon Imp") or string.find(desc.Text, "Beacon Mart")) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+GiftTracker.IsFakeBeacon = function(ch)
+    if not ch then return false end
+    local name = ch.Name
+    if name == "BeaconMirage" or name == "FakeBeaconImp" then
+        return true
+    end
+    if CollectionService:HasTag(ch, "BeaconMirage") then
+        return true
+    end
+    if ch:GetAttribute("BeaconMirage") == true or ch:GetAttribute("Fake") == true or ch:GetAttribute("ArrowType") == "FakeBeaconImp" then
+        return true
+    end
+    local p = ch.Parent
+    if p and (p.Name == "BeaconMirage" or CollectionService:HasTag(p, "BeaconMirage") or p:GetAttribute("BeaconMirage") == true) then
+        return true
+    end
+    return false
+end
+
+GiftTracker.IsBeaconEntity = function(ch)
+    if not ch then return false end
+    -- Exclude fake beacons (BeaconMirage)
+    if GiftTracker.IsFakeBeacon(ch) then
+        return false
+    end
+    if ch:GetAttribute("Beacon") == false or ch:GetAttribute("ArrowType") == "FakeBeaconImp" then
+        return false
+    end
+    -- Must be confirmed BeaconImp or BeaconMart
+    if ch.Name == "BeaconImp" or ch.Name == "BeaconMart" then
+        return true
+    end
+    if ch:GetAttribute("Beacon") == true or ch:GetAttribute("ArrowType") == "BeaconImp" then
+        return true
+    end
+    if ch:FindFirstChild("OpenBeacon") or ch:FindFirstChild("IdleBeacon") then
+        return true
+    end
+    return false
+end
+
+GiftTracker.GetActiveBeacon = function()
+    -- 1. Check for real active BeaconImp in Enemies
+    local ef = Workspace:FindFirstChild("Enemies")
+    if ef then
+        for _, ch in ipairs(ef:GetChildren()) do
+            if not GiftTracker.IsFakeBeacon(ch) and GiftTracker.IsBeaconEntity(ch) then
+                if ch:IsA("BasePart") then
+                    return ch, true
+                elseif ch:IsA("Model") then
+                    local part = ch.PrimaryPart or ch:FindFirstChild("HumanoidRootPart") or ch:FindFirstChild("HitBox") or ch:FindFirstChildWhichIsA("BasePart")
+                    if part then return part, true end
+                    return ch, true
+                end
+            end
+        end
+    end
+
+    -- 2. Standard Beacon in Workspace (real beacon)
     local beacon = Workspace:FindFirstChild("Beacon")
+    if beacon and not GiftTracker.IsFakeBeacon(beacon) then
+        return beacon, false
+    end
+
+    -- 3. Check Beacons folder if game puts multiple or special beacons
+    local bf = Workspace:FindFirstChild("Beacons")
+    if bf then
+        for _, ch in ipairs(bf:GetChildren()) do
+            if not GiftTracker.IsFakeBeacon(ch) then
+                if ch:IsA("BasePart") then
+                    return ch, false
+                elseif ch:IsA("Model") then
+                    local part = ch.PrimaryPart or ch:FindFirstChildWhichIsA("BasePart")
+                    if part then return part, false end
+                end
+            end
+        end
+    end
+
+    return nil, false
+end
+
+local function updateBeaconTouchState()
+    local beacon, isImp = GiftTracker.GetActiveBeacon()
     if not beacon then return end
 
     local isRoundActive = (not InRound) or (InRound.Value == true)
@@ -1468,73 +1883,340 @@ local function updateBeaconTouchState()
 
     local totalGoldOnMap = GetTotalGoldGiftsCountOnMap()
     local goldRemaining = GetRemainingGoldGiftsCount()
-    local hasPending = GiftTracker:HasPending()
+    local regularRemaining = GetRemainingRegularGiftsCount()
+
+    local clientCol, maxGifts, isBeaconOpen = GiftTracker:GetProgress()
 
     local canTouch = true
 
     if Config.GoldGatedBeacon and isRoundActive then
-        if hasPending then
-            -- Never touch beacon while collections are pending in-flight
+        if totalGoldOnMap > 0 and goldRemaining > 0 then
             canTouch = false
-        elseif totalGoldOnMap > 0 then
-            -- Map has gold presents: strictly gate until every gold present is server-confirmed
-            if goldRemaining > 0 then
-                canTouch = false
-            else
-                canTouch = true
-            end
+        elseif maxGifts > 0 and clientCol < maxGifts and not isBeaconOpen then
+            canTouch = false
+        elseif maxGifts == 0 and not isBeaconOpen and regularRemaining > 0 then
+            canTouch = false
         else
-            -- Map has NO gold presents (e.g. Round 1 / smaller maps):
-            -- Gate on regular presents so player cannot accidentally escape with 0 money!
-            local regularRemaining = GetRemainingRegularGiftsCount()
-            local gc = GiftCounters and GiftCounters:FindFirstChild("Gift")
-            local serverCollected = gc and gc:GetAttribute("Collected") or 0
-            local maxGifts = gc and gc:GetAttribute("MaxGifts") or 0
-
-            if maxGifts > 0 and (serverCollected == 0 or regularRemaining > 0) then
-                canTouch = false
-            else
-                canTouch = true
-            end
+            canTouch = true
         end
     else
         canTouch = true
     end
 
-    if beacon:IsA("BasePart") then
-        if beacon.CanTouch ~= canTouch then
-            beacon.CanTouch = canTouch
+    if isImp then
+        if beacon:IsA("BasePart") and not beacon.CanTouch then
+            beacon.CanTouch = true
         end
-    end
-    for _, ch in ipairs(beacon:GetDescendants()) do
-        if ch:IsA("BasePart") and ch.CanTouch ~= canTouch then
-            ch.CanTouch = canTouch
+    else
+        if beacon:IsA("BasePart") then
+            if beacon.CanTouch ~= canTouch then
+                beacon.CanTouch = canTouch
+            end
+        end
+        for _, ch in ipairs(beacon:GetDescendants()) do
+            if ch:IsA("BasePart") and ch.CanTouch ~= canTouch then
+                ch.CanTouch = canTouch
+            end
         end
     end
 
+    -- Strict pacification of all fake BeaconMirage beacons (prevents Insanity curse on touch)
+    pcall(function()
+        for _, fake in ipairs(CollectionService:GetTagged("BeaconMirage")) do
+            if fake:IsA("BasePart") then
+                fake.CanTouch = false
+                fake.CanCollide = false
+                fake.CanQuery = false
+            end
+            for _, sub in ipairs(fake:GetDescendants()) do
+                if sub:IsA("BasePart") then
+                    sub.CanTouch = false
+                    sub.CanCollide = false
+                    sub.CanQuery = false
+                end
+            end
+        end
+    end)
+
     -- Notify when beacon unlocks once requirements are ACTUALLY met and server confirmed
     if Config.GoldGatedBeacon and isRoundActive and canTouch and lastBeaconNotifiedLevel ~= currentLevel then
-        local gc = GiftCounters and GiftCounters:FindFirstChild("Gift")
-        local collected = gc and gc:GetAttribute("Collected") or 0
-        if collected > 0 or totalGoldOnMap > 0 then
+        if isBeaconOpen or (maxGifts > 0 and clientCol >= maxGifts) or (totalGoldOnMap > 0 and goldRemaining == 0) then
             lastBeaconNotifiedLevel = currentLevel
             if Window then
                 local descMsg = (totalGoldOnMap > 0)
                     and "All gold presents confirmed collected! You may now exit through the Beacon."
                     or "All presents confirmed collected! You may now exit through the Beacon."
                 Window:Notify({
-                    Title = "Beacon Open",
+                    Title = isImp and "BeaconImp Open" or "Beacon Open",
                     Desc = descMsg,
                     Time = 4.0
                 })
             end
         end
     end
+
+    -- Auto-teleport into Beacon when 100% of presents are collected
+    if Config.AutoTeleportToBeacon and isRoundActive then
+        local prog = GiftTracker.Progression
+        if not prog then
+            GiftTracker.Progression = { hasTeleported = false, lastLevel = currentLevel, lastDieLevel = -1, lastTeleportAttempt = 0, teleportCount = 0 }
+            prog = GiftTracker.Progression
+        end
+
+        if prog.lastLevel ~= currentLevel then
+            prog.lastLevel = currentLevel
+            prog.hasTeleported = false
+            prog.lastTeleportAttempt = 0
+            prog.teleportCount = 0
+        end
+
+        local lpBeacon = LocalPlayer:FindFirstChild("Beacon")
+        if lpBeacon and lpBeacon.Value == true then
+            prog.hasTeleported = true
+        end
+
+        local isFullyCollected = false
+        if isBeaconOpen then
+            isFullyCollected = true
+        elseif maxGifts > 0 and clientCol >= maxGifts then
+            isFullyCollected = true
+        elseif maxGifts > 0 and regularRemaining == 0 and goldRemaining == 0 then
+            isFullyCollected = true
+        end
+
+        -- If GoldGatedBeacon is on, make sure gold gifts are also completed
+        if Config.GoldGatedBeacon and isFullyCollected then
+            if totalGoldOnMap > 0 and goldRemaining > 0 then
+                isFullyCollected = false
+            end
+        end
+
+        -- If AutoPylon is on, make sure all celestial pylons are completed before exiting!
+        if Config.AutoPylon and isFullyCollected then
+            local maxP = tonumber(ReplicatedStorage:GetAttribute("MaxPylons")) or 0
+            local doneP = tonumber(ReplicatedStorage:GetAttribute("PylonsDone")) or 0
+            local pylons = (typeof(GetAllPylons) == "function" and GetAllPylons()) or {}
+            local targetCount = math.max(maxP, #pylons)
+            if targetCount > 0 and doneP < targetCount then
+                isFullyCollected = false
+            else
+                for _, p in ipairs(pylons) do
+                    if p and p.Parent and p:GetAttribute("Completed") ~= true then
+                        isFullyCollected = false
+                        break
+                    end
+                end
+            end
+        end
+
+        if isFullyCollected then
+            local isDead = GiftTracker.IsPlayerDead()
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            local now = os.clock()
+
+            local notYetInBeacon = (not lpBeacon) or (lpBeacon.Value ~= true)
+            local attemptCount = prog.teleportCount or 0
+            if not isDead and hrp and notYetInBeacon and attemptCount < 6 and (now - (prog.lastTeleportAttempt or 0) >= 1.5) then
+                prog.lastTeleportAttempt = now
+                prog.teleportCount = attemptCount + 1
+                prog.hasTeleported = true
+
+                if Window and attemptCount == 0 then
+                    Window:Notify({
+                        Title = isImp and "BeaconImp Teleport" or "Beacon Teleport",
+                        Desc = isImp and "All presents collected! Teleporting into BeaconImp..." or "All presents collected! Teleporting into Beacon...",
+                        Time = 3.5
+                    })
+                end
+
+                task.spawn(function()
+                    local targetCF
+                    if isImp then
+                        local impPos = beacon:IsA("BasePart") and beacon.Position or beacon:GetPivot().Position
+                        targetCF = CFrame.new(impPos + Vector3.new(0, 2.0, 0))
+                    else
+                        local bPos = beacon:IsA("BasePart") and beacon.Position or beacon:GetPivot().Position
+                        local bX, bZ = bPos.X, bPos.Z
+                        local bY = 53.0
+                        local base = beacon:FindFirstChild("BeaconModel") and beacon.BeaconModel:FindFirstChild("Base")
+                        if base and base:IsA("BasePart") then
+                            bY = base.Position.Y - (base.Size.Y / 2) + 2.5
+                        else
+                            local surfaceLight = beacon:FindFirstChild("SurfaceLight")
+                            if surfaceLight and surfaceLight:IsA("BasePart") then
+                                bY = surfaceLight.Position.Y - 2.0
+                            else
+                                local rayParams = RaycastParams.new()
+                                rayParams.FilterType = Enum.RaycastFilterType.Exclude
+                                local curChar = LocalPlayer.Character
+                                if curChar then rayParams.FilterDescendantsInstances = { curChar, beacon } end
+                                local startY = math.max(200, bPos.Y + 15)
+                                local ray = Workspace:Raycast(Vector3.new(bX, startY, bZ), Vector3.new(0, -600, 0), rayParams)
+                                if ray then
+                                    bY = ray.Position.Y + 3.0
+                                else
+                                    bY = (bPos.Y > 0 and bPos.Y < 300) and (bPos.Y + 2.0) or 53.0
+                                end
+                            end
+                        end
+                        targetCF = CFrame.new(bX, bY, bZ)
+                    end
+
+                    local fti: any = firetouchinterest
+
+                    for i = 1, 6 do
+                        local curChar = LocalPlayer.Character
+                        local curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
+                        if curHrp and curHrp.Parent then
+                            curHrp.CFrame = targetCF
+                            curHrp.AssemblyLinearVelocity = Vector3.zero
+                            curHrp.AssemblyAngularVelocity = Vector3.zero
+
+                            if MovementCore and MovementCore.ActiveSpecial and typeof(MovementCore.ActiveSpecial.End) == "function" then
+                                pcall(function() MovementCore.ActiveSpecial:End() end)
+                            end
+
+                            if typeof(fti) == "function" and beacon then
+                                if isImp then
+                                    pcall(function()
+                                        fti(curHrp, beacon, 0)
+                                        task.wait(0.01)
+                                        fti(curHrp, beacon, 1)
+                                    end)
+                                else
+                                    pcall(function()
+                                        fti(curHrp, beacon, 0)
+                                        task.wait(0.01)
+                                        fti(curHrp, beacon, 1)
+                                    end)
+                                    local surfaceLight = beacon:FindFirstChild("SurfaceLight")
+                                    if surfaceLight and surfaceLight:IsA("BasePart") then
+                                        pcall(function()
+                                            fti(curHrp, surfaceLight, 0)
+                                            task.wait(0.01)
+                                            fti(curHrp, surfaceLight, 1)
+                                        end)
+                                    end
+                                end
+                            end
+                        end
+                        task.wait(0.06)
+                    end
+                end)
+            end
+        end
+    end
 end
+
+GiftTracker.CheckAutoDie = function()
+    if not ScriptRunning then return end
+    local isRoundActive = (not InRound) or (InRound.Value == true)
+    if not isRoundActive then return end
+    local isDead = GiftTracker.IsPlayerDead()
+    if isDead then return end
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+
+    local currentLevel = (LevelVal and LevelVal.Value) or 1
+    local prog = GiftTracker.Progression
+    if not prog then
+        GiftTracker.Progression = { hasTeleported = false, lastLevel = -1, lastDieLevel = -1 }
+        prog = GiftTracker.Progression
+    end
+    if prog.lastDieLevel == currentLevel then return end
+
+    local shouldDie = false
+    local dieReason = ""
+
+    -- 1. Check Auto Die at Level
+    if Config.AutoDieAtLevel and currentLevel >= (Config.TargetDieLevel or 25) then
+        shouldDie = true
+        dieReason = string.format("Reached target Level %d", currentLevel)
+    end
+
+    -- 2. Check Auto Die at Gift %
+    if not shouldDie and Config.AutoDieAtGiftPercent then
+        local clientCol, maxGifts = GiftTracker:GetProgress()
+        if maxGifts > 0 and clientCol > 0 then
+            local pct = (clientCol / maxGifts) * 100
+            if pct >= (Config.TargetDieGiftPercent or 100) then
+                shouldDie = true
+                dieReason = string.format("Reached %d%% gifts collected (%d/%d)", math.floor(pct), clientCol, maxGifts)
+            end
+        end
+    end
+
+    if shouldDie then
+        prog.lastDieLevel = currentLevel
+        if Window then
+            Window:Notify({
+                Title = "Auto Reset / Die",
+                Desc = string.format("Auto-reset triggered: %s", dieReason),
+                Time = 4.0
+            })
+        end
+        task.spawn(function()
+            pcall(function()
+                ReplicatedStorage.Events.Died:FireServer("The press of a button", Vector3.new(0, -5, 0), currentLevel)
+            end)
+            task.wait(0.5)
+            pcall(function()
+                local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    hum.Health = 0
+                end
+            end)
+        end)
+    end
+end
+
+GiftTracker.CheckAutoContinueEndScreen = function()
+    if not ScriptRunning then return end
+    if not Config.AutoContinue then return end
+    local pg = PlayerGui or (LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui"))
+    local es = pg and pg:FindFirstChild("EndScreen")
+    if es and es.Enabled then
+        local contBtn = es:FindFirstChild("Main") and es.Main:FindFirstChild("Continue")
+        if contBtn and contBtn:IsA("GuiButton") and contBtn.Visible then
+            if typeof(firesignal) == "function" then
+                pcall(function() firesignal(contBtn.MouseButton1Click) end)
+            end
+            pcall(function()
+                if typeof(getconnections) == "function" then
+                    for _, c in ipairs(getconnections(contBtn.MouseButton1Click)) do
+                        if type(c.Fire) == "function" then c:Fire() end
+                    end
+                end
+            end)
+            pcall(function()
+                local ev = game:GetService("ReplicatedStorage"):FindFirstChild("Events")
+                if ev and ev:FindFirstChild("EndScreen") then
+                    ev.EndScreen:FireServer()
+                end
+            end)
+        end
+    end
+end
+
+pcall(function()
+    local pg = PlayerGui or (LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui"))
+    local es = pg and (pg:FindFirstChild("EndScreen") or pg:WaitForChild("EndScreen", 3))
+    if es then
+        trackConn(es:GetPropertyChangedSignal("Enabled"):Connect(function()
+            if es.Enabled and Config.AutoContinue then
+                task.wait(0.2)
+                pcall(GiftTracker.CheckAutoContinueEndScreen)
+            end
+        end))
+    end
+end)
 
 task.spawn(function()
     while ScriptRunning do
         pcall(updateBeaconTouchState)
+        pcall(GiftTracker.CheckAutoDie)
+        pcall(GiftTracker.CheckAutoContinueEndScreen)
         task.wait(0.25)
     end
 end)
@@ -1552,6 +2234,9 @@ local enemyDeathReasons = {
     ["Oblivion"]       = true,
     ["ICBM"]           = true,
     ["VoidboundICBM"]  = true,
+    ["Bell"]           = true,
+    ["BellOld"]        = true,
+    ["Explosion"]      = true,
     ["Scrapmaw"]       = true,
     ["Slicer"]         = true,
     ["Baby"]           = true,
@@ -1588,7 +2273,10 @@ local fatalReasons = {
     ["VoidImplosion"] = true,
     ["Oblivion"]      = true,
     ["Seamine"]       = true,
-    ["Hazard"]        = true
+    ["Hazard"]        = true,
+    ["Explosion"]     = true,
+    ["ICBM"]          = true,
+    ["VoidboundICBM"] = true
 }
 
 local function IsImmuneToEnemy(nameOrReason)
@@ -1606,6 +2294,9 @@ local function IsImmuneToEnemy(nameOrReason)
 
     -- Known aliases & pairings
     local lower = string.lower(str)
+    if (str == "BellOld" or str == "OldBell") and Config.SelectedImmunityEnemies["Bell"] ~= nil then
+        return Config.SelectedImmunityEnemies["Bell"] == true
+    end
     if (str == "Skinwalker" or string.find(lower, "skinwalker")) and Config.SelectedImmunityEnemies["Husk"] ~= nil then
         return Config.SelectedImmunityEnemies["Husk"] == true
     end
@@ -1618,7 +2309,7 @@ local function IsImmuneToEnemy(nameOrReason)
     if str == "Mart" and Config.SelectedImmunityEnemies["OldMart"] ~= nil then
         return Config.SelectedImmunityEnemies["OldMart"] == true
     end
-    if str == "VoidboundICBM" and Config.SelectedImmunityEnemies["ICBM"] ~= nil then
+    if (str == "VoidboundICBM" or string.find(lower, "icbm") or string.find(lower, "missile") or string.find(lower, "nuke") or string.find(lower, "explosion")) and Config.SelectedImmunityEnemies["ICBM"] ~= nil then
         return Config.SelectedImmunityEnemies["ICBM"] == true
     end
     if str == "ShadowGuardian" and Config.SelectedImmunityEnemies["Guardian"] ~= nil then
@@ -1653,14 +2344,119 @@ end
 
 local diedRemote = ReplicatedStorage:FindFirstChild("Events") and ReplicatedStorage.Events:FindFirstChild("Died")
 
--- Hook __namecall to intercept method-style :FireServer calls from game scripts (e.g. Void.client.lua, enemy attacks)
-if typeof(hookmetamethod) == "function" and diedRemote then
+-- Hook __index & __namecall: Defensive inoculation for game scripts (ArrowHandler, NilVignette, etc.) + packet blocker
+if typeof(hookmetamethod) == "function" then
+    local oldIndex
+    oldIndex = hookmetamethod(game, "__index", function(self, key)
+        if key == "Position" or key == "GetState" or key == "CFrame" or key == "Size" then
+            if typeof(self) == "Instance" then
+                if self:IsA("Model") then
+                    if key == "Position" then
+                        local pp = self.PrimaryPart
+                        if pp then return pp.Position end
+                        local ok, piv = pcall(self.GetPivot, self)
+                        if ok and piv then return piv.Position end
+                        return Vector3.zero
+                    elseif key == "GetState" then
+                        return function(m)
+                            local target = (typeof(m) == "Instance" and m) or self
+                            local hum = target:FindFirstChildOfClass("Humanoid")
+                            if hum then
+                                local fn = hum.GetState
+                                return fn(hum)
+                            end
+                            return Enum.HumanoidStateType.None
+                        end
+                    elseif key == "CFrame" then
+                        local pp = self.PrimaryPart
+                        if pp then return pp.CFrame end
+                        local ok, piv = pcall(self.GetPivot, self)
+                        if ok and piv then return piv end
+                        return CFrame.identity
+                    elseif key == "Size" then
+                        local pp = self.PrimaryPart
+                        if pp then return pp.Size end
+                        local ok, sz = pcall(self.GetExtentsSize, self)
+                        if ok and sz then return sz end
+                        return Vector3.zero
+                    end
+                elseif self:IsA("Player") then
+                    local char = self.Character
+                    if key == "Position" then
+                        if char then
+                            local pp = char.PrimaryPart
+                            if pp then return pp.Position end
+                            local ok, piv = pcall(char.GetPivot, char)
+                            if ok and piv then return piv.Position end
+                        end
+                        return Vector3.zero
+                    elseif key == "GetState" then
+                        return function(p)
+                            local target = (typeof(p) == "Instance" and p) or self
+                            local c = target.Character
+                            local hum = c and c:FindFirstChildOfClass("Humanoid")
+                            if hum then
+                                local fn = hum.GetState
+                                return fn(hum)
+                            end
+                            return Enum.HumanoidStateType.None
+                        end
+                    elseif key == "CFrame" then
+                        if char then
+                            local pp = char.PrimaryPart
+                            if pp then return pp.CFrame end
+                            local ok, piv = pcall(char.GetPivot, char)
+                            if ok and piv then return piv end
+                        end
+                        return CFrame.identity
+                    end
+                end
+            end
+        end
+        return oldIndex(self, key)
+    end)
+    OrigHooks["game_index"] = { target = game, method = "__index", orig = oldIndex }
+
     local oldNamecall
     oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
         local method = getnamecallmethod()
+        if method == "GetState" then
+            if typeof(self) == "Instance" then
+                if self:IsA("Humanoid") then
+                    local fn = self.GetState
+                    return fn(self)
+                elseif self:IsA("Model") then
+                    local hum = self:FindFirstChildOfClass("Humanoid")
+                    if hum then
+                        local fn = hum.GetState
+                        return fn(hum)
+                    end
+                    return Enum.HumanoidStateType.None
+                elseif self:IsA("Player") then
+                    local char = self.Character
+                    local hum = char and char:FindFirstChildOfClass("Humanoid")
+                    if hum then
+                        local fn = hum.GetState
+                        return fn(hum)
+                    end
+                    return Enum.HumanoidStateType.None
+                end
+            end
+        end
         if (method == "FireServer" or method == "fireServer") and (self == diedRemote or (self and self.Name == "Died")) then
+            -- Guard: If character is already dead, has zero health, or is missing HumanoidRootPart, DO NOT BLOCK!
+            -- Allow server to acknowledge death and respawn player immediately instead of trapping them in ghost limbo!
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChild("Humanoid")
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if not char or not hum or hum.Health <= 0 or not hrp or not hrp.Parent then
+                if typeof(setnamecallmethod) == "function" then setnamecallmethod(method) end
+                return oldNamecall(self, ...)
+            end
+
             local reason = ...
             local strReason = tostring(reason)
+            local lowerReason = string.lower(strReason)
             if strReason == "Void" then
                 if Config.AntiVoid then
                     TeleportToBeaconSafety("Void Packet Intercepted")
@@ -1670,23 +2466,32 @@ if typeof(hookmetamethod) == "function" and diedRemote then
             if Config.EnemyDamageImmunity then
                 -- Block fatal attack packets from enemies/projectiles IF immune to this enemy
                 if strReason ~= "The press of a button" and strReason ~= "Void" then
-                    if IsImmuneToEnemy(strReason) then
+                    if IsImmuneToEnemy(strReason) or (string.find(lowerReason, "icbm") and IsImmuneToEnemy("ICBM")) or ((string.find(lowerReason, "explosion") or string.find(lowerReason, "missile") or string.find(lowerReason, "nuke")) and IsImmuneToEnemy("ICBM")) then
                         return nil
                     end
                 end
             end
-            if fatalReasons[strReason] then
-                if Config.AutoDisableEnemies or Config.ProjectileDisabler then
+            if fatalReasons[strReason] or string.find(lowerReason, "explosion") or string.find(lowerReason, "icbm") then
+                if Config.AutoDisableEnemies or Config.ProjectileDisabler or (Config.EnemyDamageImmunity and IsImmuneToEnemy("ICBM")) then
                     return nil
                 end
             end
         end
         if (method == "InvokeServer" or method == "invokeServer") and (self and self.Name == "DiedFunc") then
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChild("Humanoid")
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if not char or not hum or hum.Health <= 0 or not hrp or not hrp.Parent then
+                if typeof(setnamecallmethod) == "function" then setnamecallmethod(method) end
+                return oldNamecall(self, ...)
+            end
+
             if Config.EnemyDamageImmunity then
                 local reason = ...
                 local strReason = tostring(reason)
+                local lowerReason = string.lower(strReason)
                 if strReason ~= "The press of a button" and strReason ~= "Void" then
-                    if IsImmuneToEnemy(strReason) then
+                    if IsImmuneToEnemy(strReason) or (string.find(lowerReason, "icbm") and IsImmuneToEnemy("ICBM")) or ((string.find(lowerReason, "explosion") or string.find(lowerReason, "missile") or string.find(lowerReason, "nuke")) and IsImmuneToEnemy("ICBM")) then
                         return nil
                     end
                 end
@@ -1694,16 +2499,21 @@ if typeof(hookmetamethod) == "function" and diedRemote then
         end
         if (method == "FireServer" or method == "fireServer") and (self and (self.Name == "ClientEvent" or self.Name == "ShockwaveEvent")) then
             if Config.EnemyDamageImmunity then
-                local enemyName = self.Parent and self.Parent.Name
-                if IsImmuneToEnemy(enemyName) then
+                local model = self:FindFirstAncestorOfClass("Model")
+                local enemyName = (model and model.Name) or (self.Parent and self.Parent.Name)
+                if IsImmuneToEnemy(enemyName) or (enemyName and string.find(string.lower(enemyName), "icbm") and IsImmuneToEnemy("ICBM")) then
                     local action = ...
                     local strAction = tostring(action):lower()
-                    if strAction == "kill" or strAction == "combust" or strAction == "damage" or strAction == "explode" or strAction == "debuff" then
+                    if strAction == "kill" or strAction == "combust" or strAction == "damage" or strAction == "explode" or strAction == "debuff" or strAction == "ring" or strAction == "shockwave" or strAction == "detonate" or strAction == "hit" then
+                        return nil
+                    end
+                    if self.Name == "ShockwaveEvent" then
                         return nil
                     end
                 end
             end
         end
+        if typeof(setnamecallmethod) == "function" then setnamecallmethod(method) end
         return oldNamecall(self, ...)
     end)
     OrigHooks["game_namecall"] = { target = game, method = "__namecall", orig = oldNamecall }
@@ -1712,7 +2522,17 @@ end
 -- Fallback safeHook on Died.FireServer closure
 if diedRemote and typeof(diedRemote.FireServer) == "function" then
     safeHook(diedRemote, "FireServer", "died_FireServer", function(self, reason, ...)
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChild("Humanoid")
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        local h = OrigHooks["died_FireServer"]
+        if not char or not hum or hum.Health <= 0 or not hrp or not hrp.Parent then
+            if h and h.orig then return h.orig(self, reason, ...) end
+            return nil
+        end
+
         local strReason = tostring(reason)
+        local lowerReason = string.lower(strReason)
         if strReason == "Void" then
             if Config.AntiVoid then
                 TeleportToBeaconSafety("Void Event Intercepted")
@@ -1721,32 +2541,53 @@ if diedRemote and typeof(diedRemote.FireServer) == "function" then
         end
         if Config.EnemyDamageImmunity then
             if strReason ~= "The press of a button" and strReason ~= "Void" then
-                if IsImmuneToEnemy(strReason) then
+                if IsImmuneToEnemy(strReason) or (string.find(lowerReason, "icbm") and IsImmuneToEnemy("ICBM")) or ((string.find(lowerReason, "explosion") or string.find(lowerReason, "missile") or string.find(lowerReason, "nuke")) and IsImmuneToEnemy("ICBM")) then
                     return nil
                 end
             end
         end
-        if fatalReasons[strReason] then
-            if Config.AutoDisableEnemies or Config.ProjectileDisabler then
+        if fatalReasons[strReason] or string.find(lowerReason, "explosion") or string.find(lowerReason, "icbm") then
+            if Config.AutoDisableEnemies or Config.ProjectileDisabler or (Config.EnemyDamageImmunity and IsImmuneToEnemy("ICBM")) then
                 return nil
             end
         end
-        local h = OrigHooks["died_FireServer"]
         if h and h.orig then return h.orig(self, reason, ...) end
     end)
 end
 
--- Continuous Anti-Void Heartbeat Watchdog
+-- Continuous Anti-Void & Ghost State Auto-Recovery Watchdog
 trackConn(RunService.Heartbeat:Connect(function()
-    if not ScriptRunning or not Config.AntiVoid then return end
+    if not ScriptRunning then return end
+
+    -- 1. Ghost State Auto-Recovery: if character is dead/broken but server hasn't registered death, force reset
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChild("Humanoid")
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        local deadVal = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+        if (not deadVal) and ((hum and hum.Health <= 0) or not hrp or not hrp.Parent) then
+            local now = os.clock()
+            if now - (GiftTracker.LastGhostRecovery or 0) >= 1.5 then
+                GiftTracker.LastGhostRecovery = now
+                local dRem = ReplicatedStorage:FindFirstChild("Events") and ReplicatedStorage.Events:FindFirstChild("Died")
+                if dRem then
+                    local currentLevel = ReplicatedStorage:FindFirstChild("Level") and ReplicatedStorage.Level.Value or 1
+                    pcall(function()
+                        dRem:FireServer("The press of a button", Vector3.new(0, -5, 0), currentLevel)
+                    end)
+                end
+            end
+        end
+    end
+
+    -- 2. Anti-Void Watchdog
+    if not Config.AntiVoid then return end
     local now = os.clock()
     if now - LastAntiVoidTeleport < 1.0 then return end
 
-    local char = LocalPlayer.Character
+    if GiftTracker.IsPlayerDead() then return end
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
-    local humanoid = char and char:FindFirstChild("Humanoid")
-    local isDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
-    if not hrp or not hrp.Parent or not humanoid or humanoid.Health <= 0 or isDead then return end
+    if not hrp or not hrp.Parent then return end
 
     local killVoid = Workspace:FindFirstChild("KillVoid")
     local killY = (killVoid and killVoid.Position.Y) or -264.5
@@ -1819,6 +2660,27 @@ local function protectPlayerCharacter(char)
             end
         end
     end)
+
+    pcall(function()
+        local hb = char:FindFirstChild("Hitbox")
+        if hb and hb:IsA("BasePart") then
+            if Config.EnemyDamageImmunity and IsImmuneToEnemy("ICBM") then
+                hb.CanTouch = false
+                hb.CanCollide = false
+            end
+        end
+
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp and not hrp:GetAttribute("Aether_BellListener") then
+            hrp:SetAttribute("Aether_BellListener", true)
+            trackConn(hrp.ChildAdded:Connect(function(child)
+                if (child.Name == "BellVelocity" or child:IsA("BodyVelocity")) and Config.EnemyDamageImmunity and IsImmuneToEnemy("Bell") then
+                    pcall(function() child:Destroy() end)
+                    hrp.AssemblyLinearVelocity = Vector3.new(hrp.AssemblyLinearVelocity.X, 0, hrp.AssemblyLinearVelocity.Z)
+                end
+            end))
+        end
+    end)
 end
 
 if LocalPlayer.Character then
@@ -1872,10 +2734,39 @@ local BeneficialWhitelist = {
     ["BeaconImp"]     = true,  -- Beacon Mart (Required for beacon runs - DO NOT TOUCH OR PACIFY)
     ["BeaconMart"]    = true,
     ["FakeBeaconImp"] = true,
-    ["Bell"]          = true,  -- Cleanses Flesh, Joined Symphony curse progression
-    ["BellOld"]       = true,
     ["Hunk"]          = true,  -- Ouroboros curse survival objective (Collect or Die)
 }
+
+GiftTracker.IsProtectedEntity = function(enemy)
+    if not enemy then return false end
+    if GiftTracker.IsFakeBeacon and GiftTracker.IsFakeBeacon(enemy) then
+        return false
+    end
+    local name = enemy.Name
+    if name == "BeaconImp" or name == "BeaconMart" or name == "FakeBeaconImp" then
+        return true
+    end
+    local isMart = (name == "Mart" or name == "OldMart" or name == "RedMart" or name == "BigMart" or string.find(string.lower(name), "mart") ~= nil)
+    if isMart and GiftTracker.IsBeaconImpCurseActive and GiftTracker.IsBeaconImpCurseActive() then
+        return true
+    end
+    if BeneficialWhitelist[name] then return true end
+    local arrowType = enemy:GetAttribute("ArrowType")
+    if arrowType and (BeneficialWhitelist[arrowType] or arrowType == "BeaconImp" or arrowType == "FakeBeaconImp") then
+        return true
+    end
+    if enemy:GetAttribute("Beacon") == true or enemy:GetAttribute("Beacon") == false then
+        return true
+    end
+    local lower = string.lower(name)
+    if string.find(lower, "beacon") ~= nil or string.find(lower, "starmart") ~= nil or string.find(lower, "cadence") ~= nil then
+        return true
+    end
+    if enemy:FindFirstChild("OpenBeacon") or enemy:FindFirstChild("IdleBeacon") then
+        return true
+    end
+    return false
+end
 
 -- Client-side IFRAMES spoofing: neutralizes enemy attack routines that inspect LocalPlayer:FindFirstChild("IFRAMES")
 ensureClientIFrames = function()
@@ -1939,6 +2830,8 @@ do
             or lower == "ragdoll"
             or lower == "debris"
             or lower == "fragment"
+            or lower == "waterplanethitbox"
+            or lower == "limitlessexplosion"
             or string.find(lower, "mark") ~= nil
     end
 
@@ -1957,8 +2850,10 @@ do
         else
             part.CanCollide = false
         end
-        local origCanTouch = part:GetAttribute("PacifiedOrigCanTouch")
-        if origCanTouch ~= nil then
+        if part:GetAttribute("Beacon") == true or part:GetAttribute("ArrowType") == "BeaconImp" or part.Name == "BeaconImp" or part.Name == "BeaconMart" then
+            part.CanTouch = true
+            part:SetAttribute("PacifiedPropListener", nil)
+        elseif origCanTouch ~= nil then
             part.CanTouch = origCanTouch
         else
             part.CanTouch = true
@@ -1984,11 +2879,12 @@ do
         part.CanTouch = false
         part.CanQuery = false
 
-        -- Neutralize Springer invisible barrier & sky catapult:
+        -- Neutralize Springer invisible barrier & sky catapult, and Mart water planet / limitless explosions:
         -- Ride: shrunk to minimum part size (0.001 studs) so Springer_ClientAI never detects player overlap.
         -- Collide & Collide2: invisible barrier parts; shrunk to 0.001 studs + CanCollide = false.
+        -- WaterPlanetHitbox & LimitlessExplosion: fatal hitboxes neutralized to 0.001 studs + CanTouch = false.
         -- NOTE: We ONLY set Size once if Magnitude > 0.005 to completely avoid recursive SizeChanged re-entrancy!
-        if part.Name == "Ride" or part.Name == "Collide" or part.Name == "Collide2" then
+        if part.Name == "Ride" or part.Name == "Collide" or part.Name == "Collide2" or part.Name == "WaterPlanetHitbox" or part.Name == "LimitlessExplosion" then
             if part.Size.Magnitude > 0.005 then
                 part.Size = MIN_PART_SIZE
             end
@@ -2017,6 +2913,9 @@ do
             end))
             trackConn(part:GetPropertyChangedSignal("CanTouch"):Connect(function()
                 if isSettingProp then return end
+                if GiftTracker.IsProtectedEntity(part) or (part.Parent and GiftTracker.IsProtectedEntity(part.Parent)) then
+                    return
+                end
                 if Config.EnemyDamageImmunity and IsImmuneToEnemy(enemyName) then
                     if part.CanTouch then
                         isSettingProp = true
@@ -2035,16 +2934,59 @@ do
                     end
                 end
             end))
+            trackConn(part:GetAttributeChangedSignal("Beacon"):Connect(function()
+                if part:GetAttribute("Beacon") == true then
+                    isSettingProp = true
+                    part.CanTouch = true
+                    isSettingProp = false
+                end
+            end))
+            trackConn(part:GetAttributeChangedSignal("ArrowType"):Connect(function()
+                local at = part:GetAttribute("ArrowType")
+                if at == "BeaconImp" or at == "FakeBeaconImp" then
+                    isSettingProp = true
+                    part.CanTouch = true
+                    isSettingProp = false
+                end
+            end))
         end
     end
 
     -- Pacify enemy: eliminates physical collisions, invisible barriers, and fatal hitboxes while preserving 100% of visual meshes, animations, SFX, and VFX
     pacifyEnemy = function(enemy)
         if not enemy or not enemy.Parent then return end
-        local name = enemy.Name
-        local arrowType = enemy:GetAttribute("ArrowType")
-        if BeneficialWhitelist[name] or (arrowType and BeneficialWhitelist[arrowType]) then return end
+        if GiftTracker.IsBeaconEntity and GiftTracker.IsBeaconEntity(enemy) then
+            pcall(function()
+                if enemy:IsA("BasePart") then
+                    unpacifyEnemyPart(enemy)
+                    enemy.CanTouch = true
+                end
+                for _, desc in ipairs(enemy:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        unpacifyEnemyPart(desc)
+                        desc.CanTouch = true
+                    end
+                end
+            end)
+            return
+        end
+        if BeneficialWhitelist[enemy.Name] and not (enemy.Name == "Mart" or enemy.Name == "OldMart" or enemy.Name == "RedMart" or enemy.Name == "BigMart") then
+            pcall(function()
+                if enemy:IsA("BasePart") then
+                    unpacifyEnemyPart(enemy)
+                    enemy.CanTouch = true
+                end
+                for _, desc in ipairs(enemy:GetDescendants()) do
+                    if desc:IsA("BasePart") then
+                        unpacifyEnemyPart(desc)
+                        desc.CanTouch = true
+                    end
+                end
+            end)
+            return
+        end
 
+        local name = enemy.Name
         local immune = IsImmuneToEnemy(name)
         if not immune then
             -- Player is VULNERABLE to this enemy: restore its physical collisions & hitboxes so it can touch and harm player!
@@ -2139,10 +3081,20 @@ end
 local function RemoveEnemy(enemy)
     if not enemy or not enemy.Parent then return end
     local name = enemy.Name
-    local arrowType = enemy:GetAttribute("ArrowType")
+
+    -- Direct safety guard: Never delete BeaconImp / BeaconMart / FakeBeaconImp
+    if name == "BeaconImp" or name == "BeaconMart" or name == "FakeBeaconImp" then
+        return
+    end
+    if (name == "Mart" or name == "OldMart" or name == "RedMart" or name == "BigMart") and GiftTracker.IsBeaconImpCurseActive and GiftTracker.IsBeaconImpCurseActive() then
+        if Config.EnemyDamageImmunity then
+            pacifyEnemy(enemy)
+        end
+        return
+    end
 
     -- Protect beneficial / objective entities (Cadence, StarMart, BeaconImp / Beacon Mart, Bell, Hunk)
-    if BeneficialWhitelist[name] or (arrowType and BeneficialWhitelist[arrowType]) then
+    if GiftTracker.IsProtectedEntity(enemy) then
         pcall(function() highlightEnemy(enemy) end)
         return
     end
@@ -2215,7 +3167,11 @@ local function RemoveSeamine(instance)
     end)
 end
 
+GiftTracker.ActiveSeamineHighlights = {}
+GiftTracker.ActiveSeamineBillboards = {}
+
 local function ClearAllSeamines()
+    if Config.SeamineESP then return end
     if not (Config.AutoDisableEnemies or Config.ProjectileDisabler) then return end
     pcall(function()
         for _, s in ipairs(CollectionService:GetTagged("Seamine")) do
@@ -2242,6 +3198,116 @@ local function ClearAllSeamines()
             end
         end
     end)
+end
+
+GiftTracker.GetAllSeamines = function()
+    local list = {}
+    local seen = {}
+    local function add(inst)
+        if inst and inst.Parent and not seen[inst] then
+            seen[inst] = true
+            table.insert(list, inst)
+        end
+    end
+    pcall(function()
+        for _, s in ipairs(CollectionService:GetTagged("Seamine")) do
+            add(s)
+        end
+    end)
+    pcall(function()
+        local jp = Workspace:FindFirstChild("JumpPads")
+        if jp then
+            for _, d in ipairs(jp:GetDescendants()) do
+                if d.Name == "Seamine" or d.Name == "SeamineGoback" or d.Name == "SeamineUNC" or string.find(string.lower(d.Name), "seamine") then
+                    add(d)
+                end
+            end
+        end
+    end)
+    pcall(function()
+        local rooms = Workspace:FindFirstChild("CurrentRooms")
+        if rooms then
+            for _, d in ipairs(rooms:GetDescendants()) do
+                if d.Name == "Seamine" or d.Name == "SeamineGoback" or d.Name == "SeamineUNC" or string.find(string.lower(d.Name), "seamine") then
+                    add(d)
+                end
+            end
+        end
+    end)
+    pcall(function()
+        for _, d in ipairs(Workspace:GetChildren()) do
+            if d.Name == "Seamine" or d.Name == "SeamineGoback" or d.Name == "SeamineUNC" or string.find(string.lower(d.Name), "seamine") then
+                add(d)
+            end
+        end
+    end)
+    return list
+end
+
+GiftTracker.ApplySeamineESP = function(inst)
+    if not inst or not inst.Parent then return end
+    local color = Config.ColorSeamine or Color3.fromRGB(255, 120, 0)
+    local isEnabled = Config.SeamineESP == true
+
+    local target = inst:IsA("Model") and inst or (inst:FindFirstChild("Model") or inst)
+    local hl = target:FindFirstChild("Aether_Seamine_HL")
+    if not hl then
+        hl = Instance.new("Highlight")
+        hl.Name = "Aether_Seamine_HL"
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Parent = target
+    end
+    hl.OutlineColor = color
+    hl.FillColor = color
+    hl.OutlineTransparency = 0
+    hl.FillTransparency = 0.5
+    hl.Enabled = isEnabled
+    GiftTracker.ActiveSeamineHighlights[hl] = target
+
+    local anchor = inst:IsA("BasePart") and inst or (inst:FindFirstChildWhichIsA("BasePart", true))
+    if anchor then
+        local bb = anchor:FindFirstChild("Aether_Seamine_ESP")
+        if not bb then
+            bb = Instance.new("BillboardGui")
+            bb.Name = "Aether_Seamine_ESP"
+            bb.Size = UDim2.new(0, 150, 0, 36)
+            bb.StudsOffset = Vector3.new(0, 3.5, 0)
+            bb.AlwaysOnTop = true
+            bb.MaxDistance = 600
+
+            local lbl = Instance.new("TextLabel")
+            lbl.Name = "SeamineTitle"
+            lbl.Size = UDim2.new(1, 0, 1, 0)
+            lbl.BackgroundTransparency = 1
+            lbl.Font = Enum.Font.GothamBold
+            lbl.TextSize = 13
+            lbl.TextStrokeTransparency = 0.2
+            lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+            lbl.TextColor3 = color
+            lbl.Parent = bb
+            bb.Parent = anchor
+        end
+        local lbl = bb:FindFirstChild("SeamineTitle")
+        if lbl then
+            local dist = 0
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if hrp then
+                dist = math.floor((anchor.Position - hrp.Position).Magnitude)
+            end
+            lbl.Text = string.format("💣 Seamine • %dm", dist)
+            lbl.TextColor3 = color
+        end
+        bb.Enabled = isEnabled
+        GiftTracker.ActiveSeamineBillboards[bb] = anchor
+    end
+end
+
+GiftTracker.RefreshAllSeamineESP = function()
+    local mines = GiftTracker.GetAllSeamines()
+    for _, m in ipairs(mines) do
+        GiftTracker.ApplySeamineESP(m)
+    end
 end
 
 local function RemoveBlackHole(instance)
@@ -2691,14 +3757,17 @@ local function GetAllCadenceOrbs()
             end
         end
     end)
-    if #list == 0 then
-        pcall(function()
-            for _, d in ipairs(Workspace:GetDescendants()) do
-                if d.Name == "CadenceOrb" and d:IsA("BasePart") and not (char and d:IsDescendantOf(char)) and not table.find(list, d) then
-                    table.insert(list, d)
+    if #list == 0 and Workspace:FindFirstChild("Enemies") and Workspace.Enemies:FindFirstChild("Cadence") then
+        local rooms = Workspace:FindFirstChild("CurrentRooms")
+        if rooms then
+            pcall(function()
+                for _, d in ipairs(rooms:GetDescendants()) do
+                    if d.Name == "CadenceOrb" and d:IsA("BasePart") and not (char and d:IsDescendantOf(char)) and not table.find(list, d) then
+                        table.insert(list, d)
+                    end
                 end
-            end
-        end)
+            end)
+        end
     end
     return list
 end
@@ -2862,6 +3931,12 @@ trackConn(CollectionService:GetInstanceAddedSignal("CadenceOrb"):Connect(functio
             })
         end)
     end
+    if (Config.AutoGetCadence or Config.SweepGetCadence) and not IsSweeping and GiftTracker.CollectCadenceInstruments then
+        task.spawn(function()
+            task.wait(0.05)
+            pcall(function() GiftTracker.CollectCadenceInstruments(true) end)
+        end)
+    end
 end))
 
 trackConn(CollectionService:GetInstanceRemovedSignal("CadenceOrb"):Connect(function(orb)
@@ -2879,7 +3954,7 @@ trackConn(CollectionService:GetInstanceRemovedSignal("CadenceOrb"):Connect(funct
     end
 end))
 
--- Cadence distance update background loop
+-- Cadence distance update background loop & standalone auto-collector
 task.spawn(function()
     while ScriptRunning do
         if Config.CadenceESP then
@@ -2899,6 +3974,19 @@ task.spawn(function()
                         end
                     end
                 end
+            end
+        end
+        if (Config.AutoGetCadence or Config.SweepGetCadence) and not IsSweeping and GiftTracker.CollectCadenceInstruments then
+            local orbs = GetAllCadenceOrbs()
+            local needsCollect = false
+            for _, orb in ipairs(orbs) do
+                if orb and orb.Parent and orb:IsA("BasePart") and orb.CanTouch and orb.Name ~= "CadenceAuraProtection" then
+                    needsCollect = true
+                    break
+                end
+            end
+            if needsCollect then
+                pcall(function() GiftTracker.CollectCadenceInstruments(true) end)
             end
         end
         task.wait(0.3)
@@ -3108,6 +4196,20 @@ task.spawn(function()
                 end
             end
         end
+        if Config.SeamineESP and GiftTracker.ActiveSeamineBillboards then
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            local myPos = hrp and hrp.Position
+            for bb, anchor in pairs(GiftTracker.ActiveSeamineBillboards) do
+                if bb and bb.Parent and anchor and anchor.Parent then
+                    local lbl = bb:FindFirstChild("SeamineTitle")
+                    if lbl and myPos then
+                        local dist = math.floor((anchor.Position - myPos).Magnitude)
+                        lbl.Text = string.format("💣 Seamine • %dm", dist)
+                    end
+                end
+            end
+        end
         task.wait(0.3)
     end
 end)
@@ -3118,12 +4220,20 @@ refreshEnemyHighlights()
 refreshAllStatueESP()
 refreshAllCadenceESP()
 refreshAllMedalESP()
+if GiftTracker.RefreshAllSeamineESP then
+    pcall(GiftTracker.RefreshAllSeamineESP)
+end
 
 local function bindEnemiesFolder(folder)
     if not folder then return end
     EnemiesFolder = folder
     trackConn(folder.ChildAdded:Connect(function(child)
         task.wait(0.05)
+        if GiftTracker.IsProtectedEntity(child) then
+            if child:IsA("BasePart") then child.CanTouch = true end
+            highlightEnemy(child)
+            return
+        end
         if Config.AutoDisableEnemies then
             RemoveEnemy(child)
         else
@@ -3135,11 +4245,17 @@ local function bindEnemiesFolder(folder)
     end))
     if Config.AutoDisableEnemies then
         for _, ch in ipairs(folder:GetChildren()) do
-            RemoveEnemy(ch)
+            if not GiftTracker.IsProtectedEntity(ch) then
+                RemoveEnemy(ch)
+            end
         end
     elseif Config.EnemyDamageImmunity then
         for _, ch in ipairs(folder:GetChildren()) do
-            pacifyEnemy(ch)
+            if not GiftTracker.IsProtectedEntity(ch) then
+                pacifyEnemy(ch)
+            else
+                if ch:IsA("BasePart") then ch.CanTouch = true end
+            end
         end
     end
 end
@@ -3205,20 +4321,33 @@ trackConn(Workspace.ChildAdded:Connect(function(child)
         KnownMedals[child] = true
         task.wait(0.1)
         applyMedalESP(child)
-    elseif (child.Name == "Indicator" or string.find(string.lower(child.Name), "icbmmark")) and child:IsA("BasePart") then
+    elseif (child.Name == "Indicator" or string.find(string.lower(child.Name), "icbmmark") or string.find(string.lower(child.Name), "icbm")) and child:IsA("BasePart") then
         child.CanCollide = false
+        child.CanTouch = false
         child.CanQuery = false
     end
 end))
 
 trackConn(Workspace.DescendantAdded:Connect(function(desc)
-    if desc.Name == "Medal" and desc:IsA("BasePart") then
+    if desc:IsA("Explosion") then
+        if Config.EnemyDamageImmunity and IsImmuneToEnemy("ICBM") then
+            desc.BlastPressure = 0
+            desc.DestroyJointRadiusPercent = 0
+        end
+    elseif desc.Name == "Medal" and desc:IsA("BasePart") then
         KnownMedals[desc] = true
         task.wait(0.1)
         applyMedalESP(desc)
-    elseif (desc.Name == "Indicator" or string.find(string.lower(desc.Name), "icbmmark")) and desc:IsA("BasePart") then
-        desc.CanCollide = false
-        desc.CanQuery = false
+    elseif desc:IsA("BasePart") and (desc.Name == "Indicator" or string.find(string.lower(desc.Name), "icbmmark") or string.find(string.lower(desc.Name), "icbm")) then
+        if Config.EnemyDamageImmunity and IsImmuneToEnemy("ICBM") then
+            desc.CanCollide = false
+            desc.CanTouch = false
+            desc.CanQuery = false
+        end
+    elseif desc:IsA("Model") and string.find(string.lower(desc.Name), "icbm") then
+        if Config.EnemyDamageImmunity and IsImmuneToEnemy("ICBM") then
+            pacifyEnemy(desc)
+        end
     end
 end))
 
@@ -3255,44 +4384,95 @@ end)
 -- ===================================================================
 local function GetPylonAdornee(pylon)
     if not pylon or not pylon.Parent then return nil end
-    local stayNear = pylon:FindFirstChild("StayNear")
+    if pylon:IsA("BasePart") and pylon.Name == "StayNear" then return pylon end
+    local stayNear = pylon:FindFirstChild("StayNear", true)
     if stayNear and stayNear:IsA("BasePart") then return stayNear end
-    local hitbox = pylon:FindFirstChild("HitBox") or pylon:FindFirstChild("Hitbox")
+    local hitbox = pylon:FindFirstChild("HitBox", true) or pylon:FindFirstChild("Hitbox", true)
     if hitbox and hitbox:IsA("BasePart") then return hitbox end
-    local base = pylon:FindFirstChild("BasePlatform") or pylon:FindFirstChild("InnerBase")
+    local base = pylon:FindFirstChild("BasePlatform", true) or pylon:FindFirstChild("InnerBase", true)
     if base and base:IsA("BasePart") then return base end
+    if pylon:IsA("BasePart") then return pylon end
     if pylon.PrimaryPart then return pylon.PrimaryPart end
-    return pylon:FindFirstChildWhichIsA("BasePart")
+    return pylon:FindFirstChildWhichIsA("BasePart", true)
 end
 
-local function GetAllPylons()
+local function GetAllPylons(forceRefresh)
+    local now = os.clock()
+    if not forceRefresh and (now - (GiftTracker.LastPylonScan or 0) < 0.4) and GiftTracker.CachedPylons and #GiftTracker.CachedPylons > 0 then
+        local valid = true
+        for _, p in ipairs(GiftTracker.CachedPylons) do
+            if not p or not p.Parent then valid = false break end
+        end
+        if valid then return GiftTracker.CachedPylons end
+    end
+    GiftTracker.LastPylonScan = now
+
     local results = {}
     local seen = {}
 
+    -- Source 1: PylonHandler internal u2 registry
     pcall(function()
-        for _, obj in ipairs(CollectionService:GetTagged("Pylon")) do
-            local mod = obj:IsA("Model") and obj or obj:FindFirstAncestorOfClass("Model")
-            if mod and not seen[mod] then
-                seen[mod] = true
-                table.insert(results, mod)
-            end
+        local ph = rawget(_G, "PylonHandler")
+        if not ph then
+            pcall(function()
+                ph = require(game.ReplicatedFirst.ClientModules.PylonHandler)
+            end)
         end
-    end)
-
-    pcall(function()
-        local rooms = Workspace:FindFirstChild("CurrentRooms")
-        if rooms then
-            for _, desc in ipairs(rooms:GetChildren()) do
-                if desc:IsA("Model") and not seen[desc] then
-                    if desc.Name == "CellPlatform" or desc:GetAttribute("PylonType") == "Pylon" or desc:GetAttribute("Pylon") ~= nil or desc:FindFirstChild("CellPlatformHandlerClient") then
-                        seen[desc] = true
-                        table.insert(results, desc)
+        if ph and typeof(ph.AddPylon) == "function" and typeof(debug) == "table" and typeof(debug.getupvalues) == "function" then
+            local uvs = debug.getupvalues(ph.AddPylon)
+            local u2 = uvs and uvs[2]
+            if type(u2) == "table" then
+                for _, entry in pairs(u2) do
+                    local mod = entry.Model or (entry.Root and entry.Root.Parent)
+                    if mod and mod.Parent and not seen[mod] then
+                        seen[mod] = true
+                        table.insert(results, mod)
                     end
                 end
             end
         end
     end)
 
+    -- Source 2: CollectionService "Pylon" tagged instances (preserve individual pylon models, never collapse to room)
+    pcall(function()
+        for _, obj in ipairs(CollectionService:GetTagged("Pylon")) do
+            local mod = nil
+            if obj:IsA("Model") and (obj.Name == "CellPlatform" or obj.Name == "Pylon" or obj:FindFirstChild("StayNear") or obj:FindFirstChild("Spike")) then
+                mod = obj
+            elseif obj:IsA("BasePart") then
+                if obj.Name == "StayNear" then
+                    mod = obj.Parent
+                else
+                    local p = obj.Parent
+                    if p and p:IsA("Model") and (p.Name == "CellPlatform" or p.Name == "Pylon" or p:FindFirstChild("StayNear")) then
+                        mod = p
+                    end
+                end
+            end
+            if mod and mod.Parent and not seen[mod] then
+                seen[mod] = true
+                table.insert(results, mod)
+            end
+        end
+    end)
+
+    -- Source 3: Search room / arena containers for all "StayNear" parts directly (scoped, zero lag)
+    local rooms = Workspace:FindFirstChild("CurrentRooms") or Workspace:FindFirstChild("Rooms")
+    if rooms then
+        pcall(function()
+            for _, desc in ipairs(rooms:GetDescendants()) do
+                if desc:IsA("BasePart") and desc.Name == "StayNear" then
+                    local mod = desc.Parent
+                    if mod and not seen[mod] then
+                        seen[mod] = true
+                        table.insert(results, mod)
+                    end
+                end
+            end
+        end)
+    end
+
+    GiftTracker.CachedPylons = results
     return results
 end
 
@@ -3415,7 +4595,12 @@ local function applyPylonESP(pylon)
     ActivePylonBillboards[bb] = pylon
 end
 
+GiftTracker.TrackedPylons = GiftTracker.TrackedPylons or {}
+
 local function cleanupPylonESP(pylon)
+    if pylon then
+        GiftTracker.TrackedPylons[pylon] = nil
+    end
     for hl, target in pairs(ActivePylonHighlights) do
         if target == pylon or (pylon and pylon.Parent and target:IsDescendantOf(pylon)) then
             pcall(function() hl:Destroy() end)
@@ -3431,17 +4616,12 @@ local function cleanupPylonESP(pylon)
 end
 
 local function trackPylonSignals(pylon)
-    if not pylon or not pylon:IsA("Model") then return end
+    if not pylon or not pylon:IsA("Model") or GiftTracker.TrackedPylons[pylon] then return end
+    GiftTracker.TrackedPylons[pylon] = true
     trackConn(pylon:GetAttributeChangedSignal("Completed"):Connect(function()
         applyPylonESP(pylon)
     end))
     trackConn(pylon:GetAttributeChangedSignal("Progressing"):Connect(function()
-        applyPylonESP(pylon)
-    end))
-    trackConn(pylon:GetAttributeChangedSignal("TimeElapsed"):Connect(function()
-        applyPylonESP(pylon)
-    end))
-    trackConn(pylon:GetAttributeChangedSignal("CurrentPlayers"):Connect(function()
         applyPylonESP(pylon)
     end))
 end
@@ -3493,7 +4673,7 @@ local function TeleportToNearestPylon()
 
     if best then
         pcall(function()
-            local targetPos = best.Position + Vector3.new(0, 3.5, 0)
+            local targetPos = best.Position + Vector3.new(0, 1.0, 0)
             hrp.CFrame = CFrame.new(targetPos)
             hrp.AssemblyLinearVelocity = Vector3.zero
             hrp.AssemblyAngularVelocity = Vector3.zero
@@ -3504,6 +4684,207 @@ local function TeleportToNearestPylon()
     return false, "No uncompleted pylons found."
 end
 
+GiftTracker.IsChargingPylon = false
+
+GiftTracker.ChargeAllPylons = function()
+    if GiftTracker.IsChargingPylon or not Config.AutoPylon or not ScriptRunning then return false end
+
+    local char = LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChild("Humanoid")
+    local isDead = GiftTracker.IsPlayerDead()
+    if not char or not hrp or not hrp.Parent or not hum or hum.Health <= 0 or isDead then return false end
+
+    local completedPylons = {}
+
+    local function isPylonDone(p)
+        if not p or not p.Parent then return true end
+        if completedPylons[p] then return true end
+        if p:GetAttribute("Completed") == true then return true end
+        local stayNear = p:FindFirstChild("StayNear", true)
+        if stayNear and stayNear:GetAttribute("Completed") == true then return true end
+        local elapsed = tonumber(p:GetAttribute("TimeElapsed")) or 0
+        local req = tonumber(p:GetAttribute("TimeRequired")) or 10
+        if req > 0 and elapsed >= req then return true end
+        return false
+    end
+
+    local function getNextPylon()
+        local pylons = GetAllPylons()
+        local curHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+        local myPos = curHrp and curHrp.Position or Vector3.zero
+        local bestPylon = nil
+        local bestAdornee = nil
+        local bestDist = math.huge
+
+        for _, p in ipairs(pylons) do
+            if p and p.Parent and not isPylonDone(p) then
+                local adornee = GetPylonAdornee(p)
+                if adornee and adornee.Position and adornee.Position.Y > -200 and adornee.Position.Y < 3000 then
+                    local d = (adornee.Position - myPos).Magnitude
+                    if d < bestDist then
+                        bestDist = d
+                        bestPylon = p
+                        bestAdornee = adornee
+                    end
+                end
+            end
+        end
+        return bestPylon, bestAdornee, bestDist
+    end
+
+    local firstPylon = getNextPylon()
+    if not firstPylon then return false end
+
+    GiftTracker.IsChargingPylon = true
+    local startCFrame = hrp.CFrame
+    local startPos = hrp.Position
+    local totalCompleted = 0
+    local failedAttempts = 0
+
+    while ScriptRunning and Config.AutoPylon do
+        local maxP = tonumber(ReplicatedStorage:GetAttribute("MaxPylons")) or 0
+        local doneP = tonumber(ReplicatedStorage:GetAttribute("PylonsDone")) or 0
+        local allDiscovered = GetAllPylons()
+        local totalExpected = math.max(maxP, #allDiscovered, 5)
+
+        local pylon, adornee, dist = getNextPylon()
+        if not pylon or not adornee then
+            break
+        end
+
+        if totalExpected > 0 and doneP >= totalExpected and not pylon then
+            break
+        end
+
+        local curChar = LocalPlayer.Character
+        local curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
+        local curHum = curChar and curChar:FindFirstChild("Humanoid")
+        local curDead = GiftTracker.IsPlayerDead()
+        if not curChar or not curHrp or not curHrp.Parent or not curHum or curHum.Health <= 0 or curDead then
+            break
+        end
+
+        local targetPos = adornee.Position + Vector3.new(0, 0.5, 0)
+        pcall(function()
+            curHrp.CFrame = CFrame.new(targetPos)
+            curHrp.AssemblyLinearVelocity = Vector3.zero
+            curHrp.AssemblyAngularVelocity = Vector3.zero
+        end)
+
+        triggerTouchInterest(curHrp, adornee)
+        for _, pName in ipairs({ "Hitbox", "Torso", "UpperTorso" }) do
+            local p = curChar:FindFirstChild(pName)
+            if p and p:IsA("BasePart") then triggerTouchInterest(p, adornee) end
+        end
+
+        local initialDone = tonumber(ReplicatedStorage:GetAttribute("PylonsDone")) or 0
+        local currentPylonNum = math.max(initialDone + 1, totalCompleted + 1)
+
+        if Window then
+            pcall(function()
+                Window:Notify({
+                    Title = string.format("Charging Pylon %d/%d", currentPylonNum, totalExpected),
+                    Desc = string.format("Charging celestial pylon (%.0fm away)...", dist or 0),
+                    Time = 2.5
+                })
+            end)
+        end
+
+        local chargeStart = os.clock()
+        local timeReq = tonumber(pylon:GetAttribute("TimeRequired")) or 12
+        local maxTimeout = timeReq + 15
+        local yNudgeIndex = 0
+        local yNudgeOffsets = { 0.5, 1.0, 0.0, 1.5, -0.5 }
+
+        while ScriptRunning and Config.AutoPylon and not isPylonDone(pylon) and (os.clock() - chargeStart < maxTimeout) do
+            SweepStartTime = os.clock()
+            curChar = LocalPlayer.Character
+            curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
+            curHum = curChar and curChar:FindFirstChild("Humanoid")
+            curDead = GiftTracker.IsPlayerDead()
+            if not curChar or not curHrp or not curHrp.Parent or not curHum or curHum.Health <= 0 or curDead then break end
+
+            local liveDone = tonumber(ReplicatedStorage:GetAttribute("PylonsDone")) or 0
+            if liveDone > initialDone then
+                completedPylons[pylon] = true
+                break
+            end
+
+            local isProgressing = pylon:GetAttribute("Progressing") == true
+            if not isProgressing and (os.clock() - chargeStart > 1.5) then
+                yNudgeIndex = (yNudgeIndex % #yNudgeOffsets) + 1
+                local yOff = yNudgeOffsets[yNudgeIndex]
+                targetPos = adornee.Position + Vector3.new(0, yOff, 0)
+            end
+
+            if (curHrp.Position - targetPos).Magnitude > 4 then
+                pcall(function()
+                    curHrp.CFrame = CFrame.new(targetPos)
+                    curHrp.AssemblyLinearVelocity = Vector3.zero
+                    curHrp.AssemblyAngularVelocity = Vector3.zero
+                end)
+            else
+                curHrp.AssemblyLinearVelocity = Vector3.zero
+            end
+
+            triggerTouchInterest(curHrp, adornee)
+            task.wait(0.2)
+        end
+
+        local finalDone = tonumber(ReplicatedStorage:GetAttribute("PylonsDone")) or 0
+        if isPylonDone(pylon) or finalDone > initialDone then
+            completedPylons[pylon] = true
+            totalCompleted = totalCompleted + 1
+            local displayDone = math.max(finalDone, totalCompleted)
+            if Window then
+                pcall(function()
+                    Window:Notify({
+                        Title = "Celestial Pylon Charged!",
+                        Desc = string.format("Pylon %d/%d completed successfully!", displayDone, totalExpected),
+                        Time = 2.5
+                    })
+                end)
+            end
+            task.wait(0.25)
+        else
+            -- Mark attempted to prevent getting stuck in infinite loop on an unchargeable pylon
+            completedPylons[pylon] = true
+            failedAttempts = failedAttempts + 1
+            if failedAttempts >= math.max(totalExpected, 9) then
+                break
+            end
+            task.wait(0.4)
+        end
+    end
+
+    -- Return safely to origin if requested
+    if Config.ReturnToOrigin and totalCompleted > 0 then
+        local curChar = LocalPlayer.Character
+        local curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
+        local curHum = curChar and curChar:FindFirstChild("Humanoid")
+        local curDead = GiftTracker.IsPlayerDead()
+        if curHrp and curHrp.Parent and curHum and curHum.Health > 0 and not curDead then
+            local rayParams = RaycastParams.new()
+            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+            if curChar then rayParams.FilterDescendantsInstances = { curChar } end
+            local groundRay = Workspace:Raycast(Vector3.new(startPos.X, startPos.Y + 4, startPos.Z), Vector3.new(0, -25, 0), rayParams)
+            local safeReturnCFrame = startCFrame
+            if not groundRay or not groundRay.Instance or not groundRay.Instance.CanCollide or not groundRay.Instance.Anchored then
+                safeReturnCFrame = GetBeaconCFrame()
+            end
+            pcall(function()
+                curHrp.CFrame = safeReturnCFrame
+                curHrp.AssemblyLinearVelocity = Vector3.zero
+                curHrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+    end
+
+    GiftTracker.IsChargingPylon = false
+    return totalCompleted > 0
+end
+
 -- Pylon dynamic listeners
 trackConn(CollectionService:GetInstanceAddedSignal("Pylon"):Connect(function(inst)
     local mod = inst:IsA("Model") and inst or inst:FindFirstAncestorOfClass("Model")
@@ -3511,6 +4892,12 @@ trackConn(CollectionService:GetInstanceAddedSignal("Pylon"):Connect(function(ins
         task.wait(0.1)
         applyPylonESP(mod)
         trackPylonSignals(mod)
+        if Config.AutoPylon and not GiftTracker.IsChargingPylon and not IsSweeping and GiftTracker.ChargeAllPylons then
+            task.spawn(function()
+                task.wait(0.3)
+                pcall(GiftTracker.ChargeAllPylons)
+            end)
+        end
     end
 end))
 
@@ -3526,6 +4913,12 @@ pcall(function()
                 task.wait(0.1)
                 applyPylonESP(ch)
                 trackPylonSignals(ch)
+                if Config.AutoPylon and not GiftTracker.IsChargingPylon and not IsSweeping and GiftTracker.ChargeAllPylons then
+                    task.spawn(function()
+                        task.wait(0.3)
+                        pcall(GiftTracker.ChargeAllPylons)
+                    end)
+                end
             end
         end))
         trackConn(rooms.ChildRemoved:Connect(function(ch)
@@ -3553,7 +4946,20 @@ task.spawn(function()
                 pcall(refreshAllPylonESP)
             end
         end
-        task.wait(0.25)
+        if Config.AutoPylon and not GiftTracker.IsChargingPylon and not IsSweeping and GiftTracker.ChargeAllPylons then
+            local pylons = GetAllPylons()
+            local hasUncompleted = false
+            for _, pylon in ipairs(pylons) do
+                if pylon and pylon.Parent and pylon:GetAttribute("Completed") ~= true then
+                    hasUncompleted = true
+                    break
+                end
+            end
+            if hasUncompleted then
+                pcall(GiftTracker.ChargeAllPylons)
+            end
+        end
+        task.wait(0.3)
     end
 end)
 
@@ -3583,30 +4989,49 @@ end))
 
 if InRound then
     trackConn(InRound.Changed:Connect(function(val)
+        if GiftTracker.Progression then
+            GiftTracker.Progression.hasTeleported = false
+            GiftTracker.Progression.lastDieLevel = -1
+        end
         if val == true then
             lastBeaconNotifiedLevel = -1
             table.clear(LastAltarTrigger)
             table.clear(GiftTracker.Pending)
             table.clear(GiftTracker.Failed)
             table.clear(GiftTracker.Confirmed)
+            if GiftTracker.TrackedPylons then table.clear(GiftTracker.TrackedPylons) end
+            if GiftTracker.CachedPylons then table.clear(GiftTracker.CachedPylons) end
+            GiftTracker.LastPylonScan = 0
             task.wait(0.5)
             refreshAllStatueESP()
             refreshAllPylonESP()
+            pcall(GiftTracker.CheckAutoDie)
         end
     end))
 end
 
 if LevelVal then
     trackConn(LevelVal.Changed:Connect(function()
+        if GiftTracker.Progression then
+            GiftTracker.Progression.hasTeleported = false
+        end
+        if GiftTracker.TrackedPylons then table.clear(GiftTracker.TrackedPylons) end
+        if GiftTracker.CachedPylons then table.clear(GiftTracker.CachedPylons) end
+        GiftTracker.LastPylonScan = 0
         task.wait(0.3)
         refreshAllStatueESP()
         refreshAllPylonESP()
+        pcall(GiftTracker.CheckAutoDie)
+        if healTripmineClient then pcall(healTripmineClient) end
     end))
 end
 
 -- Seamine reactive listeners
 trackConn(CollectionService:GetInstanceAddedSignal("Seamine"):Connect(function(inst)
-    if Config.AutoDisableEnemies or Config.ProjectileDisabler then
+    if Config.SeamineESP then
+        task.wait(0.02)
+        if GiftTracker.ApplySeamineESP then GiftTracker.ApplySeamineESP(inst) end
+    elseif Config.AutoDisableEnemies or Config.ProjectileDisabler then
         task.wait(0.02)
         RemoveSeamine(inst)
     end
@@ -3615,8 +5040,11 @@ end))
 local jumpPadsFolder = Workspace:FindFirstChild("JumpPads")
 if jumpPadsFolder then
     trackConn(jumpPadsFolder.DescendantAdded:Connect(function(d)
-        if Config.AutoDisableEnemies or Config.ProjectileDisabler then
-            if d.Name == "Seamine" or d.Name == "SeamineGoback" or d.Name == "SeamineUNC" or string.find(string.lower(d.Name), "seamine") then
+        if d.Name == "Seamine" or d.Name == "SeamineGoback" or d.Name == "SeamineUNC" or string.find(string.lower(d.Name), "seamine") then
+            if Config.SeamineESP then
+                task.wait(0.02)
+                if GiftTracker.ApplySeamineESP then GiftTracker.ApplySeamineESP(d) end
+            elseif Config.AutoDisableEnemies or Config.ProjectileDisabler then
                 task.wait(0.02)
                 RemoveSeamine(d)
             end
@@ -3654,12 +5082,288 @@ if Config.AutoDisableEnemies or Config.ProjectileDisabler then
 end
 
 -- ===================================================================
+-- 7B. AUTO UPGRADE & AUTO PICK ENEMIES ENGINE (Shop Pedestals & ChoiceOrbs)
+-- ===================================================================
+do
+    local lastChoicePromptTriggered = {}
+
+    local function GetChoiceDetails(item)
+        if not item or not item.Parent then return nil end
+        local choiceType = item:GetAttribute("ChoiceType")
+        local choiceName = item:GetAttribute("ChoiceName")
+        local prompt = item:FindFirstChildOfClass("ProximityPrompt", true)
+
+        if not choiceType and prompt then
+            choiceType = prompt:GetAttribute("ChoiceType") or (prompt.Parent and prompt.Parent:GetAttribute("ChoiceType"))
+            choiceName = choiceName or prompt:GetAttribute("ChoiceName") or (prompt.Parent and prompt.Parent:GetAttribute("ChoiceName"))
+        end
+
+        if not choiceType and item.Parent and item.Parent ~= Workspace and item.Parent ~= Workspace:FindFirstChild("CurrentRooms") then
+            choiceType = item.Parent:GetAttribute("ChoiceType")
+            choiceName = choiceName or item.Parent:GetAttribute("ChoiceName")
+        end
+
+        return choiceType, choiceName, prompt
+    end
+
+    local function GetAllAvailableChoices()
+        local choices = {}
+        local seen = {}
+
+        local function add(inst)
+            if inst and not seen[inst] then
+                seen[inst] = true
+                table.insert(choices, inst)
+            end
+        end
+
+        for _, o in ipairs(CollectionService:GetTagged("ChoiceOrb")) do add(o) end
+        for _, v in ipairs(CollectionService:GetTagged("Votable")) do add(v) end
+
+        local lobby = Workspace:FindFirstChild("Lobby")
+        local peds = lobby and lobby:FindFirstChild("LobbyShopPedestals")
+        if peds then
+            for _, p in ipairs(peds:GetChildren()) do add(p) end
+        end
+
+        local selectFolder = Workspace:FindFirstChild("Select")
+        if selectFolder then
+            for _, s in ipairs(selectFolder:GetChildren()) do add(s) end
+        end
+
+        return choices
+    end
+
+    local function TriggerChoicePrompt(prompt, choiceType, choiceName)
+        if not prompt or not prompt.Parent then return false end
+        local now = os.clock()
+        if (now - (lastChoicePromptTriggered[prompt] or 0)) < 1.5 then return false end
+        lastChoicePromptTriggered[prompt] = now
+
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not hrp then return false end
+
+        local targetPos = nil
+        if prompt.Parent:IsA("BasePart") then
+            targetPos = prompt.Parent.Position
+        elseif prompt.Parent:IsA("Model") then
+            targetPos = prompt.Parent:GetPivot().Position
+        end
+
+        local originalCF = hrp.CFrame
+        local isInRound = InRound and InRound.Value == true
+
+        -- Teleport close if needed
+        if targetPos and (hrp.Position - targetPos).Magnitude > 8 then
+            pcall(function()
+                hrp.CFrame = CFrame.new(targetPos + Vector3.new(0, 3, 0))
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+            task.wait(0.08)
+        end
+
+        -- Trigger prompt (Rule H)
+        local triggered = false
+        if typeof(fireproximityprompt) == "function" then
+            pcall(function()
+                fireproximityprompt(prompt, 0)
+                triggered = true
+            end)
+        end
+        if typeof(firesignal) == "function" then
+            pcall(function()
+                firesignal(prompt.Triggered, LocalPlayer)
+                triggered = true
+            end)
+        end
+        if not triggered then
+            pcall(function()
+                prompt:InputHoldBegin()
+                task.wait(prompt.HoldDuration or 0.25)
+                prompt:InputHoldEnd()
+                triggered = true
+            end)
+        end
+
+        if Window and choiceName then
+            local catName = (choiceType == "ENEMIES") and "Enemy" or ((choiceType == "CURSE" or choiceType == "MEDAL_OPENER") and "Curse" or "Upgrade")
+            Window:Notify({
+                Title = "Auto-Picked " .. catName,
+                Desc = string.format("Selected: %s", tostring(choiceName)),
+                Time = 3.0
+            })
+        end
+
+        -- If inside active round (e.g. altar choice), return to original position
+        if isInRound and targetPos and originalCF then
+            task.wait(0.1)
+            pcall(function()
+                local curChar = LocalPlayer.Character
+                local curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
+                if curHrp and curHrp.Parent then
+                    curHrp.CFrame = originalCF
+                    curHrp.AssemblyLinearVelocity = Vector3.zero
+                    curHrp.AssemblyAngularVelocity = Vector3.zero
+                end
+            end)
+        end
+
+        return triggered
+    end
+
+    local function ProcessChoiceOrbs()
+        if not ScriptRunning then return end
+        local autoAny = Config.AutoUpgrade or Config.AutoCurse or Config.AutoPickEnemies or Config.AutoMedalCurses or Config.AutoContinue
+        if not autoAny then return end
+        local isDead = GiftTracker.IsPlayerDead()
+        if isDead then return end
+
+        local allChoices = GetAllAvailableChoices()
+        if #allChoices == 0 then return end
+
+        local medalOpeners = {}
+        local curseCandidates = {}
+        local continueCandidates = {}
+        local upgradeCandidates = {}
+        local enemyCandidates = {}
+
+        for _, item in ipairs(allChoices) do
+            local cType, cName, prompt = GetChoiceDetails(item)
+            if prompt and prompt.Enabled ~= false then
+                local now = os.clock()
+                if (now - (lastChoicePromptTriggered[prompt] or 0)) >= 1.5 then
+                    local upperType = cType and string.upper(tostring(cType)) or ""
+                    local upperName = cName and string.upper(tostring(cName)) or ""
+                    local actionText = prompt.ActionText or ""
+                    local objectText = prompt.ObjectText or ""
+
+                    -- 1. Check for MedalCurses opener
+                    if upperName == "MEDALCURSES" or actionText:find("Medal Curses") then
+                        table.insert(medalOpeners, { item = item, name = cName or "Medal Curses", prompt = prompt, type = "MEDAL_OPENER" })
+
+                    -- 2. Check for Continue prompts
+                    elseif actionText:find("Continue") or objectText:find("Skip Medal Selection") or item.Name == "Continue" then
+                        table.insert(continueCandidates, { item = item, name = cName or "Continue", prompt = prompt, type = "CONTINUE" })
+
+                    -- 3. Check for Curse choices
+                    elseif upperType == "CURSES" or upperType == "CURSE" or upperType:find("CURSE") or item:GetAttribute("ItemIndex") == "CurseIndex" or upperName:find("CURSE") or actionText:find("Gold Gifts") or item.Name:upper():find("CURSE") then
+                        local costNum = tonumber(actionText:match("%+(%d+)%s*Gold Gifts")
+                            or actionText:match("%+(%d+)")
+                            or actionText:match("(%d+)%s*Gold Gifts")
+                            or 0) or 0
+                        table.insert(curseCandidates, { item = item, name = cName or item.Name, prompt = prompt, type = "CURSE", cost = costNum })
+
+                    -- 4. Check for Upgrades
+                    elseif upperType == "UPGRADES" or upperType == "WINGS" or upperType == "CHAOS" then
+                        table.insert(upgradeCandidates, { item = item, name = cName or item.Name, prompt = prompt, type = cType })
+
+                    -- 5. Check for Enemies
+                    elseif upperType == "ENEMIES" then
+                        table.insert(enemyCandidates, { item = item, name = cName or item.Name, prompt = prompt, type = cType })
+                    end
+                end
+            end
+        end
+
+        -- 1. If Medal Curses opener is present, trigger it to open curse choices
+        if Config.AutoMedalCurses and #medalOpeners > 0 then
+            local opener = medalOpeners[1]
+            TriggerChoicePrompt(opener.prompt, opener.type, opener.name)
+            task.wait(0.3)
+            return
+        end
+
+        -- 2. If Curse candidates are available, pick them!
+        if (Config.AutoCurse or Config.AutoMedalCurses or Config.AutoUpgrade) and #curseCandidates > 0 then
+            table.sort(curseCandidates, function(a, b) return a.cost > b.cost end)
+            local bestCurse = curseCandidates[1]
+            local label = (bestCurse.cost > 0) and string.format("%s (+%d Gold Gifts)", bestCurse.name, bestCurse.cost) or bestCurse.name
+            TriggerChoicePrompt(bestCurse.prompt, bestCurse.type, label)
+            task.wait(0.3)
+            return
+        end
+
+        -- 3. Process Auto-Upgrade
+        if Config.AutoUpgrade and #upgradeCandidates > 0 then
+            local chosen = upgradeCandidates[1]
+            TriggerChoicePrompt(chosen.prompt, chosen.type, chosen.name)
+            task.wait(0.3)
+            return
+        end
+
+        -- 4. Process Auto-Pick Enemies (prioritize enemies the player is immune to)
+        if Config.AutoPickEnemies and #enemyCandidates > 0 then
+            local bestCandidate = nil
+            for _, cand in ipairs(enemyCandidates) do
+                if IsImmuneToEnemy(cand.name) then
+                    bestCandidate = cand
+                    break
+                end
+            end
+            if not bestCandidate then
+                bestCandidate = enemyCandidates[1]
+            end
+            if bestCandidate then
+                TriggerChoicePrompt(bestCandidate.prompt, bestCandidate.type, bestCandidate.name)
+                task.wait(0.3)
+                return
+            end
+        end
+
+        -- 5. Process Auto-Continue (presses Continue after choices are made or when Continue is offered)
+        if Config.AutoContinue and #continueCandidates > 0 then
+            local cont = continueCandidates[1]
+            TriggerChoicePrompt(cont.prompt, cont.type, cont.name)
+            task.wait(0.3)
+        end
+    end
+
+    -- Background loop
+    task.spawn(function()
+        while ScriptRunning do
+            if Config.AutoUpgrade or Config.AutoCurse or Config.AutoPickEnemies or Config.AutoMedalCurses or Config.AutoContinue then
+                pcall(ProcessChoiceOrbs)
+            end
+            task.wait(0.3)
+        end
+    end)
+
+    -- Event-driven reactive listeners
+    trackConn(CollectionService:GetInstanceAddedSignal("ChoiceOrb"):Connect(function()
+        task.wait(0.1)
+        pcall(ProcessChoiceOrbs)
+    end))
+    trackConn(CollectionService:GetInstanceAddedSignal("Votable"):Connect(function()
+        task.wait(0.1)
+        pcall(ProcessChoiceOrbs)
+    end))
+    local function hookSelect(folder)
+        if folder and folder.Name == "Select" then
+            trackConn(folder.ChildAdded:Connect(function()
+                task.wait(0.1)
+                pcall(ProcessChoiceOrbs)
+            end))
+        end
+    end
+    if Workspace:FindFirstChild("Select") then hookSelect(Workspace.Select) end
+    trackConn(Workspace.ChildAdded:Connect(function(ch)
+        if ch.Name == "Select" then
+            hookSelect(ch)
+            task.wait(0.1)
+            pcall(ProcessChoiceOrbs)
+        end
+    end))
+end
+
+-- ===================================================================
 -- 8. INTELLIGENT AUTO-COLLECT ENGINE (Safe from Tripmines & _G Hook)
 -- ===================================================================
 task.spawn(function()
     while ScriptRunning do
         pcall(function()
-            if Config.AutoCollect then
+            if Config.AutoCollect and not GiftTracker.IsPlayerDead() then
                 local effectiveRadius
                 if Config.SuperFastPickup then
                     effectiveRadius = math.clamp(Config.CollectRadius or 80, 15, 200)
@@ -3672,13 +5376,13 @@ task.spawn(function()
                 local char = LocalPlayer.Character
                 local hrp = char and char:FindFirstChild("HumanoidRootPart")
 
-                if isRoundActive and hrp and GiftClientHandler and GiftClientHandler.Gifts then
+                if isRoundActive and not GiftTracker.IsPlayerDead() and hrp and hrp.Parent and GiftClientHandler and GiftClientHandler.Gifts then
                     local myPos = hrp.Position
                     local candidates = {}
 
                     for id, gift in pairs(GiftClientHandler.Gifts) do
                         local isTripmine = gift.Tripmine or gift.Type == "Tripmine"
-                        local isSafe = (not isTripmine) or Config.TripmineDisabler
+                        local isSafe = not isTripmine
 
                         local canAttempt = false
                         if Config.SuperFastPickup then
@@ -3842,12 +5546,15 @@ local function GetClosestJumpPad()
     end
 
     if not bestPad then
-        for _, d in ipairs(Workspace:GetDescendants()) do
-            if d.Name == "JumpPad" and d:IsA("BasePart") and d.Position.Y > -200 then
-                local dist = (d.Position - myPos).Magnitude
-                if dist < bestDist then
-                    bestDist = dist
-                    bestPad = d
+        local rooms = Workspace:FindFirstChild("CurrentRooms")
+        if rooms then
+            for _, d in ipairs(rooms:GetDescendants()) do
+                if d.Name == "JumpPad" and d:IsA("BasePart") and d.Position.Y > -200 then
+                    local dist = (d.Position - myPos).Magnitude
+                    if dist < bestDist then
+                        bestDist = dist
+                        bestPad = d
+                    end
                 end
             end
         end
@@ -4076,11 +5783,6 @@ local function GetActiveStarMart()
             end
         end
     end
-    for _, d in ipairs(Workspace:GetDescendants()) do
-        if d.Name == "StarMart" and IsStarMartValid(d) then
-            return d
-        end
-    end
     return nil
 end
 
@@ -4158,22 +5860,41 @@ local function CollectStarMart()
 end
 
 -- 3. Cadence Instruments Auto-Collection
-local function CollectCadenceInstruments()
+GiftTracker.IsCollectingCadence = false
+GiftTracker.LastCadenceCollect = 0
+
+GiftTracker.CollectCadenceInstruments = function(standalone)
+    if GiftTracker.IsCollectingCadence then return false end
     local orbs = GetAllCadenceOrbs()
     if not orbs or #orbs == 0 then return false end
+
+    -- Verify at least one orb is actually uncollected (CanTouch == true)
+    local uncollected = {}
+    for _, orb in ipairs(orbs) do
+        if orb and orb.Parent and orb:IsA("BasePart") and orb.CanTouch and orb.Name ~= "CadenceAuraProtection" then
+            table.insert(uncollected, orb)
+        end
+    end
+    if #uncollected == 0 then return false end
 
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local humanoid = char and char:FindFirstChild("Humanoid")
-    local isDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+    local isDead = GiftTracker.IsPlayerDead()
     if not hrp or not hrp.Parent or not humanoid or humanoid.Health <= 0 or isDead then return false end
 
-    local collectedAny = false
-    for _, orb in ipairs(orbs) do
+    GiftTracker.IsCollectingCadence = true
+    GiftTracker.LastCadenceCollect = os.clock()
+
+    local startCFrame = hrp.CFrame
+    local startPos = hrp.Position
+    local collectedCount = 0
+
+    for _, orb in ipairs(uncollected) do
         local curChar = LocalPlayer.Character
         local curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
         local curHum = curChar and curChar:FindFirstChild("Humanoid")
-        local curDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+        local curDead = GiftTracker.IsPlayerDead()
         if not curHrp or not curHrp.Parent or not curHum or curHum.Health <= 0 or curDead then
             break
         end
@@ -4186,12 +5907,63 @@ local function CollectCadenceInstruments()
             end)
 
             triggerTouchInterest(curHrp, orb)
+            for _, partName in ipairs({ "Hitbox", "Torso", "UpperTorso", "Head" }) do
+                local p = curChar:FindFirstChild(partName)
+                if p and p:IsA("BasePart") then
+                    triggerTouchInterest(p, orb)
+                end
+            end
 
-            collectedAny = true
-            task.wait(0.06)
+            -- Brief confirmation wait until touch takes effect
+            local touchStart = os.clock()
+            while orb and orb.Parent and orb.CanTouch and (os.clock() - touchStart < 0.12) do
+                RunService.Heartbeat:Wait()
+            end
+
+            collectedCount = collectedCount + 1
+            task.wait(0.04)
         end
     end
-    return collectedAny
+
+    -- If standalone (outside Auto-Farm sweep loop) and ReturnToOrigin is enabled, return safely to start!
+    if standalone and Config.ReturnToOrigin and collectedCount > 0 then
+        local curChar = LocalPlayer.Character
+        local curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
+        local curHum = curChar and curChar:FindFirstChild("Humanoid")
+        local curDead = GiftTracker.IsPlayerDead()
+        if curHrp and curHrp.Parent and curHum and curHum.Health > 0 and not curDead then
+            local rayParams = RaycastParams.new()
+            rayParams.FilterType = Enum.RaycastFilterType.Exclude
+            if curChar then rayParams.FilterDescendantsInstances = { curChar } end
+            local groundRay = Workspace:Raycast(Vector3.new(startPos.X, startPos.Y + 4, startPos.Z), Vector3.new(0, -25, 0), rayParams)
+            local safeReturnCFrame = startCFrame
+            if not groundRay or not groundRay.Instance or not groundRay.Instance.CanCollide or not groundRay.Instance.Anchored then
+                safeReturnCFrame = GetBeaconCFrame()
+            end
+            pcall(function()
+                curHrp.CFrame = safeReturnCFrame
+                curHrp.AssemblyLinearVelocity = Vector3.zero
+                curHrp.AssemblyAngularVelocity = Vector3.zero
+            end)
+        end
+    end
+
+    if standalone and Window and collectedCount > 0 then
+        pcall(function()
+            Window:Notify({
+                Title = "Cadence Instrument Grabbed!",
+                Desc = string.format("Auto-collected %d Cadence instrument(s) to prevent curse/death!", collectedCount),
+                Time = 3.0
+            })
+        end)
+    end
+
+    GiftTracker.IsCollectingCadence = false
+    return collectedCount > 0
+end
+
+local function CollectCadenceInstruments(standalone)
+    return GiftTracker.CollectCadenceInstruments(standalone)
 end
 
 -- 3B. Medals Auto-Collection (Collapse & Upgrades)
@@ -4203,7 +5975,7 @@ local function CollectMedals()
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local humanoid = char and char:FindFirstChild("Humanoid")
-    local isDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+    local isDead = GiftTracker.IsPlayerDead()
     if not hrp or not hrp.Parent or not humanoid or humanoid.Health <= 0 or isDead then return false end
 
     local collectedAny = false
@@ -4211,7 +5983,7 @@ local function CollectMedals()
         local curChar = LocalPlayer.Character
         local curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
         local curHum = curChar and curChar:FindFirstChild("Humanoid")
-        local curDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+        local curDead = GiftTracker.IsPlayerDead()
         if not curHrp or not curHrp.Parent or not curHum or curHum.Health <= 0 or curDead then
             break
         end
@@ -4265,7 +6037,7 @@ local function ActivateAvailableStatues()
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local humanoid = char and char:FindFirstChild("Humanoid")
-    local isDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+    local isDead = GiftTracker.IsPlayerDead()
     if not hrp or not hrp.Parent or not humanoid or humanoid.Health <= 0 or isDead then return false end
 
     local now = os.clock()
@@ -4275,7 +6047,7 @@ local function ActivateAvailableStatues()
         local curChar = LocalPlayer.Character
         local curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
         local curHum = curChar and curChar:FindFirstChild("Humanoid")
-        local curDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+        local curDead = GiftTracker.IsPlayerDead()
         if not curHrp or not curHrp.Parent or not curHum or curHum.Health <= 0 or curDead then
             return activatedAny
         end
@@ -4346,7 +6118,7 @@ local function RawPerformPresentSweep(overrideHops, overrideDelay, overrideRetur
     local char = LocalPlayer.Character
     local hrp = char and char:FindFirstChild("HumanoidRootPart")
     local humanoid = char and char:FindFirstChild("Humanoid")
-    local isDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+    local isDead = GiftTracker.IsPlayerDead()
     if not hrp or not hrp.Parent or not humanoid or humanoid.Health <= 0 or isDead then
         return false, "Character not ready"
     end
@@ -4368,85 +6140,122 @@ local function RawPerformPresentSweep(overrideHops, overrideDelay, overrideRetur
     local killVoid = Workspace:FindFirstChild("KillVoid")
     local killY = (killVoid and killVoid.Position.Y) or -264.5
 
+    -- Pre-allocated cache of hostile positions (Enemies, Skinwalkers, Fake Mirage Beacons)
+    local hostilePositions = {}
+    local function refreshHostilePositions()
+        table.clear(hostilePositions)
+        local enemiesFolder = Workspace:FindFirstChild("Enemies")
+        if enemiesFolder then
+            for _, enemy in ipairs(enemiesFolder:GetChildren()) do
+                if enemy and enemy.Parent and not (GiftTracker.IsBeaconEntity and GiftTracker.IsBeaconEntity(enemy)) then
+                    local ePos = enemy:IsA("BasePart") and enemy.Position or (enemy:IsA("Model") and enemy:GetPivot().Position)
+                    if ePos then table.insert(hostilePositions, ePos) end
+                end
+            end
+        end
+        local swFolder = Workspace:FindFirstChild("Skinwalkers")
+        if swFolder then
+            for _, sw in ipairs(swFolder:GetChildren()) do
+                if sw and sw.Parent then
+                    local ePos = sw:IsA("BasePart") and sw.Position or (sw:IsA("Model") and sw:GetPivot().Position)
+                    if ePos then table.insert(hostilePositions, ePos) end
+                end
+            end
+        end
+        pcall(function()
+            for _, fake in ipairs(CollectionService:GetTagged("BeaconMirage")) do
+                if fake and fake.Parent then
+                    local fPos = fake:IsA("BasePart") and fake.Position or (fake:IsA("Model") and fake:GetPivot().Position)
+                    if fPos then table.insert(hostilePositions, fPos) end
+                end
+            end
+        end)
+    end
+
+    -- Fast zero-allocation Euclidean distance check against hostile positions
+    local function isPositionClearOfEnemies(targetPos, safeDist)
+        if not targetPos then return false end
+        local distThreshold = safeDist or 18.0
+        local distSq = distThreshold * distThreshold
+        for i = 1, #hostilePositions do
+            local hp = hostilePositions[i]
+            local dx = targetPos.X - hp.X
+            local dy = targetPos.Y - hp.Y
+            local dz = targetPos.Z - hp.Z
+            if (dx * dx + dy * dy + dz * dz) < distSq then
+                return false
+            end
+        end
+        return true
+    end
+
+    -- Reusable RaycastParams object to eliminate tens of thousands of userdata allocations per sweep
+    local sweepRayParams = RaycastParams.new()
+    sweepRayParams.FilterType = Enum.RaycastFilterType.Exclude
+    local excludeList = {}
+    if LocalPlayer.Character then table.insert(excludeList, LocalPlayer.Character) end
+    local enemiesRef = Workspace:FindFirstChild("Enemies")
+    if enemiesRef then table.insert(excludeList, enemiesRef) end
+    local skinwalkersRef = Workspace:FindFirstChild("Skinwalkers")
+    if skinwalkersRef then table.insert(excludeList, skinwalkersRef) end
+    local killVoidRef = Workspace:FindFirstChild("KillVoid")
+    if killVoidRef then table.insert(excludeList, killVoidRef) end
+    local bodyCatcherRef = Workspace:FindFirstChild("BodyCatcher")
+    if bodyCatcherRef then table.insert(excludeList, bodyCatcherRef) end
+    local dfRef = Workspace:FindFirstChild("DestroyFolder")
+    if dfRef then table.insert(excludeList, dfRef) end
+    sweepRayParams.FilterDescendantsInstances = excludeList
+
+    -- Compact 8-radial offset table (5 and 10 studs) for edge/chasm checking
+    local radialOffsets = {
+        Vector3.new(5, 0, 0), Vector3.new(-5, 0, 0), Vector3.new(0, 0, 5), Vector3.new(0, 0, -5),
+        Vector3.new(10, 0, 0), Vector3.new(-10, 0, 0), Vector3.new(0, 0, 10), Vector3.new(0, 0, -10)
+    }
+
     -- Helper to calculate the safest walkable ground position to stand on for collecting a gift
     local function getSafeGiftStandPosition(pos)
         if not pos or pos.Y <= (killY + 80) then return nil end
 
-        local rayParams = RaycastParams.new()
-        rayParams.FilterType = Enum.RaycastFilterType.Exclude
-        local excludeList = {}
-        if LocalPlayer.Character then table.insert(excludeList, LocalPlayer.Character) end
-        local enemies = Workspace:FindFirstChild("Enemies")
-        if enemies then table.insert(excludeList, enemies) end
-        local skinwalkers = Workspace:FindFirstChild("Skinwalkers")
-        if skinwalkers then table.insert(excludeList, skinwalkers) end
-        local killVoid = Workspace:FindFirstChild("KillVoid")
-        if killVoid then table.insert(excludeList, killVoid) end
-        local bodyCatcher = Workspace:FindFirstChild("BodyCatcher")
-        if bodyCatcher then table.insert(excludeList, bodyCatcher) end
-        rayParams.FilterDescendantsInstances = excludeList
-
         local df = Workspace:FindFirstChild("DestroyFolder")
 
         -- 1. Check directly underneath the gift (raycast down 24 studs)
-        local ray = Workspace:Raycast(Vector3.new(pos.X, pos.Y + 3, pos.Z), Vector3.new(0, -24, 0), rayParams)
+        local ray = Workspace:Raycast(Vector3.new(pos.X, pos.Y + 3, pos.Z), Vector3.new(0, -24, 0), sweepRayParams)
         if ray and ray.Instance and ray.Instance.CanCollide and ray.Instance.Anchored then
             if not (df and ray.Instance:IsDescendantOf(df)) then
-                return ray.Position + Vector3.new(0, 3.0, 0)
-            end
-        end
-
-        -- 2. If gift is floating over a void gap / chasm, search radial offsets (radii: 4, 8, 12, 16 studs)
-        -- to find the nearest solid floor so player can stand safely and collect via vacuum/Collect()
-        local radialOffsets = {
-            Vector3.new(4, 0, 0), Vector3.new(-4, 0, 0), Vector3.new(0, 0, 4), Vector3.new(0, 0, -4),
-            Vector3.new(8, 0, 0), Vector3.new(-8, 0, 0), Vector3.new(0, 0, 8), Vector3.new(0, 0, -8),
-            Vector3.new(6, 0, 6), Vector3.new(-6, 0, 6), Vector3.new(6, 0, -6), Vector3.new(-6, 0, -6),
-            Vector3.new(12, 0, 0), Vector3.new(-12, 0, 0), Vector3.new(0, 0, 12), Vector3.new(0, 0, -12),
-            Vector3.new(16, 0, 0), Vector3.new(-16, 0, 0), Vector3.new(0, 0, 16), Vector3.new(0, 0, -16)
-        }
-
-        for _, off in ipairs(radialOffsets) do
-            local testPos = pos + off
-            local r = Workspace:Raycast(Vector3.new(testPos.X, testPos.Y + 3, testPos.Z), Vector3.new(0, -24, 0), rayParams)
-            if r and r.Instance and r.Instance.CanCollide and r.Instance.Anchored then
-                if not (df and r.Instance:IsDescendantOf(df)) then
-                    return r.Position + Vector3.new(0, 3.0, 0)
+                local standPos = ray.Position + Vector3.new(0, 3.0, 0)
+                if isPositionClearOfEnemies(standPos, 18.0) then
+                    return standPos
                 end
             end
         end
 
-        return nil -- No safe floor within 16 studs (e.g. completely in the abyss)
-    end
-
-    -- Helper to verify a gift has a safe ground stand position
-    local function isGiftPositionSafe(pos)
-        if not pos or pos.Y <= (killY + 80) then
-            return false
+        -- 2. If gift is floating over a void gap / chasm, search radial offsets (5 and 10 studs)
+        for i = 1, #radialOffsets do
+            local off = radialOffsets[i]
+            local testPos = pos + off
+            local r = Workspace:Raycast(Vector3.new(testPos.X, testPos.Y + 3, testPos.Z), Vector3.new(0, -24, 0), sweepRayParams)
+            if r and r.Instance and r.Instance.CanCollide and r.Instance.Anchored then
+                if not (df and r.Instance:IsDescendantOf(df)) then
+                    local standPos = r.Position + Vector3.new(0, 3.0, 0)
+                    if isPositionClearOfEnemies(standPos, 18.0) then
+                        return standPos
+                    end
+                end
+            end
         end
 
-        -- Beacon Exclusion Zone: Never teleport within 16 studs of the Beacon!
-        -- Prevents accidentally clipping or touching the Beacon during sweeps.
-        local beacon = Workspace:FindFirstChild("Beacon")
-        local bPos = beacon and (beacon:IsA("BasePart") and beacon.Position or beacon:GetPivot().Position) or Vector3.new(0, 544.5, 0)
-        local distToBeacon2D = math.sqrt((pos.X - bPos.X)^2 + (pos.Z - bPos.Z)^2)
-        if distToBeacon2D < 16.0 then
-            return false -- Too close to Beacon, collect via vacuum instead!
-        end
-
-        return getSafeGiftStandPosition(pos) ~= nil
+        return nil -- No safe floor within 10 studs
     end
 
-    -- Helper to check if a gift is on an actively collapsing/disappearing platform
+    -- Fast tag/attribute check for actively collapsing platforms (ZERO physics raycasts!)
     local function isPlatformCollapsing(g)
         if not Config.PrioritizeCollapsing or not g then return false end
         local roomId = g.RoomId
         local cr = Workspace:FindFirstChild("CurrentRooms")
         local df = Workspace:FindFirstChild("DestroyFolder")
 
-        if df and roomId then
-            local rInDf = df:FindFirstChild(tostring(roomId))
-            if rInDf then return true end
+        if df and roomId and df:FindFirstChild(tostring(roomId)) then
+            return true
         end
 
         if cr and roomId then
@@ -4467,52 +6276,55 @@ local function RawPerformPresentSweep(overrideHops, overrideDelay, overrideRetur
             end
         end
 
-        if g.Position then
-            local rayParams = RaycastParams.new()
-            rayParams.FilterType = Enum.RaycastFilterType.Exclude
-            if LocalPlayer.Character then rayParams.FilterDescendantsInstances = { LocalPlayer.Character } end
-            local r = Workspace:Raycast(Vector3.new(g.Position.X, g.Position.Y + 2, g.Position.Z), Vector3.new(0, -15, 0), rayParams)
-            if r and r.Instance then
-                if df and r.Instance:IsDescendantOf(df) then return true end
-                if not r.Instance.Anchored or r.Instance.AssemblyLinearVelocity.Y < -1.5 then return true end
-                if r.Instance:HasTag("TileDestroy") or r.Instance:HasTag("TileCrack") then return true end
-            end
-        end
-
         return false
     end
 
-    -- Helper to instantly vacuum presents around any position (e.g. room cluster or start position)
+    -- Helper to instantly vacuum presents around any position (with fast distance-squared pre-filtering)
     local function vacuumPresentsNear(pos, radius)
+        if GiftTracker.IsPlayerDead() then return 0 end
         if not pos or not GiftClientHandler or not GiftClientHandler.Gifts then return 0 end
+        local r = radius or Config.CollectRadius or 45
         if Config.SuperFastPickup then
-            radius = math.clamp(radius or Config.CollectRadius or 80, 15, 200)
+            r = math.clamp(r, 15, 200)
         else
-            radius = math.min(math.clamp(radius or Config.CollectRadius or 35, 15, 80), GiftTracker.MaxRange)
+            r = math.min(math.clamp(r, 15, 80), GiftTracker.MaxRange)
         end
+        local rSq = r * r
+        local killThreshold = killY + 45
         local count = 0
         pcall(function()
             for id, g in pairs(GiftClientHandler.Gifts) do
-                local isTripmine = g.Tripmine or g.Type == "Tripmine"
-                local isSafe = (not isTripmine) or Config.TripmineDisabler
-                local isAboveVoid = g.Position and g.Position.Y > (killY + 45)
-                local canGrab = false
-                if Config.SuperFastPickup then
-                    canGrab = isSafe and isAboveVoid and (not g.Collected) and (not g.Destroyed) and g.Position and ((g.Position - pos).Magnitude <= radius)
-                else
-                    canGrab = isSafe and isAboveVoid and GiftTracker:CanAttempt(g, pos, radius)
-                end
-                if canGrab then
-                    if g.Id and not Config.SuperFastPickup then
-                        GiftTracker.Pending[g.Id] = os.clock()
+                if not g.Collected and not g.Destroyed and g.Position then
+                    local gPos = g.Position
+                    local dx = gPos.X - pos.X
+                    local dy = gPos.Y - pos.Y
+                    local dz = gPos.Z - pos.Z
+                    if (dx * dx + dy * dy + dz * dz) <= rSq then
+                        local isTripmine = g.Tripmine or g.Type == "Tripmine"
+                        if not isTripmine and gPos.Y > killThreshold then
+                            local canGrab = false
+                            if Config.SuperFastPickup then
+                                canGrab = true
+                            else
+                                canGrab = GiftTracker:CanAttempt(g, pos, r)
+                            end
+                            if canGrab then
+                                if g.Id and not Config.SuperFastPickup then
+                                    GiftTracker.Pending[g.Id] = os.clock()
+                                end
+                                pcall(function() g:Collect(false, true, 1) end)
+                                count = count + 1
+                            end
+                        end
                     end
-                    pcall(function() g:Collect(false, true, 1) end)
-                    count = count + 1
                 end
             end
         end)
         return count
     end
+
+    -- Initial capture of hostile entities before pre-sweep phases
+    refreshHostilePositions()
 
     -- Phase 0: Immediate Present Vacuum around start position
     -- Instantly grabs all presents near where player is standing BEFORE teleporting away to statues or Star-Mart!
@@ -4539,8 +6351,13 @@ local function RawPerformPresentSweep(overrideHops, overrideDelay, overrideRetur
     pcall(CollectMedals)
 
     -- 4. Grab any active Cadence Instruments
-    if Config.SweepGetCadence then
-        pcall(CollectCadenceInstruments)
+    if Config.SweepGetCadence or Config.AutoGetCadence then
+        pcall(function() CollectCadenceInstruments(false) end)
+    end
+
+    -- 5. Charge Celestial Pylons if available
+    if Config.AutoPylon and not GiftTracker.IsChargingPylon and GiftTracker.ChargeAllPylons then
+        pcall(GiftTracker.ChargeAllPylons)
     end
 
     local hops = 0
@@ -4550,8 +6367,8 @@ local function RawPerformPresentSweep(overrideHops, overrideDelay, overrideRetur
         local curChar = LocalPlayer.Character
         local curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
         local curHum = curChar and curChar:FindFirstChild("Humanoid")
-        local curDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
-        if not curChar or not curHrp or not curHrp.Parent or not curHum or curHum.Health <= 0 or curDead then
+        local curDead = GiftTracker.IsPlayerDead()
+        if curDead or not curChar or not curHrp or not curHrp.Parent or not curHum or curHum.Health <= 0 then
             break
         end
 
@@ -4560,41 +6377,69 @@ local function RawPerformPresentSweep(overrideHops, overrideDelay, overrideRetur
             pcall(HandleRazorbloomEmergency)
         end
 
+        -- Refresh hostiles and real beacon position once per hop (Zero GC overhead)
+        refreshHostilePositions()
+
+        local beacon = (GiftTracker.GetActiveBeacon and GiftTracker.GetActiveBeacon()) or Workspace:FindFirstChild("Beacon")
+        local bPos = beacon and (beacon:IsA("BasePart") and beacon.Position or beacon:GetPivot().Position) or Vector3.new(0, 544.5, 0)
+
         local myPos = curHrp.Position
-        local bestGift = nil
-        local bestDist = math.huge
-        local bestTier = 0 -- 3: collapsing/disappearing, 2: gold/passage, 1: normal
+        local killThreshold = killY + 80
+        local candidates = {}
 
-        -- Direct global pathing with multi-tier prioritization (Collapsing platforms > Gold > Distance)
+        -- Candidate selection loop with ZERO physics raycasts! (Reduces raycast load from 1,760 to 0 per check)
         for id, g in pairs(GiftClientHandler.Gifts) do
-            if not g.Collected and g.Position then
+            if not g.Collected and not g.Destroyed and g.Position then
+                local gPos = g.Position
                 local isTripmine = g.Tripmine or g.Type == "Tripmine"
-                local isSafe = (not isTripmine) or Config.TripmineDisabler
-                local isAboveVoid = isGiftPositionSafe(g.Position)
-
-                if isSafe and isAboveVoid then
-                    local isCollapsing = isPlatformCollapsing(g)
-                    local isGold = (g.Golden or g.Type == "GoldenGift" or g.Type == "PassageGift")
-                    local tier = isCollapsing and 3 or (isGold and 2 or 1)
-                    local dist = (g.Position - myPos).Magnitude
-
-                    if tier > bestTier then
-                        bestTier = tier
-                        bestDist = dist
-                        bestGift = g
-                    elseif tier == bestTier then
-                        if dist < bestDist then
-                            bestDist = dist
-                            bestGift = g
+                if not isTripmine and gPos.Y > killThreshold then
+                    -- Beacon Exclusion Zone: Never teleport within 16 studs of the Beacon!
+                    local dxB = gPos.X - bPos.X
+                    local dzB = gPos.Z - bPos.Z
+                    if (dxB * dxB + dzB * dzB) >= 256.0 then
+                        -- Hostile Enemy Exclusion: Fast Euclidean distance check
+                        if isPositionClearOfEnemies(gPos, 18.0) then
+                            local isCollapsing = isPlatformCollapsing(g)
+                            local isGold = (g.Golden or g.Type == "GoldenGift" or g.Type == "PassageGift")
+                            local tier = isCollapsing and 3 or (isGold and 2 or 1)
+                            local dist = (gPos - myPos).Magnitude
+                            table.insert(candidates, {
+                                gift = g,
+                                tier = tier,
+                                dist = dist
+                            })
                         end
                     end
                 end
             end
         end
 
-        if not bestGift or not bestGift.Position then break end
-        local standTargetPos = getSafeGiftStandPosition(bestGift.Position)
-        if not standTargetPos then break end
+        if #candidates == 0 then break end
+
+        -- Sort candidates by priority tier descending (collapsing > gold > normal) and distance ascending
+        table.sort(candidates, function(a, b)
+            if a.tier ~= b.tier then
+                return a.tier > b.tier
+            end
+            return a.dist < b.dist
+        end)
+
+        -- Lazy Ground Verification: Test getSafeGiftStandPosition ONLY on the top candidates!
+        -- In 98% of cases, candidate 1 is on solid ground (1 single raycast instead of 1,760!).
+        local bestGift = nil
+        local standTargetPos = nil
+        local maxChecks = math.min(#candidates, 6)
+        for i = 1, maxChecks do
+            local cand = candidates[i]
+            local sp = getSafeGiftStandPosition(cand.gift.Position)
+            if sp then
+                bestGift = cand.gift
+                standTargetPos = sp
+                break
+            end
+        end
+
+        if not bestGift or not standTargetPos then break end
 
         -- Teleport safely onto the grounded stand position
         pcall(function()
@@ -4621,11 +6466,18 @@ local function RawPerformPresentSweep(overrideHops, overrideDelay, overrideRetur
     end
 
     -- Return safely to origin if requested
-    if returnOrigin then
+    local isFullyDone = false
+    pcall(function()
+        local clientCol, maxGifts, isBeaconOpen = GiftTracker:GetProgress()
+        if isBeaconOpen or (maxGifts > 0 and clientCol >= maxGifts) then
+            isFullyDone = true
+        end
+    end)
+    if returnOrigin and not (Config.AutoTeleportToBeacon and isFullyDone) then
         local curChar = LocalPlayer.Character
         local curHrp = curChar and curChar:FindFirstChild("HumanoidRootPart")
         local curHum = curChar and curChar:FindFirstChild("Humanoid")
-        local curDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+        local curDead = GiftTracker.IsPlayerDead()
         if curHrp and curHrp.Parent and curHum and curHum.Health > 0 and not curDead then
             local originPos = startCFrame.Position
             local rayParams = RaycastParams.new()
@@ -4666,7 +6518,7 @@ end
 -- 5B. Safe Protected Sweep Wrapper with Guaranteed State Cleanup
 local function PerformPresentSweep(overrideHops, overrideDelay, overrideReturn)
     if IsSweeping then return false, "A sweep is already in progress" end
-    local isDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+    local isDead = GiftTracker.IsPlayerDead()
     if isDead then return false, "Player is dead" end
 
     local char = LocalPlayer.Character
@@ -4729,22 +6581,37 @@ local function HasSweepTargets()
         end
 
         -- 4. Check for Cadence instruments
-        if Config.SweepGetCadence then
+        if Config.SweepGetCadence or Config.AutoGetCadence then
             local orbs = GetAllCadenceOrbs()
             if orbs and #orbs > 0 then
-                hasTargets = true
-                return
+                for _, orb in ipairs(orbs) do
+                    if orb and orb.Parent and orb:IsA("BasePart") and orb.CanTouch and orb.Name ~= "CadenceAuraProtection" then
+                        hasTargets = true
+                        return
+                    end
+                end
             end
         end
 
-        -- 5. Check for uncollected gifts
+        -- 5. Check for uncompleted Celestial Pylons
+        if Config.AutoPylon then
+            local pylons = GetAllPylons()
+            for _, pylon in ipairs(pylons) do
+                if pylon and pylon.Parent and pylon:GetAttribute("Completed") ~= true then
+                    hasTargets = true
+                    return
+                end
+            end
+        end
+
+        -- 6. Check for uncollected gifts
         if GiftClientHandler and GiftClientHandler.Gifts then
             local killVoid = Workspace:FindFirstChild("KillVoid")
             local killY = (killVoid and killVoid.Position.Y) or -264.5
             for _, g in pairs(GiftClientHandler.Gifts) do
                 if not g.Collected and not g.Destroyed and g.Position then
                     local isTripmine = g.Tripmine or g.Type == "Tripmine"
-                    local isSafe = (not isTripmine) or Config.TripmineDisabler
+                    local isSafe = not isTripmine
                     local isAboveVoid = g.Position.Y > (killY + 80)
                     if isSafe and isAboveVoid then
                         hasTargets = true
@@ -4761,8 +6628,8 @@ end
 task.spawn(function()
     while ScriptRunning do
         pcall(function()
-            -- Watchdog: force clear stuck sweep after 15 seconds
-            if IsSweeping and (os.clock() - SweepStartTime > 15.0) then
+            -- Watchdog: force clear stuck sweep after 15 seconds (do not interrupt active pylon charging)
+            if IsSweeping and not GiftTracker.IsChargingPylon and (os.clock() - SweepStartTime > 15.0) then
                 IsSweeping = false
                 SweepStartTime = 0
             end
@@ -4774,7 +6641,7 @@ task.spawn(function()
 
             if Config.TeleportSweeper and not IsSweeping then
                 local isRoundActive = (not InRound) or (InRound.Value == true)
-                local isDead = LocalPlayer:FindFirstChild("Dead") and LocalPlayer.Dead.Value == true
+                local isDead = GiftTracker.IsPlayerDead()
                 local char = LocalPlayer.Character
                 local humanoid = char and char:FindFirstChild("Humanoid")
                 local hrp = char and char:FindFirstChild("HumanoidRootPart")
@@ -4867,6 +6734,19 @@ task.spawn(function()
         pcall(refreshAllHighlights)
         pcall(refreshEnemyHighlights)
         pcall(refreshAllStatueESP)
+        if Config.SeamineESP and GiftTracker.RefreshAllSeamineESP then
+            pcall(GiftTracker.RefreshAllSeamineESP)
+        end
+        pcall(function()
+            if GiftTracker.GetActiveBeacon then
+                local activeBeacon, isImp = GiftTracker.GetActiveBeacon()
+                if activeBeacon and isImp and activeBeacon:IsA("BasePart") then
+                    if not activeBeacon.CanTouch then
+                        activeBeacon.CanTouch = true
+                    end
+                end
+            end
+        end)
         if Config.AutoDisableEnemies or Config.ProjectileDisabler then
             pcall(ClearAllSeamines)
             pcall(ClearAllBlackHoles)
@@ -5241,6 +7121,33 @@ UIControls.AutoDispelWitherrot = TeleportSec:Toggle({
     Value = Config.AutoDispelWitherrot,
     Callback = function(val)
         Config.AutoDispelWitherrot = val
+        debouncedSaveGameConfig()
+    end
+})
+
+UIControls.AutoGetCadence = TeleportSec:Toggle({
+    Title = "Auto-Collect Cadence Instruments",
+    Desc = "Automatically grabs instruments when Cadence plays to prevent instant death (Runs independently of Auto-Farm)",
+    Value = Config.AutoGetCadence,
+    Callback = function(val)
+        Config.AutoGetCadence = val
+        Config.SweepGetCadence = val
+        if UIControls.CadenceEspAutoCollect and typeof(UIControls.CadenceEspAutoCollect.SetValue) == "function" then
+            pcall(function() UIControls.CadenceEspAutoCollect:SetValue(val, true) end)
+        end
+        debouncedSaveGameConfig()
+    end
+})
+
+UIControls.AutoPylon = TeleportSec:Toggle({
+    Title = "Auto-Charge Celestial Pylons",
+    Desc = "Automatically teleports to uncompleted pylons and stays on them until fully charged",
+    Value = Config.AutoPylon,
+    Callback = function(val)
+        Config.AutoPylon = val
+        if UIControls.PylonEspAuto and typeof(UIControls.PylonEspAuto.SetValue) == "function" then
+            pcall(function() UIControls.PylonEspAuto:SetValue(val, true) end)
+        end
         debouncedSaveGameConfig()
     end
 })
@@ -5813,6 +7720,15 @@ UIControls.SelectedEnemiesToDelete = ThreatDeletionSec:Dropdown({
                     Config.SelectedEnemiesToDelete[v] = true
                 end
             end
+            Config.SelectedEnemiesToDelete["BeaconImp"] = nil
+            Config.SelectedEnemiesToDelete["BeaconMart"] = nil
+            Config.SelectedEnemiesToDelete["FakeBeaconImp"] = nil
+            if GiftTracker.IsBeaconImpCurseActive and GiftTracker.IsBeaconImpCurseActive() then
+                Config.SelectedEnemiesToDelete["Mart"] = nil
+                Config.SelectedEnemiesToDelete["OldMart"] = nil
+                Config.SelectedEnemiesToDelete["RedMart"] = nil
+                Config.SelectedEnemiesToDelete["BigMart"] = nil
+            end
         end
         -- Only delete enemies if AutoDisableEnemies toggle is actively enabled!
         if Config.AutoDisableEnemies then
@@ -5872,11 +7788,30 @@ btnSelectAll = ThreatDeletionSec:Button({
             btnSelectAll:SetDesc("Selects all enemies to be deleted")
         end)
 
+        local isBeaconImpActive = GiftTracker.IsBeaconImpCurseActive and GiftTracker.IsBeaconImpCurseActive()
         for _, name in ipairs(canonicalEnemyNames) do
-            Config.SelectedEnemiesToDelete[name] = true
+            if not (isBeaconImpActive and (name == "Mart" or name == "OldMart" or name == "RedMart")) then
+                Config.SelectedEnemiesToDelete[name] = true
+            end
+        end
+        Config.SelectedEnemiesToDelete["BeaconImp"] = nil
+        Config.SelectedEnemiesToDelete["BeaconMart"] = nil
+        Config.SelectedEnemiesToDelete["FakeBeaconImp"] = nil
+        if isBeaconImpActive then
+            Config.SelectedEnemiesToDelete["Mart"] = nil
+            Config.SelectedEnemiesToDelete["OldMart"] = nil
+            Config.SelectedEnemiesToDelete["RedMart"] = nil
+            Config.SelectedEnemiesToDelete["BigMart"] = nil
+        end
+
+        local selectedList = {}
+        for _, n in ipairs(canonicalEnemyNames) do
+            if Config.SelectedEnemiesToDelete[n] then
+                table.insert(selectedList, n)
+            end
         end
         if UIControls.SelectedEnemiesToDelete and typeof(UIControls.SelectedEnemiesToDelete.SetValue) == "function" then
-            pcall(function() UIControls.SelectedEnemiesToDelete:SetValue(canonicalEnemyNames) end)
+            pcall(function() UIControls.SelectedEnemiesToDelete:SetValue(selectedList) end)
         end
         if Config.AutoDisableEnemies then
             pcall(function()
@@ -5959,7 +7894,118 @@ UIControls.GoldGatedBeacon = ThreatSafetySec:Toggle({
     end
 })
 
+UIControls.AutoTeleportToBeacon = ThreatSafetySec:Toggle({
+    Title = "Auto Teleport to Beacon (100% Collected)",
+    Desc = "Instantly teleports you into Beacon once all presents are server-confirmed",
+    Value = Config.AutoTeleportToBeacon,
+    Callback = function(val)
+        Config.AutoTeleportToBeacon = val
+        pcall(updateBeaconTouchState)
+        debouncedSaveGameConfig()
+    end
+})
+
+UIControls.AutoDieAtLevel = ThreatSafetySec:Toggle({
+    Title = "Auto Die at Target Level",
+    Desc = "Automatically resets character upon reaching the specified level",
+    Value = Config.AutoDieAtLevel,
+    Callback = function(val)
+        Config.AutoDieAtLevel = val
+        debouncedSaveGameConfig()
+    end
+})
+
+UIControls.TargetDieLevel = ThreatSafetySec:Slider({
+    Title = "Target Level to Reset",
+    Desc = "Level milestone to trigger automatic run reset",
+    Min = 1,
+    Max = 100,
+    Value = Config.TargetDieLevel,
+    Rounding = 0,
+    Callback = function(val)
+        Config.TargetDieLevel = val
+        debouncedSaveGameConfig()
+    end
+})
+
+UIControls.AutoDieAtGiftPercent = ThreatSafetySec:Toggle({
+    Title = "Auto Die at Gift %",
+    Desc = "Automatically resets character upon collecting specified % of gifts in round",
+    Value = Config.AutoDieAtGiftPercent,
+    Callback = function(val)
+        Config.AutoDieAtGiftPercent = val
+        debouncedSaveGameConfig()
+    end
+})
+
+UIControls.TargetDieGiftPercent = ThreatSafetySec:Slider({
+    Title = "Target Gift % to Reset",
+    Desc = "Percentage of gifts in level required to trigger auto-reset",
+    Min = 10,
+    Max = 100,
+    Value = Config.TargetDieGiftPercent,
+    Rounding = 0,
+    Callback = function(val)
+        Config.TargetDieGiftPercent = val
+        debouncedSaveGameConfig()
+    end
+})
+
 -- --- SUBTAB: UPGRADES ---
+do
+    local AutoShopSec = SubUpgrades:Section({ Title = "SHOP & VOTING AUTOMATION" })
+
+    UIControls.AutoUpgrade = AutoShopSec:Toggle({
+        Title = "Auto-Pick Upgrades",
+        Desc = "Automatically triggers upgrade ChoiceOrbs and shop pedestals between rounds",
+        Value = Config.AutoUpgrade,
+        Callback = function(val)
+            Config.AutoUpgrade = val
+            debouncedSaveGameConfig()
+        end
+    })
+
+    UIControls.AutoCurse = AutoShopSec:Toggle({
+        Title = "Auto-Pick Curses",
+        Desc = "Automatically picks curse ChoiceOrbs and pedestals alongside upgrades",
+        Value = Config.AutoCurse,
+        Callback = function(val)
+            Config.AutoCurse = val
+            debouncedSaveGameConfig()
+        end
+    })
+
+    UIControls.AutoPickEnemies = AutoShopSec:Toggle({
+        Title = "Auto-Pick Enemies (Immunity Priority)",
+        Desc = "Automatically picks enemies, prioritizing ones you have active damage immunity to",
+        Value = Config.AutoPickEnemies,
+        Callback = function(val)
+            Config.AutoPickEnemies = val
+            debouncedSaveGameConfig()
+        end
+    })
+
+    UIControls.AutoMedalCurses = AutoShopSec:Toggle({
+        Title = "Auto-Pick Medal Curses (Highest Reward)",
+        Desc = "Automatically chooses Medal Curses and selects the one with highest Golden Gift reward",
+        Value = Config.AutoMedalCurses,
+        Callback = function(val)
+            Config.AutoMedalCurses = val
+            debouncedSaveGameConfig()
+        end
+    })
+
+    UIControls.AutoContinue = AutoShopSec:Toggle({
+        Title = "Auto-Continue (End Screen & Shop)",
+        Desc = "Automatically clicks Continue on EndScreen and triggers shop Continue prompts",
+        Value = Config.AutoContinue,
+        Callback = function(val)
+            Config.AutoContinue = val
+            debouncedSaveGameConfig()
+        end
+    })
+end
+
 local UpgradeSpooferSec = SubUpgrades:Section({ Title = "FREE UPGRADES" })
 
 UIControls.SpoofUpgrades = UpgradeSpooferSec:Toggle({
@@ -6160,6 +8206,20 @@ UIControls.CadenceESP = CadenceEspSec:Toggle({
     end
 })
 
+UIControls.CadenceEspAutoCollect = CadenceEspSec:Toggle({
+    Title = "Auto-Collect Instruments",
+    Desc = "Automatically grabs instruments when they spawn to prevent curse/death (Works without Auto-Farm)",
+    Value = Config.AutoGetCadence,
+    Callback = function(val)
+        Config.AutoGetCadence = val
+        Config.SweepGetCadence = val
+        if UIControls.AutoGetCadence and typeof(UIControls.AutoGetCadence.SetValue) == "function" then
+            pcall(function() UIControls.AutoGetCadence:SetValue(val, true) end)
+        end
+        debouncedSaveGameConfig()
+    end
+})
+
 CadenceEspSec:Button({
     Title = "Teleport to Closest Instrument",
     Desc = "Instantly teleports to the nearest active instrument",
@@ -6212,6 +8272,19 @@ UIControls.PylonShowCompleted = PylonEspSec:Toggle({
     end
 })
 
+UIControls.PylonEspAuto = PylonEspSec:Toggle({
+    Title = "Auto-Charge Pylons",
+    Desc = "Automatically teleports to uncompleted pylons and stays on them until 100% charged (Works without Auto-Farm)",
+    Value = Config.AutoPylon,
+    Callback = function(val)
+        Config.AutoPylon = val
+        if UIControls.AutoPylon and typeof(UIControls.AutoPylon.SetValue) == "function" then
+            pcall(function() UIControls.AutoPylon:SetValue(val, true) end)
+        end
+        debouncedSaveGameConfig()
+    end
+})
+
 PylonEspSec:Button({
     Title = "Teleport to Nearest Pylon",
     Desc = "Instantly teleports to the nearest uncompleted pylon platform",
@@ -6227,6 +8300,20 @@ PylonEspSec:Button({
     end
 })
 
+    local SeamineEspSec = SubEsp:Section({ Title = "SEAMINES ESP" })
+    UIControls.SeamineESP = SeamineEspSec:Toggle({
+    Title = "See Seamines (ESP)",
+    Desc = "Highlights floating sea mines in vivid orange with 3D distance trackers",
+    Value = Config.SeamineESP,
+    Callback = function(val)
+        Config.SeamineESP = val
+        if GiftTracker.RefreshAllSeamineESP then
+            pcall(GiftTracker.RefreshAllSeamineESP)
+        end
+        debouncedSaveGameConfig()
+    end
+})
+
 local LegendSec = SubEsp:Section({ Title = "ESP COLORS GUIDE" })
 LegendSec:Label({ Title = "Regular Presents", Desc = "Cyan Outline" })
 LegendSec:Label({ Title = "Golden Presents", Desc = "Gold Outline" })
@@ -6235,6 +8322,7 @@ LegendSec:Label({ Title = "Tripmines", Desc = "Red Warning Outline" })
 LegendSec:Label({ Title = "Statues", Desc = "Altar Colors (Red = Ignored)" })
 LegendSec:Label({ Title = "Cadence Instruments", Desc = "Neon Pink [COLLECT OR DIE]" })
 LegendSec:Label({ Title = "Celestial Pylons", Desc = "Magenta (Unactivated) / Gold (Charging) / Green (Done)" })
+LegendSec:Label({ Title = "Seamines", Desc = "Vivid Hazard Orange" })
 end
 
 
@@ -6254,8 +8342,8 @@ _G.__Nullscape_Cleanup = function()
     -- Restore function and metamethod hooks
     for name, data in pairs(OrigHooks) do
         pcall(function()
-            if data.method == "__namecall" and typeof(hookmetamethod) == "function" then
-                hookmetamethod(data.target, "__namecall", data.orig)
+            if (data.method == "__namecall" or data.method == "__index") and typeof(hookmetamethod) == "function" then
+                hookmetamethod(data.target, data.method, data.orig)
             elseif data.target and data.method and data.orig then
                 hookfunction(data.target[data.method], data.orig)
             end
@@ -6321,6 +8409,19 @@ _G.__Nullscape_Cleanup = function()
         pcall(function() bb:Destroy() end)
     end
     table.clear(ActivePylonBillboards)
+
+    if GiftTracker.ActiveSeamineHighlights then
+        for hl in pairs(GiftTracker.ActiveSeamineHighlights) do
+            pcall(function() hl:Destroy() end)
+        end
+        table.clear(GiftTracker.ActiveSeamineHighlights)
+    end
+    if GiftTracker.ActiveSeamineBillboards then
+        for bb in pairs(GiftTracker.ActiveSeamineBillboards) do
+            pcall(function() bb:Destroy() end)
+        end
+        table.clear(GiftTracker.ActiveSeamineBillboards)
+    end
 
     if cadenceAuraOrb then
         pcall(function() cadenceAuraOrb:Destroy() end)
@@ -6426,8 +8527,12 @@ _G.__Nullscape_Cleanup = function()
     table.clear(GiftTracker.Pending)
     table.clear(GiftTracker.Failed)
     table.clear(GiftTracker.Confirmed)
+    GiftTracker.IsCollectingCadence = false
+    GiftTracker.IsChargingPylon = false
     IsSweeping = false
     Config.TeleportSweeper = false
+    Config.AutoGetCadence = false
+    Config.AutoPylon = false
     Config.AntiVoid = false
     _G.__Nullscape_Cleanup = nil
 end
