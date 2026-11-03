@@ -111,6 +111,29 @@ local function ResolveLibrary(timeout)
         task.wait(0.1)
     end
 
+-- fall back URL
+    local rawUrl = "https://pastebin.com/raw/ypqqtv7J"
+    local getOk, rawCode = pcall(function()
+        if typeof(game.HttpGet) == "function" then
+            return game:HttpGet(rawUrl)
+        end
+        return nil
+    end)
+    if getOk and rawCode and #rawCode > 0 then
+        pcall(function()
+            if typeof(writefile) == "function" then
+                writefile("UI.lua", rawCode)
+            end
+        end)
+        local loadOk, fn = pcall(loadstring, rawCode)
+        if loadOk and type(fn) == "function" then
+            local runOk, res = pcall(fn)
+            if runOk and res and type(res) == "table" and (type(res.Window) == "function" or type(res.CreateWindow) == "function") then
+                return res
+            end
+        end
+    end
+
     return (Globals and (Globals.Library or Globals.Aether or Globals.AetherUI or Globals.AetherLibrary))
         or (typeof(getgenv) == "function" and (getgenv().Library or getgenv().Aether or getgenv().AetherUI or getgenv().AetherLibrary))
         or (_G and (_G.Library or _G.Aether or _G.AetherUI or _G.AetherLibrary))
