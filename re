@@ -231,8 +231,8 @@ do
     for _, parent in ipairs(searchParents) do
         cleanInParent(parent)
     end
-    -- Only fall back to CoreGui (fully pcall-guarded) if Aether wasn't found in gethui/PlayerGui
-    if not foundAether then
+    -- Only fall back to CoreGui (fully pcall-guarded) if gethui() was unavailable and Aether wasn't found in PlayerGui
+    if not foundAether and not uiRoot then
         pcall(function()
             cleanInParent(game:GetService("CoreGui"))
         end)
@@ -270,6 +270,8 @@ local State = {
     ResumingMobAfterDeath = false,
     SellingMobLoot = false,
     IsSellingRunes = false,
+    IsAutoSellingMenu = false,
+    IsDoingQuestNpc = false,
     PendingRuneSell = false,
     LastRuneSellAttempt = 0,
     LastMobLootSellAttempt = 0,
@@ -309,13 +311,22 @@ local Config = {
     StuckRockBlacklistTime = 45, -- Seconds to blacklist a stubborn rock before retrying
     AvoidPlayerOccupiedRocks = true, -- Switches to another rock if another player actually owns/claimed it
     PrioritizeStrongestRock = true, -- When multiple rock types are selected, mines strongest to weakest first
+    PrioritizeCometRocks = false, -- Interrupts Auto Mine / Auto Combat to prioritize Comet Star event rocks (Galaxite / Star Dust)
     MinTweenY = -20, -- Minimum safe Y elevation during cross-map / inter-room tweening
     GlideSpeed = 55, -- Fast, anti-tp-safe tween speed in studs/sec
     MineDelay = 0.15,
     MineDistance = 5000, -- Entire map scan radius by default
     AutoEquipPickaxe = true,
     PrioritizeCritical = true,
-    AutoDefense = true, -- Spams Weapon alongside Pickaxe while mining so mobs take damage without stopping mining
+    AutoDefense = false, -- Legacy: spams Weapon alongside Pickaxe on every swing (slows heavy weapons; prefer MineKillMobsEnabled)
+    MineKillMobsEnabled = false, -- Safety feature: pauses mining to cleanly kill nearby/attacking mobs, then resumes the same rock
+    MineKillMobsTrigger = "Both (Near or Attacked)", -- "Both (Near or Attacked)", "When Nearby (Range)", "When Attacked (Damage / Parry)"
+    MineKillMobsRange = 18, -- Studs radius to detect nearby hostile mobs while mining
+    MineDefenseLowHpRetreat = true, -- Retreats into the air to regenerate + drink Health Potions when low HP during Mob Defense
+    MineDefenseRetreatHP = 35, -- Retreat into the air & drink Health Potions when HP% drops to or below this during Mob Defense
+    MineDefenseResumeHP = 85, -- Drop back down to finish fighting once HP recovers to this %
+    MineMultiRock = true, -- When two target rocks are very close together, position in the middle to hit both simultaneously
+    MineMultiRockMaxGap = 8.5, -- Max surface-to-surface gap (studs) between two rocks to mine both at once
     FilterRocksByOre = false, -- Crack rocks until Ore(Model) spawns, then skip any rock lacking WantedRockOres until it regenerates
     WantedRockOres = { "Darkryte", "Demonite" }, -- Multi-select wanted ores inside rocks
     FilterRocksByOreBackupEnabled = false, -- When all wanted/pending rocks are broken, fully break backup rocks to force respawns
@@ -349,8 +360,9 @@ local Config = {
     WeaponHuntOre3 = "Auto: Best From Inventory",
     WeaponHuntOre4 = "Auto: Best From Inventory",
     WeaponHuntSellDuds = true,
-    WeaponHuntRefundDuds = false,
+    WeaponHuntRefundDuds = true,
     WeaponHuntReserveOres = true,
+    WeaponHuntStopOnCraft = true, -- Stop forging immediately once the Target Sword / Weapon is crafted (OFF = keep target & keep rolling)
     CalcItemType = "Armor",
     CalcCraftCategory = "Armor",
     CalcArmorPiece = "All 3 Armor Pieces",
@@ -373,7 +385,12 @@ local Config = {
     AutoCraftInterruptFarm = false, -- OFF = strict Auto Mine / Combat > Auto Craft > Auto Forge; ON = craft whenever a slot opens
     AutoSellStash = false,
     SellStashInterval = 60.0,
-    SellOreWhitelist = {}, -- Multi-select whitelist: ONLY selected ores can be sold!
+    SellOreWhitelist = {}, -- Legacy whitelist (kept for backwards config compat)
+    AutoSellMenuEnabled = false, -- Native Ore Auto-Sell master toggle (Ore Rarity + Per-Ore Keep Quantity)
+    AutoSellInterval = 12, -- Seconds between Ore Auto-Sell sweeps
+    AutoSellOnlyWhenBagFull = false, -- Wait until bag hits capacity before selling (ideal without Sell Anywhere pass)
+    AutoSellOreRarities = {}, -- Array (or map) of ore rarities to auto-sell (e.g. {"Common", "Uncommon"})
+    AutoSellOreKeepQty = {}, -- Map { [oreName] = keepQty } (overrides Ore Rarity; nil = no cap, 0 = sell all, N = keep N)
     AutoClaimDaily = true,
     
     -- Combat / Mobs & Auto-Parry
@@ -382,6 +399,7 @@ local Config = {
     AutoSellMobLootWhenFull = false, -- Auto-sell unblacklisted loot to Greedy Cey when bag hits capacity
     MobLootSellBlacklist = {}, -- Multi-select blacklist of items (fragments, bones, essences, runes, ores) to NEVER sell
     MobTarget = "Closest",
+    TargetMob = "All",
     MobFarmTargets = { "All" }, -- Multi-select enemy species filter (filtered per current island)
     PrioritizeStrongestMob = true, -- When multiple mob types are selected, kills strongest to weakest first
     SplitEventVariantMobs = (game.PlaceId == 74414241680540), -- Per-world: splits Limbo/Heaven/Hell mutated enemies from normal species (default ON in Crimson Sakura)
@@ -421,6 +439,20 @@ local Config = {
     RaidFallbackResumeHP = 85, -- Return to combat once HP% recovers to this threshold
     RaidAutoBuyHealthPots = true, -- Buys Health Potions in Lobby/Island before entering run if below target stock
     RaidHealthPotStock = 5, -- Target Health Potion count to keep before starting a Raid / Abyss run
+    AutoMineYieldToBoss = false, -- OFF by default: when ON alongside AutoMine + AutoRaid, mines while boss is on cooldown and pauses to fight when spawned
+    GuildBossAutoLeaveAfterKill = false, -- Automatically leaves Guild Island after Guild Boss is defeated & chest is claimed
+    RaidBackupKillSwitch = true, -- AFK Backup Kill Switch: forces close-range distance override when an NPC takes 0 damage for timeout
+    RaidBackupKillTimeout = 10, -- Seconds with 0 damage (or undetected remaining enemy) before activating Backup Kill Switch
+    RaidBackupCloseDistance = 2.0, -- Close-range distance override (studs) used when Backup Kill Switch is active
+
+    -- Auto Quests (QuestBoard Daily/Weekly/Monthly + Sensei Moro + NPC Dailies)
+    AutoClaimQuestBoard = false, -- Automatically claims completed Daily/Weekly/Monthly QuestBoard quests & milestone chests
+    AutoAcceptSenseiMoro = false, -- Automatically accepts/turns in Sensei Moro quests for the current island
+    AutoAcceptDailyNPCQuests = false, -- Automatically accepts/turns in Daily/Weekly/Repeatable NPC quests
+    AutoQuestGlideToNPC = false, -- Optional: smoothly glides to NPC if remote accept/turn-in requires proximity
+    AutoDoQuestObjectives = false, -- Optional: steers Auto Mine / Auto Mob Farm toward active quest Mine/Kill targets
+    AutoQuestPriority = "Sensei Moro First", -- "Sensei Moro First", "Daily Quests First", "All Active Quests"
+    AutoQuestInterval = 15, -- Seconds between automatic quest scan/claim sweeps
 
     -- Character & Utilities
     AntiAFK = true,
@@ -433,12 +465,15 @@ local Config = {
     FpsBoost = false,
     AutoClaimIndex = false,
     AutoClaimLevelRewards = false,
+    AutoTeleportIsland = false, -- Automatically warps to AutoTeleportTargetIsland from any other World Island (never redirects from Raids/Abyss/Guild Island)
+    AutoTeleportTargetIsland = "Crimson Sakura Isles", -- Target island name for Auto-Teleport
 
     -- Potions (Auto Buy & Auto Use)
     AutoBuyPotions = false,
     AutoBuyPotionTypes = { "Miner Potion I", "Luck Potion I" },
     AutoBuyPotionStock = 3,
     AutoBuyAfterBuffsExpire = true,
+    AutoBuyPotionsOnDeath = false, -- Immediately goes to Potion Shop upon respawning from death before resuming mining/combat
     AutoBuyPotionIntervalMin = 5,
     AutoUsePotions = false,
     AutoStackPotions = true,
@@ -456,6 +491,17 @@ local Config = {
     WebhookRaidSendEmpty = true, -- Still sends run summary (Gold/Wave/Duration) even if 0 items dropped
     AutoExecOnTeleport = false, -- Queues loader/script via queue_on_teleport across server hops & Island/Raid teleports
     AutoExecLoader = "", -- Optional loader URL or loadstring(...)() snippet (auto-reads __AetherAutoExec global if blank)
+
+    -- Auto Weapon Enhancer
+    AutoEnhanceWeapon = false,
+    EnhanceTargetMode = "Auto: Equipped Gear (All)", -- "Auto: Equipped Gear (All)", "Auto: Equipped Weapon", "Auto: Equipped Armor (All)", "Auto: Best Weapon in Bag", "Auto: Best Armor in Bag", "Selected Equipment"
+    EnhanceSelectedEquip = "",
+    EnhanceTargetLevel = 9,
+    EnhanceMinChancePct = 0,
+    EnhanceUseMedallions = false,
+    EnhanceMedallionTiers = { "Abyss Medallion I", "Abyss Medallion II", "Abyss Medallion III" },
+    EnhanceUseSeals = false,
+    EnhanceAutoGlide = true,
     WebhookPingMinRarity = "Mythic", -- Minimum rarity tier to ping ("Off (Custom List Only)", "Rare".."Divine")
     WebhookWatchOres = { "Darkryte", "Demonite", "Arcane Crystal", "Heavenite", "Gargantuan" },
     WebhookStatusIntervalMin = 10, -- Periodic Gold/Level summary interval in minutes (0 = rare ore alerts / manual only)
@@ -464,6 +510,9 @@ local Config = {
     AutoPutRunes = false,
     AutoSellRunes = false,
     RuneSellKeepList = {}, -- Multi-select whitelist of runes to KEEP (everything unchecked is sold when runes/bag max out)
+    RuneSellMinQuality = 0, -- Min stat quality % (0-100) to keep a rune (0 = disabled; >= % keeps, < % sells)
+    RuneSellQualityMode = "Best Stat (Any >= %)", -- "Best Stat (Any >= %)", "Average Roll", "Primary Trait Only"
+    RuneSellQualityScope = "Checked Keep Runes Only", -- "Checked Keep Runes Only" | "All Runes (Keep Any >= %)"
     RuneEquipFilter = "Pickaxes & Weapons",
     RuneTargetEquipment = "",
     RuneTraitFocus = "All (Highest % Overall)",
@@ -570,7 +619,7 @@ end
 function ConfigManager.SerializeConfig()
     local settings = {}
     for k, v in pairs(Config) do
-        if not ConfigManager.PerWorldKeys[k] then
+        if not ConfigManager.PerWorldKeys[k] and k ~= "WeaponHuntRunning" then
             local sv = sanitizeForJson(v, 0)
             if sv ~= nil then
                 settings[k] = sv
@@ -767,7 +816,7 @@ function ConfigManager.Load()
     end
 
     for k, v in pairs(settings) do
-        if ConfigManager.Defaults[k] ~= nil then
+        if ConfigManager.Defaults[k] ~= nil and k ~= "WeaponHuntRunning" then
             -- If Worlds[placeId] already exists, don't let legacy/other-world fields in Settings overwrite per-world defaults
             if not (hasWorldEntry and ConfigManager.PerWorldKeys[k]) then
                 if type(ConfigManager.Defaults[k]) == "table" and type(v) == "table" then
@@ -778,6 +827,8 @@ function ConfigManager.Load()
             end
         end
     end
+    -- Never auto-resume a continuous 1-1-1-1 hunt across a disconnect/crash/world-hop
+    Config.WeaponHuntRunning = false
 
     if hasWorldEntry then
         for k, v in pairs(ConfigManager.Worlds[worldKey]) do
@@ -1001,12 +1052,31 @@ function ConfigManager.RebuildMobTypes()
         local fallbackList = {}
         local localSet = {}
 
+        -- 0. Build canonical internal-key -> display-name alias table from Shared.Data.Enemies (e.g. Chuthlu -> Cthulhu, EliteZombie -> Elite Zombie)
+        local keyToName = {
+            Chuthlu = "Cthulhu",
+            EliteZombie = "Elite Zombie",
+        }
+        local okE, EnemiesData = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Enemies) end)
+        if okE and type(EnemiesData) == "table" then
+            for key, entry in pairs(EnemiesData) do
+                if type(entry) == "table" and type(entry.Name) == "string" and entry.Name ~= "" then
+                    local kStr = tostring(key)
+                    if kStr ~= entry.Name then
+                        keyToName[kStr] = entry.Name
+                    end
+                end
+            end
+        end
+        ConfigManager.MobKeyToName = keyToName
+
         -- 1. Live spawned hostile NPC species currently present in this map
         local living = workspace:FindFirstChild("Living")
         if living then
             for _, m in ipairs(living:GetChildren()) do
                 if m:IsA("Model") and m:GetAttribute("IsNpc") == true and m:GetAttribute("DpsDummy") ~= true then
-                    local sp = tostring(m.Name):gsub("%d+$", "")
+                    local rawSp = tostring(m.Name):gsub("%d+$", "")
+                    local sp = keyToName[rawSp] or rawSp
                     if sp ~= "" and not sp:find("Dummy", 1, true) then
                         localSet[sp] = true
                         if splitVariants then
@@ -1021,7 +1091,6 @@ function ConfigManager.RebuildMobTypes()
         end
 
         -- 2. Filter Shared.Data.Enemies strictly to current island's zones (+ any live-spawned species)
-        local okE, EnemiesData = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Enemies) end)
         if okE and type(EnemiesData) == "table" then
             for key, entry in pairs(EnemiesData) do
                 if type(entry) == "table" then
@@ -1303,6 +1372,10 @@ local function ResolveRemotes()
     Remotes.LevelRewardsClaimAll = getRemote("LevelRewardsService", "RF", "ClaimAll")
     Remotes.RuneGetPriceInfo = getRemote("RuneService", "RF", "GetPriceInfo")
     Remotes.RunePurchaseAttach = getRemote("RuneService", "RF", "PurchaseAttach")
+    Remotes.EnhanceGetUpgradeRequirements = getRemote("EnhanceService", "RF", "GetUpgradeRequirements")
+    Remotes.EnhancePreviewChance = getRemote("EnhanceService", "RF", "PreviewChance")
+    Remotes.EnhanceEquipment = getRemote("EnhanceService", "RF", "EnhanceEquipment")
+    Remotes.EnhanceSealFailStack = getRemote("EnhanceService", "RF", "SealFailStack")
 
     -- Abyss, Party & Raid Remotes
     Remotes.AbyssEnter = getRemote("AbyssService", "RF", "Enter")
@@ -1329,45 +1402,170 @@ local function ResolveRemotes()
     Remotes.RaidRestarted = getRemote("RaidService", "RE", "RaidRestarted")
     Remotes.RaidCurrentWave = getRemote("RaidService", "RE", "CurrentWave")
     Remotes.RaidEnemiesLeft = getRemote("RaidService", "RE", "EnemiesLeft")
+    Remotes.CometSpawned = getRemote("CometRockService", "RE", "CometSpawned")
+    Remotes.CometChanged = getRemote("CometRockService", "RE", "CometChanged")
+    Remotes.CometRemoved = getRemote("CometRockService", "RE", "CometRemoved")
+    Remotes.GetComets = getRemote("CometRockService", "RF", "GetComets")
+
+    -- Guild Boss & Quest Remotes (raw RF/RE — never instantiate ClientComm.new)
+    Remotes.GuildTravel = getRemote("GuildService", "RF", "TravelToIsland")
+    Remotes.GuildLeave = getRemote("GuildService", "RF", "LeaveIsland")
+    Remotes.GuildGetState = getRemote("GuildService", "RF", "GetState")
+    Remotes.GuildGetBossState = getRemote("GuildService", "RF", "GetBossState")
+    Remotes.GuildSummonBoss = getRemote("GuildService", "RF", "SummonBoss")
+    Remotes.GuildBossChanged = getRemote("GuildService", "RE", "BossChanged")
+    Remotes.QuestBoardClaimQuest = getRemote("QuestBoardService", "RF", "ClaimQuest")
+    Remotes.QuestBoardClaimChest = getRemote("QuestBoardService", "RF", "ClaimChest")
+    Remotes.ProximityDialogue = getRemote("ProximityService", "RF", "Dialogue")
+    Remotes.DialogueRunCommand = getRemote("DialogueService", "RF", "RunCommand")
+    Remotes.DialogueEvent = getRemote("DialogueService", "RE", "DialogueEvent")
+    Remotes.QuestProgressUI = getRemote("QuestService", "RF", "ProgressUIQuest")
 end
 ResolveRemotes()
 
 -- ===================================================================
 -- 5. REPLICA & PLAYER STATE TRACKING
 -- ===================================================================
+local NavEngine, MiningEngine, TeleportEngine, CombatEngine, RaidEngine, ForgeEngine, MiscEngine
 local function UpdateCharacter(char)
     State.Character = char or (LocalPlayer and LocalPlayer.Character)
-    if State.Character then
-        if NavEngine then
-            NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
-            NavEngine.IsGliding = false
-            NavEngine.CachedRock = nil
+    -- Clear stale references & stop all active glides/hover locks BEFORE yielding on WaitForChild so Heartbeat loops never touch a dead rig
+    State.Humanoid = nil
+    State.HRP = nil
+    if State.DiedConn then
+        pcall(function() State.DiedConn:Disconnect() end)
+        State.DiedConn = nil
+    end
+    if NavEngine then
+        NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
+        NavEngine.IsGliding = false
+        NavEngine.CachedRock = nil
+        NavEngine.SavedCollide = nil
+    end
+    if MiningEngine then
+        MiningEngine.ActiveSunkenCF = nil
+        MiningEngine.DefenseSkyAnchorCF = nil
+        MiningEngine.LastDamagedAt = 0
+        MiningEngine.LastAttackerMob = nil
+        MiningEngine.LastHpSample = nil
+    end
+    State.InAutoDefense = false
+    State.InDefenseRegen = false
+    State.InAirPotionDrink = false
+    if State.PotionEngine then
+        State.PotionEngine.DrinkSkyAnchorCF = nil
+    end
+    if CombatEngine then
+        CombatEngine.ActiveStanceCF = nil
+        CombatEngine.ActiveStanceMob = nil
+        CombatEngine.LastStanceWritePos = nil
+        CombatEngine.HoverLockActive = false
+        CombatEngine.LastEngagedMob = nil
+        CombatEngine.ActiveSkillName = nil
+        CombatEngine.DodgeUntil = 0
+        CombatEngine.RubberbandPauseUntil = 0
+        CombatEngine.IsParrying = false
+        CombatEngine.ParryHoldUntil = 0
+        if CombatEngine.GolemJumpState then
+            table.clear(CombatEngine.GolemJumpState)
         end
+        if CombatEngine.AsuraSurfaceUntil then
+            table.clear(CombatEngine.AsuraSurfaceUntil)
+        end
+    end
+    if RaidEngine then
+        RaidEngine.RecoveringHP = false
+        RaidEngine.SafeRegenCF = nil
+        RaidEngine.SkyAnchorCF = nil
+        RaidEngine.AsuraState = "IDLE"
+        RaidEngine.StrandedSince = nil
+        if not RaidEngine.IsInActiveRun() and not RaidEngine.GetActiveBossArena() then
+            RaidEngine.ArenaLoadingUntil = 0
+        end
+    end
+    if State.Character then
         State.IsBuyingPotions = false
         State.IsBuyingHealthPotions = false
+        State.IsMovingToRaidPad = false
+        State.IsEnhancing = false
+        State.IsMiningComet = false
+        State.IsAutoSellingMenu = false
+        State.IsDoingQuestNpc = false
         State.SellingMobLoot = false
         State.Humanoid = State.Character:WaitForChild("Humanoid", 4)
         State.HRP = State.Character:WaitForChild("HumanoidRootPart", 4)
-        if CombatEngine then
-            CombatEngine.ActiveStanceCF = nil
-            CombatEngine.ActiveStanceMob = nil
-            CombatEngine.HoverLockActive = false
-            CombatEngine.LastEngagedMob = nil
-            CombatEngine.DodgeUntil = 0
-            CombatEngine.IsParrying = false
-            CombatEngine.ParryHoldUntil = 0
-        end
-        if RaidEngine then
-            RaidEngine.RecoveringHP = false
-            RaidEngine.SafeRegenCF = nil
-            RaidEngine.StrandedSince = nil
-            if not RaidEngine.IsInActiveRun() and not RaidEngine.GetActiveBossArena() then
-                RaidEngine.ArenaLoadingUntil = 0
-            end
+        if State.HRP then
+            if State.HRP.Anchored then State.HRP.Anchored = false end
+            local hv = State.HRP:FindFirstChild("AetherHoverLV")
+            if hv then pcall(function() hv:Destroy() end) end
+            local ha = State.HRP:FindFirstChild("AetherHoverAtt")
+            if ha then pcall(function() ha:Destroy() end) end
+            State.HRP.AssemblyLinearVelocity = Vector3.zero
+            State.HRP.AssemblyAngularVelocity = Vector3.zero
         end
         if State.Humanoid then
             State.OriginalWalkSpeed = State.Humanoid.WalkSpeed
+            pcall(function()
+                State.Humanoid.PlatformStand = false
+                State.Humanoid.AutoRotate = true
+            end)
+            -- Immediately tear down hover constraints, sky anchors, and active glides the instant the player dies (prevents violent ragdoll/respawn shaking)
+            local boundHum = State.Humanoid
+            State.DiedConn = trackConn(boundHum.Died:Connect(function()
+                State.InAutoDefense = false
+                State.InDefenseRegen = false
+                State.InAirPotionDrink = false
+                if Config.AutoBuyPotionsOnDeath then
+                    State.PendingDeathPotionRestock = true
+                end
+                if State.PotionEngine then
+                    State.PotionEngine.DrinkSkyAnchorCF = nil
+                end
+                if MiningEngine then
+                    MiningEngine.ActiveSunkenCF = nil
+                    MiningEngine.DefenseSkyAnchorCF = nil
+                    MiningEngine.LastAttackerMob = nil
+                end
+                if NavEngine then
+                    NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
+                    NavEngine.IsGliding = false
+                end
+                if CombatEngine then
+                    CombatEngine.RubberbandPauseUntil = os.clock() + 1.2
+                    CombatEngine.ActiveSkillName = nil
+                    CombatEngine.LastEngagedMob = nil
+                    CombatEngine.ClearStanceLock()
+                end
+                if RaidEngine and type(RaidEngine.ClearHealAnchor) == "function" then
+                    RaidEngine.AsuraState = "DOWNED"
+                    RaidEngine.ClearHealAnchor(true)
+                end
+                local hrp = State.HRP
+                if hrp then
+                    local hv = hrp:FindFirstChild("AetherHoverLV")
+                    if hv then pcall(function() hv:Destroy() end) end
+                    local ha = hrp:FindFirstChild("AetherHoverAtt")
+                    if ha then pcall(function() ha:Destroy() end) end
+                    if hrp.Anchored then pcall(function() hrp.Anchored = false end) end
+                    pcall(function()
+                        hrp.AssemblyLinearVelocity = Vector3.zero
+                        hrp.AssemblyAngularVelocity = Vector3.zero
+                    end)
+                end
+                pcall(function()
+                    boundHum.PlatformStand = false
+                    boundHum.AutoRotate = true
+                end)
+            end))
         end
+        if NavEngine and type(NavEngine.RestoreCharacterPhysics) == "function" then
+            pcall(NavEngine.RestoreCharacterPhysics)
+        end
+        task.delay(0.6, function()
+            if ScriptRunning and NavEngine and type(NavEngine.RestoreCharacterVisibility) == "function" then
+                pcall(NavEngine.RestoreCharacterVisibility, false)
+            end
+        end)
         if Config.AutoMine and not Config.StayAtSavedPos and not State.IsAutoForging and not State.DrainingFullBag and not State.IsCrafting and not State.IsBuyingPotions
             and State.LastMinedRock and MiningEngine
             and MiningEngine.IsRockAlive(State.LastMinedRock)
@@ -1416,6 +1614,25 @@ local function UpdateCharacter(char)
             if not Config.AutoMobFarm then
                 State.LastFarmedMob = nil
             end
+        end
+        -- Restock Potions On Death: immediately claim priority BEFORE AutoMine / AutoMobFarm resumes so we visit the Potion Shop first!
+        if State.PendingDeathPotionRestock and Config.AutoBuyPotionsOnDeath then
+            State.PendingDeathPotionRestock = false
+            local inRaidNow = State.IsInRaid or (RaidEngine and ((RaidEngine.IsInActiveRun and RaidEngine.IsInActiveRun()) or (RaidEngine.GetActiveBossArena and RaidEngine.GetActiveBossArena() ~= nil)))
+            if not inRaidNow then
+                State.CheckingPotionsOnStart = true
+                State.IsDeathRestockingPotions = true
+                task.spawn(function()
+                    task.wait(0.65)
+                    if ScriptRunning and Config.AutoBuyPotionsOnDeath and State.PotionEngine and type(State.PotionEngine.RunDeathRestockCycle) == "function" then
+                        pcall(State.PotionEngine.RunDeathRestockCycle)
+                    end
+                    State.IsDeathRestockingPotions = false
+                    State.CheckingPotionsOnStart = false
+                end)
+            end
+        else
+            State.PendingDeathPotionRestock = false
         end
     end
 end
@@ -1467,24 +1684,75 @@ runIsolated(ResolvePlayerData)
 -- ===================================================================
 -- 6. ANTI-CHEAT SAFE POSITIONING & BROADPHASE
 -- ===================================================================
-local NavEngine = {}
-local MiningEngine = {}
-local TeleportEngine = { WaypointStatusLabel = nil }
+NavEngine = {}
+MiningEngine = {}
+TeleportEngine = { WaypointStatusLabel = nil }
 
--- Computes a position directly on the floor terrain facing the target object
+function NavEngine.IsValidPos(v)
+    return typeof(v) == "Vector3"
+        and v.X == v.X and v.Y == v.Y and v.Z == v.Z
+        and math.abs(v.X) < 1e6 and math.abs(v.Y) < 1e6 and math.abs(v.Z) < 1e6
+end
+
+function NavEngine.IsValidCF(cf)
+    if typeof(cf) ~= "CFrame" then return false end
+    local p = cf.Position
+    local lv = cf.LookVector
+    return p.X == p.X and p.Y == p.Y and p.Z == p.Z
+        and lv.X == lv.X and lv.Y == lv.Y and lv.Z == lv.Z
+        and math.abs(p.X) < 1e6 and math.abs(p.Y) < 1e6 and math.abs(p.Z) < 1e6
+end
+
+-- NaN-proof, collinear-safe CFrame.lookAt replacement (prevents NaN rig vanishing when looking straight down/up or at zero distance)
+function NavEngine.SafeLookAt(fromPos, toPos, fallbackRotCF)
+    if not NavEngine.IsValidPos(fromPos) then
+        return (fallbackRotCF and NavEngine.IsValidCF(fallbackRotCF)) and fallbackRotCF or CFrame.new()
+    end
+    if not NavEngine.IsValidPos(toPos) then
+        return (fallbackRotCF and NavEngine.IsValidCF(fallbackRotCF))
+            and (CFrame.new(fromPos) * fallbackRotCF.Rotation)
+            or CFrame.new(fromPos)
+    end
+    local diff = toPos - fromPos
+    local mag = diff.Magnitude
+    if mag < 0.05 or mag ~= mag then
+        return (fallbackRotCF and NavEngine.IsValidCF(fallbackRotCF))
+            and (CFrame.new(fromPos) * fallbackRotCF.Rotation)
+            or CFrame.new(fromPos)
+    end
+    local unit = diff / mag
+    local up = (math.abs(unit.Y) > 0.985) and Vector3.new(0, 0, -1) or Vector3.yAxis
+    local cf = CFrame.lookAt(fromPos, toPos, up)
+    if not NavEngine.IsValidCF(cf) then
+        return CFrame.new(fromPos)
+    end
+    return cf
+end
+
+-- Computes an unobstructed, OBB-aware grounded position on solid floor facing the target object
 function NavEngine.GetSafeGroundCFrame(targetInstance, preferredDistance)
-    preferredDistance = preferredDistance or 4.0
+    preferredDistance = preferredDistance or 3.0
     local primary = nil
     if targetInstance:IsA("Model") then
-        primary = targetInstance.PrimaryPart or targetInstance:FindFirstChildWhichIsA("BasePart")
+        primary = targetInstance:FindFirstChild("Hitbox") or targetInstance.PrimaryPart or targetInstance:FindFirstChildWhichIsA("BasePart")
     elseif targetInstance:IsA("BasePart") then
         primary = targetInstance
     end
     if not primary then return nil end
 
-    local targetPos = primary.Position
+    if NavEngine.CachedRock == targetInstance
+        and NavEngine.CachedSafeGroundDist == preferredDistance
+        and NavEngine.CachedCFrame then
+        return NavEngine.CachedCFrame
+    end
 
-    -- Find nearest hostile mob to position on the opposite (shielded) side of the rock
+    local targetPos = primary.Position
+    local halfX = primary.Size.X * 0.5
+    local halfZ = primary.Size.Z * 0.5
+    local rockBottomY = targetPos.Y - primary.Size.Y * 0.5
+    local standOff = NavEngine.GetCharacterStandOffset and NavEngine.GetCharacterStandOffset() or 3.35
+
+    -- Find nearest hostile mob to prefer the shielded side of the rock when equal
     local nearestMobPos = nil
     local shortestMobDist = math.huge
     local living = workspace:FindFirstChild("Living")
@@ -1504,45 +1772,91 @@ function NavEngine.GetSafeGroundCFrame(targetInstance, preferredDistance)
         end
     end
 
-    local directions = {}
+    local awayFromMob = nil
     if nearestMobPos then
-        -- Opposite direction vector: puts the solid rock directly between player and zombie
-        local awayDir = (targetPos - nearestMobPos).Unit
-        awayDir = Vector3.new(awayDir.X, 0, awayDir.Z).Unit
-        table.insert(directions, awayDir)
-        -- Tangent directions around rock
-        table.insert(directions, Vector3.new(-awayDir.Z, 0, awayDir.X))
-        table.insert(directions, Vector3.new(awayDir.Z, 0, -awayDir.X))
+        local v = Vector3.new(targetPos.X - nearestMobPos.X, 0, targetPos.Z - nearestMobPos.Z)
+        if v.Magnitude > 0.1 then awayFromMob = v.Unit end
     end
 
-    -- Standard cardinal directions fallback
-    table.insert(directions, primary.CFrame.LookVector)
-    table.insert(directions, -primary.CFrame.LookVector)
-    table.insert(directions, primary.CFrame.RightVector)
-    table.insert(directions, -primary.CFrame.RightVector)
+    local losExcludes = {
+        workspace:FindFirstChild("Living"),
+        workspace:FindFirstChild("Debris"),
+        State.Character or LocalPlayer.Character,
+        targetInstance,
+    }
+    local boxParams = OverlapParams.new()
+    boxParams.FilterType = Enum.RaycastFilterType.Exclude
+    boxParams.FilterDescendantsInstances = losExcludes
 
-    local rayParams = RaycastParams.new()
-    rayParams.FilterType = Enum.RaycastFilterType.Exclude
-    rayParams.FilterDescendantsInstances = { workspace.Rocks, workspace:FindFirstChild("Debris") or workspace, State.Character or LocalPlayer.Character }
-    rayParams.IgnoreWater = true
+    local rayStartY = math.min(targetPos.Y + 8, rockBottomY + 14)
+    local clearance = math.max(preferredDistance, 2.2)
+    local bestPos = nil
+    local bestScore = -math.huge
 
-    for _, dir in ipairs(directions) do
-        local origin = targetPos + (dir.Unit * preferredDistance) + Vector3.new(0, 5, 0)
-        local hit = workspace:Raycast(origin, Vector3.new(0, -35, 0), rayParams)
-        if hit and hit.Position then
-            local groundPos = hit.Position + Vector3.new(0, 3.0, 0)
-            return CFrame.lookAt(groundPos, Vector3.new(targetPos.X, groundPos.Y, targetPos.Z))
+    for deg = 0, 315, 45 do
+        local rad = math.rad(deg)
+        local worldDir = primary.CFrame:VectorToWorldSpace(Vector3.new(math.cos(rad), 0, math.sin(rad)))
+        local flatVec = Vector3.new(worldDir.X, 0, worldDir.Z)
+        if flatVec.Magnitude > 0.01 then
+            local flatDir = flatVec.Unit
+            local objDir = primary.CFrame:VectorToObjectSpace(flatDir)
+            local dx = math.abs(objDir.X) > 0.001 and (halfX / math.abs(objDir.X)) or 999
+            local dz = math.abs(objDir.Z) > 0.001 and (halfZ / math.abs(objDir.Z)) or 999
+            local faceRadius = math.min(dx, dz)
+            local horizOffset = faceRadius + clearance
+
+            local candX = targetPos.X + flatDir.X * horizOffset
+            local candZ = targetPos.Z + flatDir.Z * horizOffset
+            local floorHit = NavEngine.RaycastSolidFloor(Vector3.new(candX, rayStartY, candZ), Vector3.new(0, -40, 0))
+            if floorHit and floorHit.Position then
+                local candY = floorHit.Position.Y + standOff + 0.15
+                local candPos = Vector3.new(candX, candY, candZ)
+                local losTarget = Vector3.new(targetPos.X, math.clamp(candY, rockBottomY + 0.8, targetPos.Y + primary.Size.Y * 0.35), targetPos.Z)
+                local losClear = NavEngine.HasClearSolidLOS(candPos, losTarget, targetInstance)
+
+                local blockedInside = false
+                local okBox, parts = pcall(function()
+                    return workspace:GetPartBoundsInBox(CFrame.new(candPos), Vector3.new(1.2, 2.2, 1.2), boxParams)
+                end)
+                if okBox and type(parts) == "table" then
+                    for _, p in ipairs(parts) do
+                        if p:IsA("BasePart") and p.CanCollide and not p:IsDescendantOf(targetInstance) then
+                            blockedInside = true
+                            break
+                        end
+                    end
+                end
+
+                local dyPenalty = math.abs(candY - targetPos.Y) * 20
+                local score = (losClear and 1000 or -400) + (blockedInside and -800 or 300) - dyPenalty
+                if awayFromMob then
+                    score = score + flatDir:Dot(awayFromMob) * 120
+                end
+                if State.HRP then
+                    score = score - (State.HRP.Position - candPos).Magnitude * 1.5
+                end
+                if score > bestScore then
+                    bestScore = score
+                    bestPos = candPos
+                end
+            end
         end
     end
 
-    -- Fallback straight down with offset
-    local fallbackHit = workspace:Raycast(targetPos + Vector3.new(0, 6, 0), Vector3.new(0, -40, 0), rayParams)
-    if fallbackHit then
-        local gPos = fallbackHit.Position + Vector3.new(0, 3.0, 0)
-        return CFrame.lookAt(gPos, targetPos)
+    local finalCF
+    if bestPos then
+        finalCF = NavEngine.SafeLookAt(bestPos, Vector3.new(targetPos.X, bestPos.Y, targetPos.Z))
+    else
+        local fallbackHit = NavEngine.RaycastSolidFloor(targetPos + Vector3.new(0, 8, 0), Vector3.new(0, -40, 0))
+        local gY = fallbackHit and (fallbackHit.Position.Y + standOff + 0.15) or (targetPos.Y + 2.5)
+        local gPos = Vector3.new(targetPos.X + halfX + clearance, gY, targetPos.Z)
+        finalCF = NavEngine.SafeLookAt(gPos, Vector3.new(targetPos.X, gY, targetPos.Z))
     end
 
-    return CFrame.new(targetPos + Vector3.new(0, 2.5, preferredDistance))
+    NavEngine.CachedRock = targetInstance
+    NavEngine.CachedSafeGroundDist = preferredDistance
+    NavEngine.CachedCFrame = finalCF
+    return finalCF
 end
 
 function NavEngine.IsSunkenMode(mode)
@@ -1550,12 +1864,156 @@ function NavEngine.IsSunkenMode(mode)
     return mode == "Underground" or mode == "Underground (Safe)" or mode == "Sunken Under-Ledge (Horizontal Up)"
 end
 
+-- Computes a sweet-spot CFrame right between two very close rocks so a single pickaxe swing hits BOTH simultaneously
+function NavEngine.GetMultiRockCFrame(rock1, rock2, mode)
+    mode = mode or Config.MinePositionMode or "Underground"
+    local p1 = rock1 and (rock1:FindFirstChild("Hitbox") or rock1.PrimaryPart or rock1:FindFirstChildWhichIsA("BasePart"))
+    local p2 = rock2 and (rock2:FindFirstChild("Hitbox") or rock2.PrimaryPart or rock2:FindFirstChildWhichIsA("BasePart"))
+    if not p1 or not p2 then return nil end
+
+    local pos1, pos2 = p1.Position, p2.Position
+    local r1 = math.max(p1.Size.X, p1.Size.Z) * 0.5
+    local r2 = math.max(p2.Size.X, p2.Size.Z) * 0.5
+    local flatDiff = Vector3.new(pos2.X - pos1.X, 0, pos2.Z - pos1.Z)
+    local cDist = flatDiff.Magnitude
+    local maxGap = math.clamp(tonumber(Config.MineMultiRockMaxGap) or 8.5, 2.0, 12.0)
+    local surfaceGap = math.max(0, cDist - r1 - r2)
+    if surfaceGap > maxGap then return nil end
+
+    -- Surface-weighted midpoint so unequal rock sizes put us equidistant from BOTH facing rock surfaces!
+    local midX, midZ
+    if cDist <= (r1 + r2) or cDist < 0.05 then
+        midX = (pos1.X + pos2.X) * 0.5
+        midZ = (pos1.Z + pos2.Z) * 0.5
+    else
+        local dir = flatDiff.Unit
+        local edge1X, edge1Z = pos1.X + dir.X * r1, pos1.Z + dir.Z * r1
+        local edge2X, edge2Z = pos2.X - dir.X * r2, pos2.Z - dir.Z * r2
+        midX = (edge1X + edge2X) * 0.5
+        midZ = (edge1Z + edge2Z) * 0.5
+    end
+
+    local b1Y = pos1.Y - (p1.Size.Y * 0.5)
+    local b2Y = pos2.Y - (p2.Size.Y * 0.5)
+    local minBottomY = math.min(b1Y, b2Y)
+    local avgY = (pos1.Y + pos2.Y) * 0.5
+
+    if NavEngine.IsSunkenMode(mode) then
+        local depth = Config.SunkenDepth or 2.40
+        local pitchDeg = Config.SunkenPitch or 88
+        local trueSubmerge = math.clamp(depth, 1.40, 2.75)
+
+        local rayParams = RaycastParams.new()
+        rayParams.FilterType = Enum.RaycastFilterType.Exclude
+        rayParams.FilterDescendantsInstances = { workspace.Rocks, workspace.Living, State.Character or LocalPlayer.Character }
+        rayParams.IgnoreWater = true
+
+        local rayStartY = math.min(avgY + 4, minBottomY + 12)
+        local floorHit = workspace:Raycast(Vector3.new(midX, rayStartY, midZ), Vector3.new(0, -45, 0), rayParams)
+        local localFloorY = (floorHit and floorHit.Position.Y) or minBottomY
+        local minY = localFloorY - 2.75
+        local maxY = math.max(minY, math.min(localFloorY - 1.10, minBottomY - 0.85))
+        local candY = math.clamp(localFloorY - trueSubmerge, minY, maxY)
+        local sunkenPos = Vector3.new(midX, candY, midZ)
+
+        -- Verify both rocks are cleanly within horizontal pickaxe cleave reach from the midpoint
+        local dSurf1 = math.max(0, Vector3.new(pos1.X - midX, 0, pos1.Z - midZ).Magnitude - r1)
+        local dSurf2 = math.max(0, Vector3.new(pos2.X - midX, 0, pos2.Z - midZ).Magnitude - r2)
+        if dSurf1 > 6.2 or dSurf2 > 6.2 then return nil end
+
+        local lookTarget = Vector3.new(pos1.X, candY, pos1.Z)
+        if (lookTarget - sunkenPos).Magnitude < 0.05 then
+            lookTarget = Vector3.new(pos2.X, candY, pos2.Z)
+        end
+        local baseLook = NavEngine.SafeLookAt(sunkenPos, lookTarget)
+        return baseLook * CFrame.Angles(math.rad(pitchDeg), 0, 0)
+    else
+        -- Ground / Next to Rock mode: stand right in the gap between both rocks (or slightly offset perpendicular if touching)
+        local standOff = NavEngine.GetCharacterStandOffset and NavEngine.GetCharacterStandOffset() or 3.35
+        local rayStartY = math.min(avgY + 8, minBottomY + 14)
+        local perp = (cDist > 0.05) and Vector3.new(-flatDiff.Z / cDist, 0, flatDiff.X / cDist) or Vector3.new(1, 0, 0)
+        local offsets = { 0, 1.8, -1.8, 3.0, -3.0 }
+        local losExcludes = {
+            workspace:FindFirstChild("Living"),
+            workspace:FindFirstChild("Debris"),
+            State.Character or LocalPlayer.Character,
+            rock1,
+            rock2,
+        }
+        local boxParams = OverlapParams.new()
+        boxParams.FilterType = Enum.RaycastFilterType.Exclude
+        boxParams.FilterDescendantsInstances = losExcludes
+
+        for _, off in ipairs(offsets) do
+            local cx = midX + perp.X * off
+            local cz = midZ + perp.Z * off
+            local dSurf1 = math.max(0, Vector3.new(pos1.X - cx, 0, pos1.Z - cz).Magnitude - r1)
+            local dSurf2 = math.max(0, Vector3.new(pos2.X - cx, 0, pos2.Z - cz).Magnitude - r2)
+            if dSurf1 <= 5.8 and dSurf2 <= 5.8 then
+                local floorHit = NavEngine.RaycastSolidFloor(Vector3.new(cx, rayStartY, cz), Vector3.new(0, -40, 0))
+                if floorHit and floorHit.Position then
+                    local cy = floorHit.Position.Y + standOff + 0.15
+                    local candPos = Vector3.new(cx, cy, cz)
+                    local blocked = false
+                    local okBox, parts = pcall(function()
+                        return workspace:GetPartBoundsInBox(CFrame.new(candPos), Vector3.new(1.1, 2.0, 1.1), boxParams)
+                    end)
+                    if okBox and type(parts) == "table" then
+                        for _, pt in ipairs(parts) do
+                            if pt:IsA("BasePart") and pt.CanCollide and not pt:IsDescendantOf(rock1) and not pt:IsDescendantOf(rock2) then
+                                blocked = true
+                                break
+                            end
+                        end
+                    end
+                    if not blocked then
+                        local aimX = (pos1.X + pos2.X) * 0.5
+                        local aimZ = (pos1.Z + pos2.Z) * 0.5
+                        local aimTarget = Vector3.new(aimX, cy, aimZ)
+                        if (aimTarget - candPos).Magnitude < 0.1 then
+                            aimTarget = Vector3.new(pos1.X, cy, pos1.Z)
+                        end
+                        return NavEngine.SafeLookAt(candPos, aimTarget)
+                    end
+                end
+            end
+        end
+        return nil
+    end
+end
+
 -- Computes target CFrame for mining based on selected mining position
-function NavEngine.GetMiningCFrame(rock, mode)
+function NavEngine.GetMiningCFrame(rock, mode, partnerRock)
     mode = mode or Config.MinePositionMode or "Underground"
     local primary = rock and (rock:FindFirstChild("Hitbox") or rock.PrimaryPart or rock:FindFirstChildWhichIsA("BasePart"))
     if not primary then return nil end
     local rockPos = primary.Position
+
+    if partnerRock and partnerRock ~= rock and partnerRock.Parent then
+        local depth = Config.SunkenDepth or 2.40
+        local baseDist = Config.SunkenDistance or 0.85
+        local pitchDeg = Config.SunkenPitch or 88
+        if NavEngine.CachedRock == rock
+            and NavEngine.CachedPartnerRock == partnerRock
+            and NavEngine.CachedMode == mode
+            and NavEngine.CachedDepth == depth
+            and NavEngine.CachedDist == baseDist
+            and NavEngine.CachedPitch == pitchDeg
+            and NavEngine.CachedCFrame then
+            return NavEngine.CachedCFrame
+        end
+        local multiCF = NavEngine.GetMultiRockCFrame(rock, partnerRock, mode)
+        if multiCF then
+            NavEngine.CachedRock = rock
+            NavEngine.CachedPartnerRock = partnerRock
+            NavEngine.CachedMode = mode
+            NavEngine.CachedDepth = depth
+            NavEngine.CachedDist = baseDist
+            NavEngine.CachedPitch = pitchDeg
+            NavEngine.CachedCFrame = multiCF
+            return multiCF
+        end
+    end
 
     if NavEngine.IsSunkenMode(mode) then
         local depth = Config.SunkenDepth or 2.40
@@ -1564,6 +2022,8 @@ function NavEngine.GetMiningCFrame(rock, mode)
 
         -- Return cached stance for this rock if parameters haven't changed (prevents mid-glide target jitter)
         if NavEngine.CachedRock == rock
+            and NavEngine.CachedPartnerRock == nil
+            and NavEngine.CachedMode == mode
             and NavEngine.CachedDepth == depth
             and NavEngine.CachedDist == baseDist
             and NavEngine.CachedPitch == pitchDeg
@@ -1636,10 +2096,12 @@ function NavEngine.GetMiningCFrame(rock, mode)
         end
 
         local sunkenPos = bestPos or Vector3.new(rockPos.X + halfX + 0.6, rockBottomY - trueSubmerge, rockPos.Z)
-        local baseLook = CFrame.lookAt(sunkenPos, Vector3.new(rockPos.X, sunkenPos.Y, rockPos.Z))
+        local baseLook = NavEngine.SafeLookAt(sunkenPos, Vector3.new(rockPos.X, sunkenPos.Y, rockPos.Z))
         local finalCF = baseLook * CFrame.Angles(math.rad(pitchDeg), 0, 0)
 
         NavEngine.CachedRock = rock
+        NavEngine.CachedPartnerRock = nil
+        NavEngine.CachedMode = mode
         NavEngine.CachedDepth = depth
         NavEngine.CachedDist = baseDist
         NavEngine.CachedPitch = pitchDeg
@@ -1659,10 +2121,97 @@ function NavEngine.GetMiningCFrame(rock, mode)
 
         local insidePos = Vector3.new(rockPos.X, groundY + 3.0, rockPos.Z)
         local lookDir = insidePos + (primary.CFrame.LookVector or Vector3.new(0, 0, 1))
-        return CFrame.lookAt(insidePos, lookDir)
+        return NavEngine.SafeLookAt(insidePos, lookDir)
     else
         return NavEngine.GetSafeGroundCFrame(rock, 3.8)
     end
+end
+
+-- Smoothly descends from a high sky-hover (potion drink / low-HP air regen) onto solid ground and stands briefly (~0.06s)
+-- to simulate a normal grounded step so server anti-cheat / airborne checks reset and follow-up hits never get rejected.
+function NavEngine.TouchSolidGroundBriefly(dwellSec)
+    if not ScriptRunning or not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then
+        return false
+    end
+    -- Never descend if another sky anchor is still intentionally active
+    if (RaidEngine and RaidEngine.SkyAnchorCF ~= nil)
+        or (MiningEngine and MiningEngine.DefenseSkyAnchorCF ~= nil)
+        or (State.PotionEngine and State.PotionEngine.DrinkSkyAnchorCF ~= nil) then
+        return false
+    end
+
+    local startHrp = State.HRP
+    local curPos = startHrp.Position
+    local floorHit = NavEngine.RaycastSolidFloor(curPos + Vector3.new(0, 2.0, 0), Vector3.new(0, -160.0, 0))
+    if not floorHit or not floorHit.Position then
+        return false
+    end
+
+    local standOff = (NavEngine.GetCharacterStandOffset and NavEngine.GetCharacterStandOffset()) or 3.1
+    local groundPos = Vector3.new(curPos.X, floorHit.Position.Y + standOff, curPos.Z)
+    if NavEngine.ClampPosToBossArena then
+        groundPos = NavEngine.ClampPosToBossArena(groundPos, false)
+    end
+    local dropDist = curPos.Y - groundPos.Y
+    if dropDist <= 2.2 then
+        -- Already on/near solid ground: brief grounded settle only
+        if startHrp.Anchored then startHrp.Anchored = false end
+        pcall(function() State.Humanoid.PlatformStand = false end)
+        State.Humanoid.AutoRotate = true
+        pcall(NavEngine.RestoreCharacterPhysics)
+        startHrp.AssemblyLinearVelocity = Vector3.new(0, -1.5, 0)
+        task.wait(dwellSec or 0.06)
+        return true
+    end
+
+    if startHrp.Anchored then startHrp.Anchored = false end
+    pcall(function() State.Humanoid.PlatformStand = false end)
+    State.Humanoid.AutoRotate = true
+
+    local dropSpeed = math.clamp(tonumber(Config.GlideSpeed) or 50, 22, 52)
+    local t0 = os.clock()
+    local prevPos = curPos
+    while ScriptRunning and State.HRP == startHrp and State.Humanoid and State.Humanoid.Health > 0 and (os.clock() - t0) < 2.6 do
+        local dt = RunService.Heartbeat:Wait()
+        if not State.HRP or State.HRP ~= startHrp or not State.Humanoid or State.Humanoid.Health <= 0 then break end
+        if (RaidEngine and RaidEngine.SkyAnchorCF ~= nil)
+            or (MiningEngine and MiningEngine.DefenseSkyAnchorCF ~= nil)
+            or (State.PotionEngine and State.PotionEngine.DrinkSkyAnchorCF ~= nil) then
+            return false
+        end
+        local actualP = startHrp.Position
+        if (actualP - prevPos).Magnitude > 10.0 then
+            break
+        end
+        local delta = groundPos - actualP
+        local dMag = delta.Magnitude
+        if dMag <= 2.2 then
+            break
+        end
+        local step = math.min(dMag, dropSpeed * dt, 2.5)
+        local nextP = actualP + delta.Unit * step
+        prevPos = nextP
+        startHrp.CFrame = CFrame.new(nextP) * startHrp.CFrame.Rotation
+        startHrp.AssemblyLinearVelocity = delta.Unit * math.min(dropSpeed, math.max(18, dMag * 6))
+        startHrp.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    if ScriptRunning and State.HRP == startHrp and State.Humanoid and State.Humanoid.Health > 0 then
+        pcall(NavEngine.RestoreCharacterPhysics)
+        if startHrp.Anchored then startHrp.Anchored = false end
+        pcall(function() State.Humanoid.PlatformStand = false end)
+        State.Humanoid.AutoRotate = true
+        local curRot = startHrp.CFrame.Rotation
+        if (startHrp.Position - groundPos).Magnitude <= 6.0 then
+            startHrp.CFrame = CFrame.new(groundPos) * curRot
+        end
+        -- Gentle downward settle velocity so Humanoid registers a real grounded floor step
+        startHrp.AssemblyLinearVelocity = Vector3.new(0, -2.0, 0)
+        startHrp.AssemblyAngularVelocity = Vector3.zero
+        task.wait(dwellSec or 0.06)
+        return true
+    end
+    return false
 end
 
 -- Resolves the real playable interior bounds of the active BossArena (excluding decorative trees/cliffs outside temple walls)
@@ -1749,10 +2298,46 @@ function NavEngine.RaycastSolidFloor(origin, direction, extraExclude)
     return nil
 end
 
+-- Checks unobstructed solid line-of-sight between fromPos and toPos (skips CanCollide=false decorations & target itself)
+function NavEngine.HasClearSolidLOS(fromPos, toPos, targetInst)
+    local delta = toPos - fromPos
+    local dist = delta.Magnitude
+    if dist < 0.2 then return true end
+    local excludes = {
+        workspace:FindFirstChild("Living"),
+        workspace:FindFirstChild("Debris"),
+        State.Character or LocalPlayer.Character,
+    }
+    if typeof(targetInst) == "Instance" then
+        table.insert(excludes, targetInst)
+    end
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    rp.FilterDescendantsInstances = excludes
+    rp.IgnoreWater = true
+    for _ = 1, 8 do
+        local hit = workspace:Raycast(fromPos, delta, rp)
+        if not hit then return true end
+        local inst = hit.Instance
+        if inst and (inst:IsA("Terrain") or (inst:IsA("BasePart") and inst.CanCollide)) then
+            if typeof(targetInst) == "Instance" and inst:IsDescendantOf(targetInst) then
+                return true
+            end
+            if (toPos - hit.Position).Magnitude <= 1.25 then
+                return true
+            end
+            return false
+        end
+        table.insert(excludes, inst)
+        rp.FilterDescendantsInstances = excludes
+    end
+    return true
+end
 
 -- Prevents the player from ever falling into the void or walking out of bounds in BossArenas
 function NavEngine.PreventBossArenaVoidFall()
     if not State.HRP or not RaidEngine or type(RaidEngine.GetActiveBossArena) ~= "function" then return false end
+    if RaidEngine.RecoveringHP then return false end
     local arena, arenaCF, arenaSz = RaidEngine.GetActiveBossArena()
     local b = arena and NavEngine.GetBossPlayableBounds(arena, arenaCF, arenaSz)
     if not b then return false end
@@ -1838,7 +2423,6 @@ function NavEngine.GetMobFarmCFrame(mob, mode)
         }
         losParams.IgnoreWater = true
 
-        -- Stay >= 2.4 studs outside mob center (when unobstructed) to prevent CombatInside flags
         local desiredDist = math.max(math.clamp(Config.MobFarmDistance or 4.0, 2.4, 10.0), 2.4)
         if isKitingTarget then
             desiredDist = math.min(desiredDist, 2.8)
@@ -1848,7 +2432,8 @@ function NavEngine.GetMobFarmCFrame(mob, mode)
         for _, deg in ipairs({ 0, 50, -50, 95, -95, 140, -140 }) do
             local rad = math.rad(deg)
             local cosA, sinA = math.cos(rad), math.sin(rad)
-            local dir = Vector3.new(backFlat.X * cosA - backFlat.Z * sinA, 0, backFlat.X * sinA + backFlat.Z * cosA).Unit
+            local rawDir = Vector3.new(backFlat.X * cosA - backFlat.Z * sinA, 0, backFlat.X * sinA + backFlat.Z * cosA)
+            local dir = (rawDir.Magnitude > 1e-4) and rawDir.Unit or Vector3.new(0, 0, 1)
 
             local actualDist = desiredDist
             local wallHit = workspace:Raycast(Vector3.new(focusPos.X, focusPos.Y + 1.0, focusPos.Z), dir * (desiredDist + 1.4), losParams)
@@ -1865,8 +2450,8 @@ function NavEngine.GetMobFarmCFrame(mob, mode)
             local arenaClamped = NavEngine.ClampPosToBossArena(candPos, false)
             local insidePlayable = (Vector3.new(arenaClamped.X - candPos.X, 0, arenaClamped.Z - candPos.Z).Magnitude < 1.5)
 
-            local losHit = workspace:Raycast(candPos, Vector3.new(mobPos.X, standY, mobPos.Z) - candPos, losParams)
-            if validFloor and insidePlayable and not losHit then
+            local losClear = NavEngine.HasClearSolidLOS(candPos, Vector3.new(mobPos.X, standY, mobPos.Z), mob)
+            if validFloor and insidePlayable and losClear then
                 bestPos = candPos
                 break
             elseif (validFloor or not bestPos) and insidePlayable then
@@ -1880,7 +2465,12 @@ function NavEngine.GetMobFarmCFrame(mob, mode)
         local underDepth = math.clamp(Config.MobFarmUnderOffset or 6.0, 2.5, 14.0)
         local stanceY = mobPos.Y - underDepth
         local floorHit = NavEngine.RaycastSolidFloor(Vector3.new(mobPos.X, mobPos.Y + 1.0, mobPos.Z), Vector3.new(0, -16, 0))
-        if floorHit and floorHit.Position then
+        if CombatEngine and type(CombatEngine.ShouldSurfaceForAsura) == "function" and CombatEngine.ShouldSurfaceForAsura(mob, floorHit) then
+            -- Pop strictly ABOVE the solid temple floor during Asura skills/leaps so teleport/dive moves (Prophecy Vision, Decimate, Worldsplitter, etc.) never pull Asura under the floor into the void!
+            local standOff = NavEngine.GetCharacterStandOffset and NavEngine.GetCharacterStandOffset() or 3.5
+            local minFloorY = (floorHit and floorHit.Position) and (floorHit.Position.Y + standOff + 1.5) or (mobPos.Y + 3.5)
+            stanceY = math.max(minFloorY, mobPos.Y + math.clamp(Config.MobFarmVerticalOffset or 5.5, 3.5, 9.0))
+        elseif floorHit and floorHit.Position then
             stanceY = math.min(stanceY, floorHit.Position.Y - 2.2)
             local maxReach = math.max(underDepth + 2.5, 8.5)
             if (mobPos.Y - stanceY) > maxReach then
@@ -1890,37 +2480,55 @@ function NavEngine.GetMobFarmCFrame(mob, mode)
         rawPos = Vector3.new(mobPos.X, stanceY, mobPos.Z)
         rawLook = Vector3.new(mobPos.X + 0.05, mobPos.Y, mobPos.Z)
     else
-        -- Above Enemy: find true top of mob model
-        local mobTopY = mobPos.Y + 2.2
-        local head = mob:FindFirstChild("Head")
-        if head and head:IsA("BasePart") then
-            mobTopY = math.max(mobTopY, head.Position.Y + (head.Size.Y * 0.5))
-        else
-            for _, p in ipairs(mob:GetDescendants()) do
-                if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then
-                    mobTopY = math.max(mobTopY, p.Position.Y + (p.Size.Y * 0.5))
+        -- Above Enemy: hover at exact user Above Enemy Height above HRP (never pushed out of melee reach by giant cosmetic boss skins/weapons!)
+        -- Only lifts higher during active GolemJumpDive Bezier jumps or upward velocity bursts so jumping bosses never overtake player from below.
+        local offset = math.clamp(Config.MobFarmVerticalOffset or 5.5, 2.5, 12.0)
+        local velY = mHRP.AssemblyLinearVelocity and mHRP.AssemblyLinearVelocity.Y or 0
+        local jumpLead = (velY > 3.0) and math.clamp(velY * 0.14, 0, 6.5) or 0
+        local golemJump = CombatEngine and CombatEngine.GolemJumpState and CombatEngine.GolemJumpState[mob]
+        local jumpApexY = (golemJump and os.clock() < (golemJump.untilAt or 0) and golemJump.apexY) and (golemJump.apexY + 4.5) or -math.huge
+        local minSafeAboveY = math.max(mobPos.Y + math.min(offset, 3.0), jumpApexY)
+        local candY = math.max(mobPos.Y + offset, jumpApexY) + jumpLead
+        local candX, candZ = mobPos.X, mobPos.Z
+
+        -- Respect ONLY solid (CanCollide = true) ceilings; skip invisible AoE shockwave domes / VFX / triggers so jumping bosses never clamp player underneath!
+        local abyssFx = workspace:FindFirstChild("AbyssDropsFX")
+        local extraEx = abyssFx and { abyssFx } or nil
+        local ceilHit = NavEngine.RaycastSolidFloor(
+            Vector3.new(mobPos.X, mobPos.Y + 1.5, mobPos.Z),
+            Vector3.new(0, math.max(4.0, (candY - mobPos.Y) + 2.5), 0),
+            extraEx
+        )
+        if ceilHit and ceilHit.Position then
+            local maxBelowCeil = ceilHit.Position.Y - 2.3
+            if maxBelowCeil >= minSafeAboveY then
+                candY = math.min(candY, maxBelowCeil)
+            else
+                local isBossJumping = (jumpApexY > -math.huge) or (velY > 3.0)
+                if isBossJumping then
+                    -- Boss jumped right up against a low solid ceiling: shift laterally out of its Jump AoE instead of pushing player underneath!
+                    candY = math.max(mobPos.Y + 1.5, maxBelowCeil)
+                    local sideVec = Vector3.new(-mHRP.CFrame.LookVector.X, 0, -mHRP.CFrame.LookVector.Z)
+                    if State.HRP then
+                        local away = Vector3.new(State.HRP.Position.X - mobPos.X, 0, State.HRP.Position.Z - mobPos.Z)
+                        if away.Magnitude > 1.0 then sideVec = away end
+                    end
+                    if sideVec.Magnitude < 0.05 then sideVec = Vector3.new(0, 0, 1) end
+                    sideVec = sideVec.Unit
+                    candX = mobPos.X + sideVec.X * 10.0
+                    candZ = mobPos.Z + sideVec.Z * 10.0
+                else
+                    -- Normal mob (e.g. Abyssal Watcher) walked under a low ramp/bridge: step right beside/behind it UNDER the ramp with clear LOS instead of sitting 10 studs away on top of the ramp!
+                    local sideCF = NavEngine.GetMobFarmCFrame(mob, "Behind Enemy")
+                    if sideCF then
+                        return sideCF
+                    end
+                    candY = math.max(mobPos.Y + 0.5, maxBelowCeil)
                 end
             end
         end
 
-        local offset = math.clamp(Config.MobFarmVerticalOffset or 5.5, 2.5, 12.0)
-        local candY = math.max(mobPos.Y + offset, mobTopY + 1.4)
-
-        -- Respect cave ceilings so player never clips inside overhead rock roofs
-        local ceilParams = RaycastParams.new()
-        ceilParams.FilterType = Enum.RaycastFilterType.Exclude
-        ceilParams.FilterDescendantsInstances = {
-            workspace:FindFirstChild("Living"),
-            workspace:FindFirstChild("Debris"),
-            State.Character or LocalPlayer.Character,
-        }
-        ceilParams.IgnoreWater = true
-        local ceilHit = workspace:Raycast(Vector3.new(mobPos.X, mobPos.Y + 1.5, mobPos.Z), Vector3.new(0, (candY - mobPos.Y) + 2.5, 0), ceilParams)
-        if ceilHit and ceilHit.Position then
-            candY = math.min(candY, ceilHit.Position.Y - 2.3)
-        end
-
-        rawPos = Vector3.new(mobPos.X, candY, mobPos.Z)
+        rawPos = Vector3.new(candX, candY, candZ)
         rawLook = Vector3.new(mobPos.X + 0.05, mobPos.Y, mobPos.Z)
     end
 
@@ -1932,7 +2540,7 @@ function NavEngine.GetMobFarmCFrame(mob, mode)
     if safePos ~= rawPos and isBehind then
         rawLook = Vector3.new(mobPos.X, safePos.Y, mobPos.Z)
     end
-    return CFrame.lookAt(safePos, rawLook)
+    return NavEngine.SafeLookAt(safePos, rawLook, State.HRP and State.HRP.CFrame)
 end
 
 -- Lifts the character back onto solid ground if currently positioned beneath a floor (e.g. exiting Under Map stance)
@@ -1990,7 +2598,8 @@ function NavEngine.GetBossSkillRetreatCFrame(mob, safeDist, mode)
     for _, deg in ipairs(angles) do
         local rad = math.rad(deg)
         local c, s = math.cos(rad), math.sin(rad)
-        local dir = Vector3.new(backVec.X * c - backVec.Z * s, 0, backVec.X * s + backVec.Z * c).Unit
+        local rawDir = Vector3.new(backVec.X * c - backVec.Z * s, 0, backVec.X * s + backVec.Z * c)
+        local dir = (rawDir.Magnitude > 1e-4) and rawDir.Unit or Vector3.new(0, 0, 1)
         local cx, cz = mobPos.X + dir.X * safeDist, mobPos.Z + dir.Z * safeDist
         local insideArena = true
         if bounds then
@@ -2018,13 +2627,20 @@ function NavEngine.GetBossSkillRetreatCFrame(mob, safeDist, mode)
     local floorHit = NavEngine.RaycastSolidFloor(Vector3.new(bestXZ.X, mobPos.Y + 12, bestXZ.Z), Vector3.new(0, -35, 0))
     local stanceY = mobPos.Y
     if mode == "Under Map" or mode == "Underground" or mode == "Underneath Enemy" then
-        local underDepth = math.clamp(Config.MobFarmUnderOffset or 6.0, 2.5, 14.0)
-        stanceY = mobPos.Y - underDepth
-        if floorHit and floorHit.Position then
-            stanceY = math.min(stanceY, floorHit.Position.Y - 2.2)
-            local maxReach = math.max(underDepth + 2.5, 8.5)
-            if (mobPos.Y - stanceY) > maxReach then
-                stanceY = mobPos.Y - maxReach
+        local isAsuraOrArena = (CombatEngine and type(CombatEngine.IsAsuraBoss) == "function" and CombatEngine.IsAsuraBoss(mob)) or (arena ~= nil)
+        if isAsuraOrArena then
+            -- Never retreat under the BossArena floor during Asura/Boss skills (prevents teleport/dive moves from dragging the boss into the void)
+            local standOff = NavEngine.GetCharacterStandOffset and NavEngine.GetCharacterStandOffset() or 3.5
+            stanceY = (floorHit and floorHit.Position) and (floorHit.Position.Y + standOff + 1.5) or (mobPos.Y + 4.5)
+        else
+            local underDepth = math.clamp(Config.MobFarmUnderOffset or 6.0, 2.5, 14.0)
+            stanceY = mobPos.Y - underDepth
+            if floorHit and floorHit.Position then
+                stanceY = math.min(stanceY, floorHit.Position.Y - 2.2)
+                local maxReach = math.max(underDepth + 2.5, 8.5)
+                if (mobPos.Y - stanceY) > maxReach then
+                    stanceY = mobPos.Y - maxReach
+                end
             end
         end
     elseif mode == "Behind Enemy" then
@@ -2040,7 +2656,7 @@ function NavEngine.GetBossSkillRetreatCFrame(mob, safeDist, mode)
     end
 
     local finalPos = Vector3.new(bestXZ.X, stanceY, bestXZ.Z)
-    return CFrame.lookAt(finalPos, Vector3.new(mobPos.X + 0.05, finalPos.Y, mobPos.Z))
+    return NavEngine.SafeLookAt(finalPos, Vector3.new(mobPos.X + 0.05, finalPos.Y, mobPos.Z), State.HRP and State.HRP.CFrame)
 end
 
 -- Disables local collision on all rocks in workspace.Rocks so boulders/rocks never wedge the player
@@ -2092,6 +2708,130 @@ local CORE_COLLIDE_PARTS = {
     Head = true,
 }
 
+NavEngine.CoreVisibleParts = {
+    Head = true, Torso = true, UpperTorso = true, LowerTorso = true,
+    ["Left Arm"] = true, ["Right Arm"] = true, ["Left Leg"] = true, ["Right Leg"] = true,
+    LeftUpperArm = true, LeftLowerArm = true, LeftHand = true,
+    RightUpperArm = true, RightLowerArm = true, RightHand = true,
+    LeftUpperLeg = true, LeftLowerLeg = true, LeftFoot = true,
+    RightUpperLeg = true, RightLowerLeg = true, RightFoot = true,
+}
+
+-- Self-heals character limbs, worn armor (Helmet/Chestplate/Leggings), and RaceFolder stuck at Transparency = 1
+-- Matches the game's exact EquipmentVisibilities + part:GetAttribute("Transparency") metadata without touching HumanoidRootPart or weld proxies
+function NavEngine.RestoreCharacterVisibility(force)
+    local char = State.Character or (LocalPlayer and LocalPlayer.Character)
+    if not char or not char.Parent then return false end
+
+    local pd = State.PlayerData and State.PlayerData.Data
+    local eqVis = (type(pd) == "table" and type(pd.EquipmentVisibilities) == "table") and pd.EquipmentVisibilities or nil
+
+    local hiddenLimbs = 0
+    local limbList = {}
+    for _, ch in ipairs(char:GetChildren()) do
+        if ch:IsA("BasePart") and NavEngine.CoreVisibleParts[ch.Name] then
+            table.insert(limbList, ch)
+            if ch.Transparency >= 0.95 or ch.LocalTransparencyModifier >= 0.95 then
+                hiddenLimbs = hiddenLimbs + 1
+            end
+        end
+    end
+
+    local restored = false
+    if force or hiddenLimbs >= 3 then
+        for _, part in ipairs(limbList) do
+            if part.Transparency >= 0.95 then
+                pcall(function() part.Transparency = 0 end)
+                restored = true
+            end
+            if part.LocalTransparencyModifier >= 0.95 then
+                pcall(function() part.LocalTransparencyModifier = 0 end)
+                restored = true
+            end
+        end
+        local head = char:FindFirstChild("Head")
+        if head then
+            local face = head:FindFirstChild("face") or head:FindFirstChildOfClass("Decal")
+            if face and face:IsA("Decal") and face.Transparency >= 0.95 then
+                pcall(function() face.Transparency = 0 end)
+                restored = true
+            end
+        end
+    end
+
+    -- Restore worn Armor models (Helmet, Chestplate, Leggings) independently of limbs using exact original Transparency attributes
+    local helmetVisible = false
+    for _, slot in ipairs({ "Helmet", "Chestplate", "Leggings" }) do
+        local wantVisible = (not eqVis) or (eqVis[slot] ~= false)
+        local model = char:FindFirstChild(slot)
+        if model and wantVisible then
+            if slot == "Helmet" then helmetVisible = true end
+            for _, desc in ipairs(model:GetDescendants()) do
+                if desc:IsA("BasePart") then
+                    local origT = desc:GetAttribute("Transparency")
+                    if type(origT) == "number" and origT < 0.95 then
+                        if desc.Transparency >= 0.95 then
+                            pcall(function() desc.Transparency = origT end)
+                            restored = true
+                        end
+                        if desc.LocalTransparencyModifier >= 0.95 then
+                            pcall(function() desc.LocalTransparencyModifier = 0 end)
+                            restored = true
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Restore RaceFolder visual parts (Goblin ears, horns, wings, etc.) while preserving limb weld proxies
+    local raceFolder = char:FindFirstChild("RaceFolder")
+    if raceFolder then
+        for _, desc in ipairs(raceFolder:GetDescendants()) do
+            if desc:IsA("BasePart") and not NavEngine.CoreVisibleParts[desc.Name] and desc.Name ~= "HumanoidRootPart" then
+                local origT = desc:GetAttribute("Transparency")
+                if origT == nil or (type(origT) == "number" and origT < 0.95) then
+                    local targetT = (type(origT) == "number") and origT or 0
+                    if desc.Transparency >= 0.95 then
+                        pcall(function() desc.Transparency = targetT end)
+                        restored = true
+                    end
+                    if desc.LocalTransparencyModifier >= 0.95 then
+                        pcall(function() desc.LocalTransparencyModifier = 0 end)
+                        restored = true
+                    end
+                end
+            end
+        end
+    end
+
+    -- Restore non-hair accessories (and respect the game's Helmet-hides-Hair rule so hair never clips through helmets)
+    for _, ch in ipairs(char:GetChildren()) do
+        if ch:IsA("Accessory") then
+            local handle = ch:FindFirstChild("Handle")
+            if handle and handle:IsA("BasePart") then
+                local isHair = (ch.AccessoryType == Enum.AccessoryType.Hair)
+                if isHair and helmetVisible then
+                    if handle.Transparency < 0.95 then
+                        pcall(function() handle.Transparency = 1 end)
+                    end
+                else
+                    if handle.Transparency >= 0.95 then
+                        pcall(function() handle.Transparency = 0 end)
+                        restored = true
+                    end
+                    if handle.LocalTransparencyModifier >= 0.95 then
+                        pcall(function() handle.LocalTransparencyModifier = 0 end)
+                        restored = true
+                    end
+                end
+            end
+        end
+    end
+
+    return restored
+end
+
 function NavEngine.RestoreCharacterPhysics()
     NavEngine.IsGliding = false
     if CombatEngine then
@@ -2124,9 +2864,10 @@ function NavEngine.RestoreCharacterPhysics()
             end
         end
     end
+    pcall(NavEngine.RestoreCharacterVisibility, false)
 end
 
--- Recover immediately on script load in case a previous run left the character in PlatformStand / Noclip
+-- Recover immediately on script load in case a previous run left the character in PlatformStand / Noclip / Invisible
 pcall(NavEngine.RestoreCharacterPhysics)
 
 -- Internal single-leg glide (respects shared ActiveGlideId mutex, Debris exclusion, and Secret Maze ceiling clamp)
@@ -2253,15 +2994,21 @@ function NavEngine.DirectGlideTo(targetCFrame, speed, forceComplete, sharedGlide
         if State.IsCrafting and not Config.AutoCraft then
             return finishGlide(false)
         end
-        if State.IsBuyingPotions and not Config.AutoBuyPotions then
+        if State.IsBuyingPotions and not Config.AutoBuyPotions and not State.IsDeathRestockingPotions then
             return finishGlide(false)
         end
         if State.IsBuyingHealthPotions and RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.GetActiveBossArena() ~= nil or os.clock() < (RaidEngine.ArenaLoadingUntil or 0)) then
             return finishGlide(false)
         end
+        if State.IsMovingToRaidPad and (not Config.AutoRaid or not Config.RaidAutoCreateStart) then
+            return finishGlide(false)
+        end
+        if State.IsMiningComet and (not Config.PrioritizeCometRocks or (RaidEngine and ((RaidEngine.IsInActiveRun and RaidEngine.IsInActiveRun()) or (RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid())))) then
+            return finishGlide(false)
+        end
         -- Abort if AutoMine/AutoMobFarm was turned off, target changed, or a higher-priority routine (potions/forge) took over
         if not forceComplete then
-            if State.IsBuyingPotions or State.CheckingPotionsOnStart or State.IsUsingPotion or State.UsingPotionCycle or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting then
+            if State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsEnhancing or State.IsMiningComet or State.CheckingPotionsOnStart or State.IsUsingPotion or State.UsingPotionCycle or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.IsAutoSellingMenu or State.IsDoingQuestNpc then
                 return finishGlide(false)
             end
             if startRock and not Config.AutoMine then
@@ -2273,21 +3020,25 @@ function NavEngine.DirectGlideTo(targetCFrame, speed, forceComplete, sharedGlide
             if not Config.AutoMine and not Config.AutoMobFarm and not Config.AutoRaid then
                 break
             end
-            if startRock and State.TargetRock ~= startRock then
+            if startRock and (State.TargetRock ~= startRock or (RaidEngine and RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid())) then
                 break
             end
             if startMob and State.TargetMob ~= startMob then
                 break
             end
+            -- Immediate Comet Star / Meteor interrupt during normal rock or non-raid mob glides
+            if (startRock or (startMob and not State.IsInRaid)) and Config.PrioritizeCometRocks and MiningEngine and MiningEngine.ShouldInterruptFarmForComet and MiningEngine.ShouldInterruptFarmForComet() then
+                return finishGlide(false)
+            end
             -- Closer-Rock Preemption (only when safe & allowed for this leg)
             if allowPreempt ~= false and startRock and not State.ResumingAfterDeath and Config.AutoMine and MiningEngine and MiningEngine.FindBestRock then
                 local nowScan = os.clock()
                 local curRem = (targetPos - State.HRP.Position).Magnitude
-                if curRem > 22 and (nowScan - lastClosestScan) >= 0.40 then
+                if curRem > 16 and (nowScan - lastClosestScan) >= 0.40 then
                     lastClosestScan = nowScan
                     local closerRock, closerDist = MiningEngine.FindBestRock()
                     local allowTier = (Config.PrioritizeStrongestRock == false)
-                        or (MiningEngine.GetRockStrengthScore(closerRock) >= MiningEngine.GetRockStrengthScore(startRock))
+                        or (closerRock and MiningEngine.GetRockStrengthScore(closerRock) >= MiningEngine.GetRockStrengthScore(startRock))
                     if closerRock and closerRock ~= startRock and allowTier and closerDist and (closerDist + 8) < curRem then
                         State.TargetRock = closerRock
                         State.CurrentRock = closerRock
@@ -2302,7 +3053,7 @@ function NavEngine.DirectGlideTo(targetCFrame, speed, forceComplete, sharedGlide
         end
 
         local dt = RunService.Heartbeat:Wait()
-        if not State.HRP then return finishGlide(false) end
+        if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return finishGlide(false) end
 
         -- Keep character limbs non-collidable during glide so we never get wedged between walls/rocks
         if State.Character then
@@ -2313,17 +3064,35 @@ function NavEngine.DirectGlideTo(targetCFrame, speed, forceComplete, sharedGlide
             end
         end
 
-        -- Sync curPos if server rolled us back or pushed us
+        -- Sync curPos if server rolled us back or pushed us (with Anti-TP rubberband + cross-zone teleport abort)
         local actualPos = State.HRP.Position
-        if (actualPos - curPos).Magnitude > 14 then
+        if (actualPos - targetPos).Magnitude > 2200 then
+            -- Server teleported us to a different zone (e.g. Main Island <-> Abyss Lobby): abort immediately!
+            return finishGlide(false)
+        end
+        if (actualPos - curPos).Magnitude > 10.0 then
+            local rbNow = os.clock()
+            if (rbNow - (NavEngine.LastRollbackAt or 0)) <= 2.2 then
+                NavEngine.RollbackStreak = (NavEngine.RollbackStreak or 0) + 1
+            else
+                NavEngine.RollbackStreak = 1
+            end
+            NavEngine.LastRollbackAt = rbNow
             curPos = actualPos
+            if NavEngine.RollbackStreak >= 2 then
+                NavEngine.RollbackStreak = 0
+                if CombatEngine then
+                    CombatEngine.RubberbandPauseUntil = rbNow + 0.70
+                end
+                return finishGlide(false)
+            end
         end
 
         local toTarget = targetPos - curPos
         local remDist = toTarget.Magnitude
         if remDist <= 2.4 then
             finishGlide(true)
-            if State.HRP then
+            if State.HRP and (targetPos - State.HRP.Position).Magnitude <= 3.0 then
                 State.HRP.CFrame = targetCFrame
                 State.HRP.AssemblyLinearVelocity = Vector3.zero
                 State.HRP.AssemblyAngularVelocity = Vector3.zero
@@ -2371,11 +3140,12 @@ function NavEngine.DirectGlideTo(targetCFrame, speed, forceComplete, sharedGlide
             if transitMaxY and nextPos.Y > transitMaxY then
                 nextPos = Vector3.new(nextPos.X, transitMaxY, nextPos.Z)
             end
-            -- Raycast solid local floor so cross-map tween rides safely above ground, but allow smooth descent off high mountains
+            -- Raycast solid local floor so cross-map tween rides safely above ground, but allow smooth descent off high mountains & never pop onto shop stall roofs
             local floorHit = NavEngine.RaycastSolidFloor(Vector3.new(nextPos.X, nextPos.Y + 15, nextPos.Z), Vector3.new(0, -35, 0))
             if floorHit and nextPos.Y < (floorHit.Position.Y + 3.4) and (floorHit.Position.Y - nextPos.Y) < 14 then
                 local descendingFromMountain = (targetPos.Y < nextPos.Y - 12.0) and (floorHit.Position.Y > targetPos.Y + 12.0) and (horizRem < 40)
-                if not descendingFromMountain then
+                local isShopRoof = (State.IsBuyingPotions or State.IsBuyingHealthPotions) and (horizRem < 24) and (floorHit.Position.Y > targetPos.Y + 3.5)
+                if not descendingFromMountain and not isShopRoof then
                     local safeFloorY = floorHit.Position.Y + NavEngine.GetCharacterStandOffset()
                     if transitMaxY and safeFloorY > transitMaxY then
                         safeFloorY = transitMaxY
@@ -2387,11 +3157,7 @@ function NavEngine.DirectGlideTo(targetCFrame, speed, forceComplete, sharedGlide
 
         curPos = nextPos
         local lookAtPos = Vector3.new(targetPos.X, curPos.Y, targetPos.Z)
-        if (lookAtPos - curPos).Magnitude > 0.1 then
-            State.HRP.CFrame = CFrame.lookAt(curPos, lookAtPos)
-        else
-            State.HRP.CFrame = CFrame.new(curPos)
-        end
+        State.HRP.CFrame = NavEngine.SafeLookAt(curPos, lookAtPos, State.HRP.CFrame)
         State.HRP.AssemblyLinearVelocity = Vector3.zero
         State.HRP.AssemblyAngularVelocity = Vector3.zero
     end
@@ -2403,12 +3169,18 @@ end
 -- Waypoint shortcuts, Minimum Safe Y-Level protection, Anti-Wedging Noclip, and Stall Escape
 function NavEngine.GlideTo(targetCFrame, speed, forceComplete)
     if not State.HRP or not targetCFrame then return false end
+    local startPos = State.HRP.Position
+    local targetPos = targetCFrame.Position
+    -- Hard cross-zone void guard: never glide > 2,200 studs across empty void between AbyssLobby (~-9000, 1000, -9000) and Main Island!
+    local startAbyss = (startPos.X < -5000 or startPos.Z < -5000)
+    local targetAbyss = (targetPos.X < -5000 or targetPos.Z < -5000)
+    if startAbyss ~= targetAbyss and (targetPos - startPos).Magnitude > 2200 then
+        return false
+    end
+
     NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
     local myGlideId = NavEngine.ActiveGlideId
     speed = speed or Config.GlideSpeed or 40
-
-    local startPos = State.HRP.Position
-    local targetPos = targetCFrame.Position
 
     -- Secret Maze <-> Main Island smart multi-hop routing (prevents flying underwater or hitting TeleportPart3)
     if NavEngine.IsSecretMazeWorld() and (startPos - targetPos).Magnitude > 60 then
@@ -2574,12 +3346,20 @@ end
 -- ===================================================================
 -- 7. COMBAT & WEAPON MANAGEMENT (Auto-Parry, Auto-Defense & Mob Farming)
 -- ===================================================================
-local CombatEngine = {
+CombatEngine = {
     AttackAnimIds = {},
+    UnparryableAnimIds = {},
     AnimParryLead = {},
     LastParryByMob = {},
     LastParryIndByMob = {},
+    LastParryIndEventByMob = {},
+    LastParrySuccessEventAt = 0,
+    LastBomberEventByMob = {},
     LastParryTime = 0,
+    LastParryAttacker = nil,
+    ParryFacingMob = nil,
+    ParryBlockConfirmedAt = 0,
+    HoldAttackUntil = 0,
     LastServerParrySuccess = 0,
     ParryHoldUntil = 0,
     ParryEpoch = 0,
@@ -2640,6 +3420,41 @@ function CombatEngine.IsBlockingOrParrying()
     return false
 end
 
+function CombatEngine.ApplyParryFacing(cf)
+    if not cf then return cf end
+    if not CombatEngine.IsBlockingOrParrying() then return cf end
+    local attacker = CombatEngine.ParryFacingMob
+    if not attacker or not attacker.Parent then return cf end
+    local aHrp = attacker:FindFirstChild("HumanoidRootPart") or attacker:FindFirstChildWhichIsA("BasePart")
+    if not aHrp then return cf end
+    local pos = cf.Position
+    local lookTarget = Vector3.new(aHrp.Position.X, pos.Y, aHrp.Position.Z)
+    if (lookTarget - pos).Magnitude < 0.05 then
+        return cf
+    end
+    return NavEngine.SafeLookAt(pos, lookTarget, cf)
+end
+
+function CombatEngine.ReleaseBlockIfStuck()
+    CombatEngine.ParryEpoch = (CombatEngine.ParryEpoch or 0) + 1
+    CombatEngine.IsParrying = false
+    CombatEngine.ParryHoldUntil = 0
+    CombatEngine.HoldAttackUntil = 0
+    CombatEngine.ParryFacingMob = nil
+    CombatEngine.LastParryAttacker = nil
+    CombatEngine.ParryBlockConfirmedAt = 0
+    pcall(function()
+        local TC = SafeGetController("ToolController")
+        if TC then TC.isBlocking = false end
+    end)
+    local st = State.Character and State.Character:FindFirstChild("Status")
+    if st and st:FindFirstChild("Blocking") and Remotes.StopBlock then
+        task.spawn(function()
+            pcall(function() Remotes.StopBlock:InvokeServer() end)
+        end)
+    end
+end
+
 -- Detects ranged/kiting mobs (e.g. Abyssal Watcher) that run away when approached
 function CombatEngine.IsKitingMob(mob)
     if not mob then return false end
@@ -2694,6 +3509,10 @@ function CombatEngine.GetMobSpeciesName(mob)
     if not mob then return "" end
     local attr = mob:GetAttribute("EnemyType") or mob:GetAttribute("EnemyName") or mob:GetAttribute("Name")
     local baseName = (type(attr) == "string" and attr ~= "") and attr or tostring(mob.Name):gsub("%d+$", "")
+    local aliasMap = ConfigManager and ConfigManager.MobKeyToName
+    if aliasMap and aliasMap[baseName] then
+        baseName = aliasMap[baseName]
+    end
     if Config.SplitEventVariantMobs then
         local pref = CombatEngine.GetMobVariantPrefix(mob)
         if pref and baseName ~= "" and baseName:sub(1, #pref + 1) ~= (pref .. " ") then
@@ -2706,11 +3525,15 @@ end
 function CombatEngine.MatchesTargetMob(mob)
     local sel = Config.MobFarmTargets
     local validMobs = ConfigManager and ConfigManager.ValidMobSet
+    local aliasMap = ConfigManager and ConfigManager.MobKeyToName
     if type(sel) == "table" then
         local sp = CombatEngine.GetMobSpeciesName(mob)
         local hasValidSpecific = false
         for k, v in pairs(sel) do
             local name = (type(k) == "number") and tostring(v) or (v and tostring(k))
+            if name and aliasMap and aliasMap[name] then
+                name = aliasMap[name]
+            end
             if name and name ~= "" and name ~= "All" and (not validMobs or validMobs[name]) then
                 hasValidSpecific = true
                 if name == sp then return true end
@@ -2720,8 +3543,9 @@ function CombatEngine.MatchesTargetMob(mob)
         end
         return not hasValidSpecific
     elseif type(sel) == "string" and sel ~= "" and sel ~= "All" then
-        if validMobs and not validMobs[sel] then return true end
-        return CombatEngine.GetMobSpeciesName(mob) == sel
+        local targetName = (aliasMap and aliasMap[sel]) or sel
+        if validMobs and not validMobs[targetName] then return true end
+        return CombatEngine.GetMobSpeciesName(mob) == targetName
     end
     return true
 end
@@ -2788,6 +3612,8 @@ pcall(function()
     CombatEngine.BossSkillAnims["rbxassetid://139659389252394"] = { skill = "Buddha's Killer", is360 = true, holdAttacks = true }
     CombatEngine.BossSkillAnims["rbxassetid://105907339771163"] = { skill = "Prophecy Vision", is360 = true, holdAttacks = true }
     CombatEngine.BossSkillAnims["rbxassetid://124430298288598"] = { skill = "Phase 2 Morph", is360 = true, holdAttacks = true }
+    CombatEngine.BossSkillAnims["rbxassetid://117416566570631"] = { skill = "Phase 2 Morph", is360 = true, holdAttacks = true }
+    CombatEngine.BossSkillAnims["rbxassetid://127221731192577"] = { skill = "Phase 2 Morph", is360 = true, holdAttacks = true }
 
     CombatEngine.BossSkillEffects = {
         AsuraQuadruple = { skill = "Quadruple Slash", dur = 2.8, is360 = false, holdAttacks = false },
@@ -2827,10 +3653,16 @@ pcall(function()
     end
 end)
 
+CombatEngine.AsuraSurfaceUntil = {}
+
+function CombatEngine.IsAsuraBoss(mob)
+    return mob ~= nil and tostring(mob.Name):find("Asura", 1, true) ~= nil
+end
+
 -- Detects if a target boss/mob is currently executing a known multi-hit/AoE skill (Animation + EffectService signal)
-function CombatEngine.GetActiveBossSkill(mob)
+function CombatEngine.GetActiveBossSkill(mob, includeAll)
     if not mob or not mob.Parent then return nil end
-    local only360 = (Config.EvadeBossSkills360Only ~= false)
+    local only360 = (not includeAll) and (Config.EvadeBossSkills360Only ~= false)
     local now = os.clock()
     local tracked = CombatEngine.ActiveBossSkills[mob]
     if tracked and now < (tracked.untilTime or 0) then
@@ -2855,16 +3687,57 @@ function CombatEngine.GetActiveBossSkill(mob)
     return nil
 end
 
+-- Returns true when Under Map mode must temporarily surface ABOVE the temple floor so Asura's teleport/dive skills never drag him into the void
+function CombatEngine.ShouldSurfaceForAsura(mob, floorHit)
+    if not mob or not mob.Parent or not CombatEngine.IsAsuraBoss(mob) then return false end
+    local now = os.clock()
+    local anySkill = CombatEngine.GetActiveBossSkill(mob, true)
+    if anySkill then
+        CombatEngine.AsuraSurfaceUntil[mob] = math.max(CombatEngine.AsuraSurfaceUntil[mob] or 0, now + 0.50)
+        return true
+    end
+    local mHRP = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChildWhichIsA("BasePart")
+    if mHRP then
+        local velY = mHRP.AssemblyLinearVelocity and mHRP.AssemblyLinearVelocity.Y or 0
+        local airborne = (velY > 4.0 or velY < -8.0)
+        if not airborne and floorHit and floorHit.Position and (mHRP.Position.Y - floorHit.Position.Y) > 6.5 then
+            airborne = true
+        end
+        if airborne then
+            CombatEngine.AsuraSurfaceUntil[mob] = math.max(CombatEngine.AsuraSurfaceUntil[mob] or 0, now + 0.50)
+            return true
+        end
+    end
+    return now < (CombatEngine.AsuraSurfaceUntil[mob] or 0)
+end
 
--- Tier 2 EffectService Listener: captures Boss skill broadcasts (AsuraQuadruple, AsuraDecimate, AsuraWorldsplitter, AsuraBuddha, etc.)
+
+-- Tier 2 EffectService Listener: captures Boss skill broadcasts AND ParryIndicator / Parry / BomberCharge directly from server
+-- (fires synchronously before EffectController's OtherEffects skip() filter or task.spawn delay, and works even without hookfunction!)
 do
     local okEff, effEvent = pcall(function()
         return ReplicatedStorage.Shared.Packages.Knit.Services.EffectService.RE:FindFirstChild("Event")
     end)
     if okEff and effEvent and (effEvent:IsA("RemoteEvent") or effEvent:IsA("UnreliableRemoteEvent")) then
-        trackConn(effEvent.OnClientEvent:Connect(function(modInst, methodName, arg1)
+        trackConn(effEvent.OnClientEvent:Connect(function(modInst, methodName, arg1, arg2, ...)
             if not ScriptRunning or typeof(modInst) ~= "Instance" then return end
             local effName = (modInst.Name == "Handler" and modInst.Parent) and modInst.Parent.Name or modInst.Name
+            if effName == "ParryIndicator" and methodName == "effect" then
+                if type(CombatEngine.OnParryIndicator) == "function" then
+                    CombatEngine.OnParryIndicator(arg1, arg2)
+                end
+                return
+            elseif effName == "Parry" and methodName == "effect" then
+                if type(CombatEngine.OnParrySuccess) == "function" then
+                    CombatEngine.OnParrySuccess(arg1)
+                end
+                return
+            elseif effName == "BomberCharge" and methodName == "effect" then
+                if type(CombatEngine.OnBomberCharge) == "function" then
+                    CombatEngine.OnBomberCharge(arg1, arg2)
+                end
+                return
+            end
             local meta = CombatEngine.BossSkillEffects and CombatEngine.BossSkillEffects[effName]
             if not meta then return end
             local attacker = nil
@@ -2889,38 +3762,54 @@ end
 
 function CombatEngine.EnsureWeaponEquipped()
     if not State.Character then return false end
+    -- NEVER rip a potion out of the player's hand or equip Weapon while drinking/healing!
+    if State.IsUsingPotion or State.UsingPotionCycle or State.InDefenseRegen or State.InAirPotionDrink or (RaidEngine and (RaidEngine.RecoveringHP or RaidEngine.AsuraState == "HEALING")) then
+        return false
+    end
+    local function isWeaponTool(t)
+        if not t or not t:IsA("Tool") then return false end
+        if t.Name == "Weapon" or t:GetAttribute("IsWeapon") == true then return true end
+        local n = t.Name
+        if n == "Pickaxe" or n == "PortalTool" or n == "Inventory" then return false end
+        if n:find("Potion", 1, true) or t:GetAttribute("MiscJSON") ~= nil then return false end
+        return true
+    end
     local equippedTool = State.Character:FindFirstChildWhichIsA("Tool")
-    if equippedTool and (equippedTool.Name == "Weapon" or equippedTool:GetAttribute("IsWeapon") or (equippedTool.Name ~= "Pickaxe" and equippedTool.Name ~= "PortalTool" and equippedTool.Name ~= "Inventory")) then
+    if isWeaponTool(equippedTool) then
         return true
     end
 
-    -- 1. Check Backpack for "Weapon" or any weapon tool
+    -- 1. Check Backpack for "Weapon" or any real weapon tool (never potions/pickaxes/portals)
     if LocalPlayer.Backpack then
         local bpTool = LocalPlayer.Backpack:FindFirstChild("Weapon")
-        if not bpTool then
+        if not isWeaponTool(bpTool) then
+            bpTool = nil
             for _, t in ipairs(LocalPlayer.Backpack:GetChildren()) do
-                if t:IsA("Tool") and t.Name ~= "Pickaxe" and t.Name ~= "PortalTool" and t.Name ~= "Inventory" then
+                if isWeaponTool(t) then
                     bpTool = t
                     break
                 end
             end
         end
         if bpTool and State.Humanoid and not State.IsUsingPotion then
-            State.Humanoid:EquipTool(bpTool)
-            task.wait(0.1)
-            if State.Character:FindFirstChildWhichIsA("Tool") then return true end
+            pcall(function() State.Humanoid:EquipTool(bpTool) end)
+            task.wait(0.08)
+            if State.Character and isWeaponTool(State.Character:FindFirstChildWhichIsA("Tool")) then return true end
         end
     end
 
     -- 2. Click Hotbar Slot 2 (Standard Weapon slot in The Forge)
+    if State.IsUsingPotion or State.UsingPotionCycle or State.InDefenseRegen or State.InAirPotionDrink or (RaidEngine and RaidEngine.RecoveringHP) then
+        return false
+    end
     local pgui = LocalPlayer:FindFirstChild("PlayerGui")
     local hotbar = pgui and pgui:FindFirstChild("BackpackGui") and pgui.BackpackGui:FindFirstChild("Backpack") and pgui.BackpackGui.Backpack:FindFirstChild("Hotbar")
     local slot2 = hotbar and hotbar:FindFirstChild("2")
-    if slot2 and typeof(firesignal) == "function" then
-        firesignal(slot2.MouseButton1Click)
-        task.wait(0.1)
-        local eq = State.Character:FindFirstChildWhichIsA("Tool")
-        if eq and eq.Name ~= "Pickaxe" then return true end
+    if slot2 and slot2:IsA("GuiButton") and typeof(firesignal) == "function" then
+        pcall(function() firesignal(slot2.MouseButton1Click) end)
+        task.wait(0.08)
+        local eq = State.Character and State.Character:FindFirstChildWhichIsA("Tool")
+        if isWeaponTool(eq) then return true end
     end
 
     -- 3. Remote Equip via CharacterService / Replica
@@ -2929,8 +3818,9 @@ function CombatEngine.EnsureWeaponEquipped()
         local weaponGuid = (type(weaponData) == "table" and (weaponData.GUID or weaponData.Guid)) or (type(weaponData) == "string" and weaponData)
         if weaponGuid then
             pcall(function() Remotes.EquipItem:InvokeServer(weaponGuid) end)
-            task.wait(0.15)
-            return true
+            task.wait(0.12)
+            local eq = State.Character and State.Character:FindFirstChildWhichIsA("Tool")
+            if isWeaponTool(eq) then return true end
         end
     end
     return false
@@ -2938,7 +3828,14 @@ end
 
 -- Executes a timed Parry (StartBlock -> hold parry window -> StopBlock) or Unparryable Evade
 function CombatEngine.TriggerParry(attacker, isUnparryable)
-    if not ScriptRunning or not Config.AutoParry or State.IsAutoForging then return false end
+    if ScriptRunning and attacker and State.HRP and MiningEngine then
+        local chkHrp = attacker:FindFirstChild("HumanoidRootPart")
+        if chkHrp and (chkHrp.Position - State.HRP.Position).Magnitude <= math.max((Config.MineKillMobsRange or 18) + 12, 26) then
+            MiningEngine.LastDamagedAt = os.clock()
+            MiningEngine.LastAttackerMob = attacker
+        end
+    end
+    if not ScriptRunning or not Config.AutoParry or State.IsAutoForging or State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsEnhancing or State.IsUsingPotion or State.UsingPotionCycle or State.InDefenseRegen or State.InAirPotionDrink or (RaidEngine and (RaidEngine.RecoveringHP or RaidEngine.AsuraState == "HEALING")) then return false end
     if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return false end
 
     local aHrp = attacker and attacker:FindFirstChild("HumanoidRootPart")
@@ -2947,32 +3844,34 @@ function CombatEngine.TriggerParry(attacker, isUnparryable)
         return false
     end
 
-    -- Handle Unparryable (Red flash / Bomber imminent blast): evade out of hitbox whether grounded or anchored in AutoMobFarm
+    -- Handle Unparryable (Red flash / Bomber imminent blast): evade out of hitbox smoothly (Anti-TP safe, no large single-frame snaps)
     if isUnparryable and Config.AutoDodgeUnparryable then
         if aHrp then
             local away = Vector3.new(State.HRP.Position.X - aHrp.Position.X, 0, State.HRP.Position.Z - aHrp.Position.Z)
             local stepDir = (away.Magnitude > 0.1) and away.Unit or -State.HRP.CFrame.LookVector
             local sidestep = Vector3.new(-stepDir.Z, 0, stepDir.X)
-            CombatEngine.DodgeUntil = os.clock() + 0.65
+            CombatEngine.DodgeUntil = os.clock() + 0.55
             if not State.HRP.Anchored and not CombatEngine.HoverLockActive then
-                local dodgePos = State.HRP.Position + (stepDir * 6.5) + (sidestep * 4.0)
-                NavEngine.SafeTeleport(CFrame.lookAt(dodgePos, Vector3.new(aHrp.Position.X, dodgePos.Y, aHrp.Position.Z)))
-            elseif Config.AutoMobFarm or Config.AutoRaid then
-                local yLift = (Config.MobFarmPositionMode == "Under Map") and 0 or 3.0
-                local dodgePos = State.HRP.Position + (stepDir * 7.5) + Vector3.new(0, yLift, 0)
+                local dodgeVel = (stepDir * 34) + (sidestep * 18) + Vector3.new(0, 6, 0)
+                State.HRP.AssemblyLinearVelocity = dodgeVel
+            elseif Config.AutoMobFarm or Config.AutoRaid or State.InAutoDefense then
+                local yLift = (Config.MobFarmPositionMode == "Under Map") and 0 or 2.0
+                local stepVec = (stepDir * 3.8) + Vector3.new(0, yLift, 0)
+                local dodgePos = State.HRP.Position + stepVec
                 local voidMinY = (workspace.FallenPartsDestroyHeight or -500) + 35
                 if dodgePos.Y < voidMinY then
                     dodgePos = Vector3.new(dodgePos.X, voidMinY, dodgePos.Z)
                 end
-                local dcf = CFrame.lookAt(dodgePos, Vector3.new(aHrp.Position.X, dodgePos.Y, aHrp.Position.Z))
+                local dcf = NavEngine.SafeLookAt(dodgePos, Vector3.new(aHrp.Position.X, dodgePos.Y, aHrp.Position.Z), State.HRP.CFrame)
                 if CombatEngine.HoverLockActive then
                     CombatEngine.SetHoverStance(true)
                     CombatEngine.ActiveStanceCF = dcf
+                    CombatEngine.LastStanceWritePos = dodgePos
                     State.HRP.CFrame = dcf
                     State.HRP.AssemblyLinearVelocity = Vector3.zero
                     State.HRP.AssemblyAngularVelocity = Vector3.zero
                 else
-                    NavEngine.SafeTeleport(dcf)
+                    State.HRP.AssemblyLinearVelocity = (stepDir * 36) + Vector3.new(0, yLift * 4, 0)
                 end
             end
         end
@@ -2980,12 +3879,12 @@ function CombatEngine.TriggerParry(attacker, isUnparryable)
     end
 
     local equippedTool = State.Character and State.Character:FindFirstChildWhichIsA("Tool")
-    local hasWeapon = equippedTool and (equippedTool.Name == "Weapon" or equippedTool:GetAttribute("IsWeapon"))
+    local hasWeapon = equippedTool and (equippedTool.Name == "Weapon" or equippedTool:GetAttribute("IsWeapon") == true)
     if not hasWeapon then
-        if Config.AutoParryEquipWeapon or Config.AutoMobFarm or State.InAutoDefense then
+        if Config.AutoParryEquipWeapon or Config.AutoMobFarm or Config.AutoRaid or State.InAutoDefense then
             CombatEngine.EnsureWeaponEquipped()
             equippedTool = State.Character and State.Character:FindFirstChildWhichIsA("Tool")
-            hasWeapon = equippedTool and (equippedTool.Name == "Weapon" or equippedTool:GetAttribute("IsWeapon"))
+            hasWeapon = equippedTool and (equippedTool.Name == "Weapon" or equippedTool:GetAttribute("IsWeapon") == true)
             if not hasWeapon then return false end
         else
             return false
@@ -2994,56 +3893,118 @@ function CombatEngine.TriggerParry(attacker, isUnparryable)
 
     local now = os.clock()
     local pingSec = CombatEngine.GetPingSeconds()
-    local onParryCooldown = (now - (CombatEngine.LastServerParrySuccess or 0)) < 0.92
-        or (now - (CombatEngine.LastParryTime or 0)) < 0.92
-    local baseHold = math.max(math.clamp(Config.ParryHoldDuration or 0.40, 0.28, 0.85), 0.42 + pingSec * 0.6)
-    local holdDur = onParryCooldown and math.max(baseHold, 0.62) or baseHold
+    local onParryCooldown = (now - (CombatEngine.LastServerParrySuccess or 0)) < 0.88
+        or (now - (CombatEngine.LastParryTime or 0)) < 0.88
+    local baseHold = math.max(math.clamp(Config.ParryHoldDuration or 0.40, 0.25, 0.85), 0.38 + pingSec * 0.65)
+    local holdDur = onParryCooldown and math.max(baseHold, 0.58) or baseHold
     if attacker then
         CombatEngine.LastParryByMob[attacker] = now
+        CombatEngine.ParryFacingMob = attacker
     end
+    CombatEngine.HoldAttackUntil = math.max(CombatEngine.HoldAttackUntil or 0, now + holdDur + 0.06)
 
-    -- If already blocking/parrying (e.g., second mob swings consecutively), extend active block instead of dropping guard!
+    -- If already blocking/parrying when another swing arrives:
+    -- 1) If we already landed a parry or held past the fresh parry window (>=0.26s) and parry CD is clear, cycle StopBlock -> StartBlock for a fresh Perfect Parry!
+    -- 2) Otherwise extend active block seamlessly so we never drop guard mid-hit.
     if CombatEngine.IsParrying then
-        CombatEngine.ParryHoldUntil = math.max(CombatEngine.ParryHoldUntil or 0, now + holdDur)
-        return true
+        local elapsedInBlock = now - (CombatEngine.ParryBlockConfirmedAt or CombatEngine.LastParryTime or now)
+        local alreadyParriedThisBlock = (CombatEngine.LastServerParrySuccess or 0) >= (CombatEngine.LastParryTime or 0)
+        local canRefreshParry = (alreadyParriedThisBlock or elapsedInBlock >= 0.26)
+            and ((now - (CombatEngine.LastServerParrySuccess or 0)) >= 0.82 or alreadyParriedThisBlock)
+        if not canRefreshParry then
+            CombatEngine.ParryHoldUntil = math.max(CombatEngine.ParryHoldUntil or 0, now + holdDur)
+            if aHrp and State.HRP then
+                local lookTarget = Vector3.new(aHrp.Position.X, State.HRP.Position.Y, aHrp.Position.Z)
+                State.HRP.CFrame = NavEngine.SafeLookAt(State.HRP.Position, lookTarget, State.HRP.CFrame)
+            end
+            return true
+        end
+        -- Fall through to bump ParryEpoch and perform a clean StopBlock -> StartBlock refresh!
     end
 
     CombatEngine.ParryEpoch = (CombatEngine.ParryEpoch or 0) + 1
     local myEpoch = CombatEngine.ParryEpoch
+    local needRefreshStop = CombatEngine.IsParrying == true
     CombatEngine.IsParrying = true
     CombatEngine.LastParryTime = now
+    CombatEngine.LastParryAttacker = attacker
+    CombatEngine.ParryBlockConfirmedAt = 0
     CombatEngine.ParryHoldUntil = now + holdDur
 
     task.spawn(function()
         pcall(function()
-            if aHrp and State.HRP then
-                local lookTarget = ((Config.AutoMobFarm or Config.AutoRaid) and (State.HRP.Anchored or CombatEngine.HoverLockActive))
-                    and aHrp.Position
-                    or Vector3.new(aHrp.Position.X, State.HRP.Position.Y, aHrp.Position.Z)
-                State.HRP.CFrame = CFrame.lookAt(State.HRP.Position, lookTarget)
-            end
             local TC = nil
             pcall(function()
                 TC = SafeGetController("ToolController")
             end)
-            -- Reset stale client isBlocking flag so TC:StartBlock() can never silently ignore a needed parry
-            if TC then
-                TC.isBlocking = false
-            end
-            if Remotes.StartBlock then
-                pcall(function() Remotes.StartBlock:InvokeServer() end)
-            elseif TC and type(TC.StartBlock) == "function" then
-                pcall(function() TC:StartBlock() end)
+
+            local function faceAttacker()
+                if aHrp and aHrp.Parent and State.HRP then
+                    local lookTarget = Vector3.new(aHrp.Position.X, State.HRP.Position.Y, aHrp.Position.Z)
+                    State.HRP.CFrame = NavEngine.SafeLookAt(State.HRP.Position, lookTarget, State.HRP.CFrame)
+                end
             end
 
-            -- Anchor hold deadline from when StartBlock confirmed so network RTT doesn't shorten the parry window
-            CombatEngine.ParryHoldUntil = math.max(CombatEngine.ParryHoldUntil or 0, os.clock() + holdDur)
+            faceAttacker()
 
-            while ScriptRunning and os.clock() < (CombatEngine.ParryHoldUntil or 0) do
+            -- If refreshing from an older block for a follow-up hit, cleanly release first so the server opens a new Parry window
+            local st0 = State.Character and State.Character:FindFirstChild("Status")
+            if needRefreshStop and st0 and st0:FindFirstChild("Blocking") then
+                if Remotes.StopBlock then
+                    pcall(function() Remotes.StopBlock:InvokeServer() end)
+                elseif TC and type(TC.StopBlock) == "function" then
+                    TC.isBlocking = true
+                    pcall(function() TC:StopBlock() end)
+                end
+                if TC then TC.isBlocking = false end
+                task.wait(0.02)
+            end
+
+            if CombatEngine.ParryEpoch ~= myEpoch then return end
+
+            -- Server-verified StartBlock with micro-retry if Character.Status.Attacking rejected the first call!
+            local confirmDeadline = os.clock() + 0.34
+            local blockConfirmed = false
+            while ScriptRunning and CombatEngine.ParryEpoch == myEpoch and os.clock() < confirmDeadline do
                 if not State.Humanoid or State.Humanoid.Health <= 0 then break end
-                task.wait(0.03)
+                faceAttacker()
+                if TC then TC.isBlocking = false end
+                local okInv, retVal = false, nil
+                if Remotes.StartBlock then
+                    okInv, retVal = pcall(function() return Remotes.StartBlock:InvokeServer() end)
+                elseif TC and type(TC.StartBlock) == "function" then
+                    okInv = pcall(function() TC:StartBlock() end)
+                    retVal = okInv
+                end
+                local st = State.Character and State.Character:FindFirstChild("Status")
+                if (st and (st:FindFirstChild("Blocking") or st:FindFirstChild("Parrying"))) or retVal == true then
+                    blockConfirmed = true
+                    CombatEngine.ParryBlockConfirmedAt = os.clock()
+                    break
+                end
+                -- If Attacking tag just ended or server didn't replicate Blocking yet, wait 25ms and verify/retry
+                task.wait(0.025)
+                st = State.Character and State.Character:FindFirstChild("Status")
+                if st and (st:FindFirstChild("Blocking") or st:FindFirstChild("Parrying")) then
+                    blockConfirmed = true
+                    CombatEngine.ParryBlockConfirmedAt = os.clock()
+                    break
+                end
             end
 
+            if CombatEngine.ParryEpoch ~= myEpoch then return end
+            if blockConfirmed then
+                -- Anchor hold deadline from when server actually confirmed Blocking so mid-swing wait/RTT never clips the parry window
+                CombatEngine.ParryHoldUntil = math.max(CombatEngine.ParryHoldUntil or 0, os.clock() + holdDur)
+            end
+
+            while ScriptRunning and CombatEngine.ParryEpoch == myEpoch and os.clock() < (CombatEngine.ParryHoldUntil or 0) do
+                if not State.Humanoid or State.Humanoid.Health <= 0 then break end
+                faceAttacker()
+                task.wait(0.025)
+            end
+
+            if CombatEngine.ParryEpoch ~= myEpoch then return end
             if Remotes.StopBlock then
                 pcall(function() Remotes.StopBlock:InvokeServer() end)
                 if TC then TC.isBlocking = false end
@@ -3055,12 +4016,94 @@ function CombatEngine.TriggerParry(attacker, isUnparryable)
         if CombatEngine.ParryEpoch == myEpoch then
             CombatEngine.IsParrying = false
             CombatEngine.ParryHoldUntil = 0
+            CombatEngine.ParryFacingMob = nil
+            CombatEngine.LastParryAttacker = nil
+            CombatEngine.ParryBlockConfirmedAt = 0
         end
     end)
     return true
 end
 
--- Tier 1 Auto-Parry Hook: Intercepts authoritative server ParryIndicator, Parry success & BomberCharge effects
+-- Unified deduplicated signal handlers called by BOTH Tier 2 (raw EffectService.RE.Event) and Tier 1 (module hooks)
+function CombatEngine.OnParryIndicator(attacker, isParryable)
+    if not ScriptRunning or not Config.AutoParry or typeof(attacker) ~= "Instance" or attacker == State.Character then return end
+    local now = os.clock()
+    if (now - (CombatEngine.LastParryIndEventByMob[attacker] or 0)) < 0.045 then
+        return
+    end
+    CombatEngine.LastParryIndEventByMob[attacker] = now
+    CombatEngine.LastParryIndByMob[attacker] = now
+
+    -- Calibrate speed-normalized animation lead time (or tag unparryable red animations so Tier 2 never blocks them!)
+    pcall(function()
+        local hum = attacker:FindFirstChildOfClass("Humanoid")
+        local animator = hum and hum:FindFirstChildOfClass("Animator")
+        if animator then
+            local pingSec = CombatEngine.GetPingSeconds()
+            for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do
+                local aId = tr.Animation and tr.Animation.AnimationId
+                if aId and CombatEngine.AttackAnimIds[aId] and tr.TimePosition > 0.04 then
+                    if isParryable == false then
+                        CombatEngine.UnparryableAnimIds[aId] = true
+                        CombatEngine.AnimParryLead[aId] = nil
+                    else
+                        CombatEngine.UnparryableAnimIds[aId] = nil
+                        local spd = math.max(tonumber(tr.Speed) or 1, 0.25)
+                        -- Store lead in animation TimePosition units compensated for RTT * playback speed
+                        local sampleLead = math.max(0.03, tr.TimePosition - (pingSec + 0.035) * spd)
+                        local prev = CombatEngine.AnimParryLead[aId]
+                        CombatEngine.AnimParryLead[aId] = prev and (prev * 0.4 + sampleLead * 0.6) or sampleLead
+                    end
+                    break
+                end
+            end
+        end
+    end)
+
+    task.spawn(function()
+        CombatEngine.TriggerParry(attacker, isParryable == false)
+    end)
+end
+
+function CombatEngine.OnParrySuccess(targetChar)
+    if not ScriptRunning or targetChar ~= State.Character then return end
+    local now = os.clock()
+    if (now - (CombatEngine.LastParrySuccessEventAt or 0)) < 0.045 then
+        return
+    end
+    CombatEngine.LastParrySuccessEventAt = now
+    CombatEngine.LastServerParrySuccess = now
+    if CombatEngine.IsParrying and State.HRP then
+        local otherSwinging = false
+        local _, _, _, _, nearList = CombatEngine.GetNearbyMobs(State.HRP.Position, Config.AutoParryRange or 18.0)
+        for _, entry in ipairs(nearList) do
+            local mSt = entry.model and entry.model:FindFirstChild("Status")
+            if mSt and mSt:FindFirstChild("Attacking") and (now - (CombatEngine.LastParryByMob[entry.model] or 0)) > 0.35 then
+                otherSwinging = true
+                break
+            end
+        end
+        if not otherSwinging then
+            CombatEngine.ParryHoldUntil = math.min(CombatEngine.ParryHoldUntil or now, now + 0.10)
+            CombatEngine.HoldAttackUntil = math.min(CombatEngine.HoldAttackUntil or now, now + 0.12)
+        end
+    end
+end
+
+function CombatEngine.OnBomberCharge(bomberMob, stage)
+    if not ScriptRunning or not Config.AutoParry or not Config.AutoDodgeUnparryable or typeof(bomberMob) ~= "Instance" then return end
+    if not tonumber(stage) or stage < 4 then return end
+    local now = os.clock()
+    if (now - (CombatEngine.LastBomberEventByMob[bomberMob] or 0)) < 0.08 then
+        return
+    end
+    CombatEngine.LastBomberEventByMob[bomberMob] = now
+    task.spawn(function()
+        CombatEngine.TriggerParry(bomberMob, true)
+    end)
+end
+
+-- Tier 1 Auto-Parry Module Hooks (redundant backup alongside Tier 2 EffectService.RE.Event)
 task.spawn(function()
     pcall(function()
     local effects = ReplicatedStorage:FindFirstChild("Assets") and ReplicatedStorage.Assets:FindFirstChild("Effects")
@@ -3069,29 +4112,7 @@ task.spawn(function()
         local mod = require(parryInd)
         if type(mod) == "table" and type(mod.effect) == "function" then
             safeHook(mod, "effect", "ParryIndicator", function(attacker, isParryable, ...)
-                if ScriptRunning and Config.AutoParry and attacker and attacker ~= State.Character then
-                    CombatEngine.LastParryIndByMob[attacker] = os.clock()
-                    -- Calibrate exact animation lead time for this enemy's attack animation so future swings pre-fire early by Ping
-                    if isParryable ~= false then
-                        pcall(function()
-                            local hum = attacker:FindFirstChildOfClass("Humanoid")
-                            local animator = hum and hum:FindFirstChildOfClass("Animator")
-                            if animator then
-                                local pingSec = CombatEngine.GetPingSeconds()
-                                for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do
-                                    local aId = tr.Animation and tr.Animation.AnimationId
-                                    if aId and CombatEngine.AttackAnimIds[aId] and tr.TimePosition > 0.05 then
-                                        CombatEngine.AnimParryLead[aId] = math.max(0.03, tr.TimePosition - pingSec - 0.03)
-                                        break
-                                    end
-                                end
-                            end
-                        end)
-                    end
-                    task.spawn(function()
-                        CombatEngine.TriggerParry(attacker, isParryable == false)
-                    end)
-                end
+                CombatEngine.OnParryIndicator(attacker, isParryable)
                 if typeof(attacker) ~= "Instance" or not attacker.Parent then return end
                 local hk = OrigHooks["ParryIndicator"]
                 if hk and type(hk.orig) == "function" then
@@ -3107,25 +4128,7 @@ task.spawn(function()
         local pMod = require(parryDoneInd)
         if type(pMod) == "table" and type(pMod.effect) == "function" then
             safeHook(pMod, "effect", "ParrySuccess", function(targetChar, ...)
-                -- Record parry cooldown timestamp; only release early if no other nearby mob is mid-swing
-                if ScriptRunning and targetChar == State.Character then
-                    local now = os.clock()
-                    CombatEngine.LastServerParrySuccess = now
-                    if CombatEngine.IsParrying and State.HRP then
-                        local otherSwinging = false
-                        local _, _, _, _, nearList = CombatEngine.GetNearbyMobs(State.HRP.Position, Config.AutoParryRange or 18.0)
-                        for _, entry in ipairs(nearList) do
-                            local mSt = entry.model and entry.model:FindFirstChild("Status")
-                            if mSt and mSt:FindFirstChild("Attacking") and (now - (CombatEngine.LastParryByMob[entry.model] or 0)) > 0.35 then
-                                otherSwinging = true
-                                break
-                            end
-                        end
-                        if not otherSwinging then
-                            CombatEngine.ParryHoldUntil = math.min(CombatEngine.ParryHoldUntil or now, now + 0.12)
-                        end
-                    end
-                end
+                CombatEngine.OnParrySuccess(targetChar)
                 if typeof(targetChar) ~= "Instance" or not targetChar.Parent then return end
                 local hk = OrigHooks["ParrySuccess"]
                 if hk and type(hk.orig) == "function" then
@@ -3141,12 +4144,7 @@ task.spawn(function()
         local bMod = require(bomberInd)
         if type(bMod) == "table" and type(bMod.effect) == "function" then
             safeHook(bMod, "effect", "BomberCharge", function(bomberMob, stage, ...)
-                -- BomberCharge stage 5 (~0.8s before blast) is imminent detonation; avoid wasting moves on stage 1
-                if ScriptRunning and Config.AutoParry and Config.AutoDodgeUnparryable and bomberMob and tonumber(stage) and stage >= 4 then
-                    task.spawn(function()
-                        CombatEngine.TriggerParry(bomberMob, true)
-                    end)
-                end
+                CombatEngine.OnBomberCharge(bomberMob, stage)
                 if typeof(bomberMob) ~= "Instance" or not bomberMob.Parent then return end
                 local hk = OrigHooks["BomberCharge"]
                 if hk and type(hk.orig) == "function" then
@@ -3159,8 +4157,9 @@ task.spawn(function()
     end)
 end)
 
--- Tier 2 Ping-Compensated Predictive & Fallback Scanner:
--- Fires early using calibrated AnimParryLead[aId] (cancelling network RTT!), or as fallback if ParryIndicator was missed.
+-- Tier 2 Ping-Compensated Predictive & Pre-Parry Swing-Hold Scanner:
+-- Holds weapon swings ~0.18s before a calibrated mob attack lands so Status.Attacking never locks out StartBlock,
+-- then pre-fires StartBlock early by Ping (or evades known unparryable red animations).
 task.spawn(function()
     while ScriptRunning do
         if Config.AutoParry and not State.IsAutoForging and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
@@ -3170,23 +4169,40 @@ task.spawn(function()
                 local now = os.clock()
                 for _, entry in ipairs(nearList) do
                     local m = entry.model
-                    local hum = m:FindFirstChildOfClass("Humanoid")
-                    local animator = hum and hum:FindFirstChildOfClass("Animator")
-                    if animator then
-                        local mobCooldown = now - (CombatEngine.LastParryByMob[m] or 0)
-                        local indAge = now - (CombatEngine.LastParryIndByMob[m] or 0)
-                        for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do
-                            local aId = tr.Animation and tr.Animation.AnimationId
-                            if aId and CombatEngine.AttackAnimIds[aId] then
-                                local lead = CombatEngine.AnimParryLead[aId]
-                                if lead then
-                                    if mobCooldown >= 0.72 and tr.TimePosition >= lead and tr.TimePosition <= (lead + 0.24) then
-                                        CombatEngine.TriggerParry(m, false)
-                                        break
+                    local mSt = m:FindFirstChild("Status")
+                    if not (mSt and (mSt:FindFirstChild("Stun") or mSt:FindFirstChild("Parried"))) then
+                        local hum = m:FindFirstChildOfClass("Humanoid")
+                        local animator = hum and hum:FindFirstChildOfClass("Animator")
+                        if animator then
+                            local mobCooldown = now - (CombatEngine.LastParryByMob[m] or 0)
+                            local indAge = now - (CombatEngine.LastParryIndByMob[m] or 0)
+                            for _, tr in ipairs(animator:GetPlayingAnimationTracks()) do
+                                local aId = tr.Animation and tr.Animation.AnimationId
+                                if aId and CombatEngine.AttackAnimIds[aId] then
+                                    local spd = math.max(tonumber(tr.Speed) or 1, 0.25)
+                                    if CombatEngine.UnparryableAnimIds[aId] then
+                                        if Config.AutoDodgeUnparryable and mobCooldown >= 0.85 and tr.TimePosition >= 0.18 and tr.TimePosition <= 0.55 then
+                                            CombatEngine.LastParryByMob[m] = now
+                                            CombatEngine.TriggerParry(m, true)
+                                            break
+                                        end
+                                    else
+                                        local lead = CombatEngine.AnimParryLead[aId]
+                                        if lead then
+                                            -- Pause starting new player swings ~0.18s before parry window opens so Status.Attacking clears!
+                                            local preHoldAt = math.max(0.01, lead - 0.18 * spd)
+                                            if mobCooldown >= 0.65 and tr.TimePosition >= preHoldAt and tr.TimePosition < lead then
+                                                CombatEngine.HoldAttackUntil = math.max(CombatEngine.HoldAttackUntil or 0, now + 0.22)
+                                            end
+                                            if mobCooldown >= 0.68 and tr.TimePosition >= lead and tr.TimePosition <= (lead + 0.26 * spd) then
+                                                CombatEngine.TriggerParry(m, false)
+                                                break
+                                            end
+                                        elseif indAge > 1.15 and mobCooldown >= 0.85 and tr.TimePosition >= 0.30 and tr.TimePosition <= 0.60 then
+                                            CombatEngine.TriggerParry(m, false)
+                                            break
+                                        end
                                     end
-                                elseif indAge > 1.05 and mobCooldown >= 0.85 and tr.TimePosition >= 0.30 and tr.TimePosition <= 0.60 then
-                                    CombatEngine.TriggerParry(m, false)
-                                    break
                                 end
                             end
                         end
@@ -3194,7 +4210,7 @@ task.spawn(function()
                 end
             end)
         end
-        task.wait(0.03)
+        task.wait(0.025)
     end
 end)
 
@@ -3599,6 +4615,13 @@ function MiningEngine.EvaluateRockOreFilter(rock)
     if not Config.FilterRocksByOre then
         return "wanted"
     end
+    if Config.PrioritizeCometRocks and MiningEngine.IsCometRock and MiningEngine.IsCometRock(rock) then
+        MiningEngine.SetPeekStatus(
+            "Comet Event Rock: " .. tostring(rock.Name),
+            "Breaking Comet Star rock immediately for Galaxite / Star Dust"
+        )
+        return "wanted"
+    end
     if MiningEngine.IsBackupTarget and rock == State.TargetRock then
         MiningEngine.SetPeekStatus(
             "Backup Clear: " .. tostring(rock.Name),
@@ -3846,7 +4869,370 @@ function MiningEngine.IsRockOccupiedByPlayer(rock, otherPlayers, activeOnly)
     return false
 end
 
+-- Live Comet Star / Meteor Event Rock Tracker (wired directly to CometRockService & workspace.CometRocks)
+-- Supports Comet Star (Star Dust), Fichillium Rain, Prismatic Storm, and Inferno meteors with crush-safe landing wait!
+MiningEngine.ActiveComets = {}
+MiningEngine.CometBlacklist = {}
+MiningEngine.ActiveCometTarget = nil
+
+function MiningEngine.RegisterComet(id, pos, _yaw, _tilt, landTime, hp, maxHp, _a, _b, kind, isBig)
+    if id == nil or typeof(pos) ~= "Vector3" then return end
+    MiningEngine.ActiveComets[id] = {
+        id = id,
+        pos = pos,
+        landTime = tonumber(landTime) or 0,
+        hp = tonumber(hp) or (isBig and 16 or 8),
+        maxHp = tonumber(maxHp) or (isBig and 16 or 8),
+        kind = tostring(kind or "Comet Star"),
+        big = (isBig == true),
+        seenAt = os.clock(),
+    }
+    MiningEngine.LastCometCheckAt = 0
+end
+
+do
+    if Remotes.CometSpawned and Remotes.CometSpawned:IsA("RemoteEvent") then
+        trackConn(Remotes.CometSpawned.OnClientEvent:Connect(function(id, pos, yaw, tilt, landTime, hp, maxHp, a, b, kind, isBig)
+            MiningEngine.RegisterComet(id, pos, yaw, tilt, landTime, hp, maxHp, a, b, kind, isBig)
+        end))
+    end
+    if Remotes.CometChanged and Remotes.CometChanged:IsA("RemoteEvent") then
+        trackConn(Remotes.CometChanged.OnClientEvent:Connect(function(id, hp, maxHp)
+            local entry = MiningEngine.ActiveComets[id]
+            if entry then
+                entry.hp = tonumber(hp) or entry.hp
+                entry.maxHp = tonumber(maxHp) or entry.maxHp
+                entry.lastHitAt = os.clock()
+            end
+        end))
+    end
+    if Remotes.CometRemoved and Remotes.CometRemoved:IsA("RemoteEvent") then
+        trackConn(Remotes.CometRemoved.OnClientEvent:Connect(function(id)
+            MiningEngine.ActiveComets[id] = nil
+            if MiningEngine.ActiveCometTarget and MiningEngine.ActiveCometTarget.id == id then
+                MiningEngine.ActiveCometTarget = nil
+            end
+            MiningEngine.LastCometCheckAt = 0
+        end))
+    end
+    if Remotes.GetComets and Remotes.GetComets:IsA("RemoteFunction") then
+        task.spawn(function()
+            local ok, list = pcall(function() return Remotes.GetComets:InvokeServer() end)
+            if ok and type(list) == "table" then
+                for _, entry in ipairs(list) do
+                    if type(entry) == "table" then
+                        MiningEngine.RegisterComet(table.unpack(entry))
+                    end
+                end
+            end
+        end)
+    end
+end
+
+function MiningEngine.IsCometRock(rock)
+    if not rock or not rock.Parent then return false end
+    local folder = workspace:FindFirstChild("CometRocks")
+    return folder ~= nil and rock:IsDescendantOf(folder)
+end
+
+-- Returns the closest LANDED (crush-safe) Comet Rock entry `{ id, pos, landTime, hp, maxHp, kind, big, model }`
+function MiningEngine.FindBestCometTarget()
+    if not Config.PrioritizeCometRocks or not State.HRP then return nil, math.huge end
+    local hrpPos = State.HRP.Position
+    local savedCF = (Config.StayAtSavedPos and MiningEngine.GetSavedSpotCFrame()) or nil
+    local scanOrigin = savedCF and savedCF.Position or hrpPos
+    local maxScanDist = Config.StayAtSavedPos and 14.5 or math.max(Config.MineDistance or 5000, 5000)
+    local serverNow = workspace:GetServerTimeNow()
+    local nowClock = os.clock()
+    local misc = MiningEngine.GetMiscDialogues()
+
+    local bestComet, bestDist = nil, math.huge
+    for id, c in pairs(MiningEngine.ActiveComets) do
+        local bl = MiningEngine.CometBlacklist[id]
+        -- Expire stale entries (> 110s, server Lifetime is 90s)
+        if (nowClock - (c.seenAt or nowClock)) > 110 then
+            MiningEngine.ActiveComets[id] = nil
+        elseif (not bl or nowClock >= bl) and (c.hp == nil or c.hp > 0) and typeof(c.pos) == "Vector3" then
+            -- Crush protection (KillRadius=5, FallTime=1.6s): wait until comet has actually landed before approaching!
+            if serverNow >= ((c.landTime or 0) + 0.25) and MiningEngine.IsPositionZoneUnlocked(c.pos, misc) then
+                local d = (c.pos - scanOrigin).Magnitude
+                if d <= maxScanDist and d < bestDist then
+                    bestDist = d
+                    bestComet = c
+                end
+            end
+        end
+    end
+
+    if bestComet then
+        return bestComet, bestDist
+    end
+
+    -- Fallback: scan workspace.CometRocks for landed models (CometRockController sets OriginalCFrame attribute ONLY after land())
+    local cometFolder = workspace:FindFirstChild("CometRocks")
+    if cometFolder then
+        for _, ch in ipairs(cometFolder:GetChildren()) do
+            if ch:IsA("Model") and ch:GetAttribute("OriginalCFrame") ~= nil then
+                local bl = MiningEngine.CometBlacklist[ch]
+                if not bl or nowClock >= bl then
+                    local okP, cf = pcall(function() return ch:GetPivot() end)
+                    local pos = (okP and cf and cf.Position) or (ch.PrimaryPart and ch.PrimaryPart.Position)
+                    if pos and MiningEngine.IsPositionZoneUnlocked(pos, misc) then
+                        local d = (pos - scanOrigin).Magnitude
+                        if d <= maxScanDist and d < bestDist then
+                            bestDist = d
+                            bestComet = {
+                                id = ch,
+                                pos = pos,
+                                landTime = 0,
+                                hp = 8,
+                                maxHp = 8,
+                                kind = tostring(ch.Name),
+                                big = ch.Name:find("Big", 1, true) ~= nil,
+                                model = ch,
+                            }
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return bestComet, bestDist
+end
+
+function MiningEngine.FindBestCometRock()
+    local c, d = MiningEngine.FindBestCometTarget()
+    return c, d
+end
+
+function MiningEngine.ShouldInterruptFarmForComet()
+    if not Config.PrioritizeCometRocks or not ScriptRunning then return false end
+    if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return false end
+    if State.IsInRaid or State.IsBuyingPotions or State.IsBuyingHealthPotions or State.CheckingPotionsOnStart or State.IsDeathRestockingPotions or State.IsMovingToRaidPad or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.IsEnhancing or State.IsAutoSellingMenu or State.IsDoingQuestNpc or State.IsUsingPotion or State.UsingPotionCycle or State.InAirPotionDrink then
+        return false
+    end
+    if RaidEngine and ((RaidEngine.IsInActiveRun and RaidEngine.IsInActiveRun()) or (RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid()) or (RaidEngine.IsBusyForShop and RaidEngine.IsBusyForShop())) then
+        return false
+    end
+    local now = os.clock()
+    if (now - (MiningEngine.LastCometCheckAt or 0)) < 0.6 then
+        return MiningEngine.HasActiveCometRock == true
+    end
+    MiningEngine.LastCometCheckAt = now
+    local comet = MiningEngine.FindBestCometTarget()
+    MiningEngine.HasActiveCometRock = (comet ~= nil)
+    return MiningEngine.HasActiveCometRock
+end
+
+-- Smoothly glides to a landed Comet Rock (within HitRange=6) and anchors cleanly until fully broken (zero tug-of-war!)
+function MiningEngine.MineCometTarget(comet)
+    if not comet or typeof(comet.pos) ~= "Vector3" or not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then
+        return false
+    end
+    local cometId = comet.id
+    local cPos = comet.pos
+    -- Resolve live Comet model if present in workspace.CometRocks for exact hitbox & destruction detection
+    local cometModel = (typeof(cometId) == "Instance" and cometId) or comet.model
+    if not cometModel or not cometModel.Parent then
+        local cf = workspace:FindFirstChild("CometRocks")
+        if cf then
+            local bestD = 12.0
+            for _, ch in ipairs(cf:GetChildren()) do
+                if ch:IsA("Model") then
+                    local okP, pv = pcall(function() return ch:GetPivot() end)
+                    if okP and pv then
+                        local d = (pv.Position - cPos).Magnitude
+                        if d < bestD then
+                            bestD = d
+                            cometModel = ch
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    State.IsMiningComet = true
+    MiningEngine.ActiveCometTarget = comet
+    MiningEngine.IsCometTarget = true
+
+    local function getLiveCometPos()
+        if cometModel and cometModel.Parent then
+            local hb = cometModel:FindFirstChild("Hitbox") or cometModel.PrimaryPart or cometModel:FindFirstChildWhichIsA("BasePart")
+            if hb then return hb.Position end
+            local okP, pv = pcall(function() return cometModel:GetPivot() end)
+            if okP and pv then return pv.Position end
+        end
+        return cPos
+    end
+
+    local function cometStillAlive()
+        if not ScriptRunning or not Config.PrioritizeCometRocks then return false end
+        if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return false end
+        if State.IsInRaid or State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsAutoForging or State.IsCrafting or State.IsEnhancing or State.IsAutoSellingMenu or State.IsDoingQuestNpc then
+            return false
+        end
+        if RaidEngine and ((RaidEngine.IsInActiveRun and RaidEngine.IsInActiveRun()) or (RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid())) then
+            return false
+        end
+        if typeof(cometId) == "Instance" then
+            local attrHp = cometId:GetAttribute("Health")
+            if attrHp ~= nil and tonumber(attrHp) and tonumber(attrHp) <= 0 then return false end
+            return cometId.Parent ~= nil
+        end
+        local cur = MiningEngine.ActiveComets[cometId]
+        if cur ~= nil then
+            return (cur.hp == nil or cur.hp > 0)
+        end
+        return false
+    end
+
+    local function computeCometStandCF(centerPos)
+        local standOff = (NavEngine and NavEngine.GetCharacterStandOffset and NavEngine.GetCharacterStandOffset()) or 3.2
+        local bestPos = nil
+        local bestScore = -math.huge
+        for deg = 0, 315, 45 do
+            local rad = math.rad(deg)
+            local dir = Vector3.new(math.cos(rad), 0, math.sin(rad))
+            local candX = centerPos.X + dir.X * 3.0
+            local candZ = centerPos.Z + dir.Z * 3.0
+            local candY = centerPos.Y + 0.5
+            if NavEngine and type(NavEngine.RaycastSolidFloor) == "function" then
+                local fHit = NavEngine.RaycastSolidFloor(Vector3.new(candX, centerPos.Y + 8, candZ), Vector3.new(0, -24, 0))
+                if fHit and fHit.Position then
+                    candY = fHit.Position.Y + standOff + 0.15
+                end
+            end
+            -- Strictly clamp Y so steep cliffs/slopes NEVER push standCF > 5 studs away from Comet HitRange!
+            candY = math.clamp(candY, centerPos.Y - 1.8, centerPos.Y + 3.2)
+            local candPos = Vector3.new(candX, candY, candZ)
+            local d3 = (candPos - centerPos).Magnitude
+            if d3 <= 5.2 then
+                local score = 100 - math.abs(candY - centerPos.Y) * 15
+                if State.HRP then
+                    score = score - (State.HRP.Position - candPos).Magnitude * 0.5
+                end
+                if score > bestScore then
+                    bestScore = score
+                    bestPos = candPos
+                end
+            end
+        end
+        local finalPos = bestPos or Vector3.new(centerPos.X + 2.8, centerPos.Y + 0.6, centerPos.Z)
+        return NavEngine.SafeLookAt(finalPos, Vector3.new(centerPos.X, finalPos.Y, centerPos.Z))
+    end
+
+    pcall(function()
+        MiningEngine.SafeUnanchor()
+        if CombatEngine then CombatEngine.ClearStanceLock() end
+        State.TargetRock = nil
+        State.CurrentRock = nil
+        MiningEngine.PartnerRock = nil
+        if NavEngine then
+            NavEngine.CachedRock = nil
+            NavEngine.CachedPartnerRock = nil
+            NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
+            pcall(NavEngine.SurfaceIfUnderground)
+        end
+
+        cPos = getLiveCometPos()
+        local standCF = computeCometStandCF(cPos)
+
+        if (State.HRP.Position - standCF.Position).Magnitude > 4.5 then
+            NavEngine.NavigateTo(standCF, true)
+            if NavEngine and not Config.Noclip then
+                pcall(NavEngine.RestoreCharacterPhysics)
+            end
+        end
+
+        local hardMaxAt = os.clock() + 90.0
+        local deadline = os.clock() + 45.0
+        local lastHp = (typeof(cometId) == "Instance") and cometId:GetAttribute("Health") or comet.hp
+        local lastProgress = os.clock()
+        while cometStillAlive() and os.clock() < deadline and os.clock() < hardMaxAt do
+            -- Yield cleanly while drinking potions in the air so we NEVER tug-battle DrinkSkyAnchorCF!
+            if State.IsUsingPotion or State.UsingPotionCycle or State.InAirPotionDrink then
+                lastProgress = os.clock()
+                deadline = math.min(hardMaxAt, deadline + 0.16)
+                task.wait(0.15)
+                continue
+            end
+
+            cPos = getLiveCometPos()
+            local distToStand = (State.HRP.Position - standCF.Position).Magnitude
+            local distToComet = (State.HRP.Position - cPos).Magnitude
+
+            if distToComet > 6.0 and distToStand > 3.2 then
+                if State.HRP.Anchored then State.HRP.Anchored = false end
+                standCF = computeCometStandCF(cPos)
+                NavEngine.GlideTo(standCF, Config.GlideSpeed or 55, true)
+                if NavEngine and not Config.Noclip then pcall(NavEngine.RestoreCharacterPhysics) end
+                if State.HRP then
+                    distToComet = (State.HRP.Position - cPos).Magnitude
+                end
+            end
+
+            if State.HRP and distToComet <= 6.8 then
+                -- Anchor cleanly at standCF while swinging so mobs/slopes can never push us out and trigger glide tug-of-war!
+                if not State.HRP.Anchored then
+                    State.HRP.Anchored = true
+                end
+                if State.Humanoid and State.Humanoid.AutoRotate then
+                    State.Humanoid.AutoRotate = false
+                end
+                State.HRP.CFrame = standCF
+                State.HRP.AssemblyLinearVelocity = Vector3.zero
+                State.HRP.AssemblyAngularVelocity = Vector3.zero
+                MiningEngine.EnsurePickaxeEquipped()
+                MiningEngine.ExecuteMineHit()
+
+                local curHp = nil
+                if typeof(cometId) ~= "Instance" then
+                    local liveEntry = MiningEngine.ActiveComets[cometId]
+                    curHp = liveEntry and liveEntry.hp
+                else
+                    curHp = cometId:GetAttribute("Health")
+                end
+
+                if curHp ~= nil and lastHp ~= nil and curHp < lastHp then
+                    lastHp = curHp
+                    lastProgress = os.clock()
+                    deadline = math.min(hardMaxAt, math.max(deadline, os.clock() + 18.0))
+                elseif curHp ~= nil and lastHp == nil then
+                    lastHp = curHp
+                    lastProgress = os.clock()
+                elseif curHp ~= nil and (os.clock() - lastProgress) >= 12.0 then
+                    MiningEngine.CometBlacklist[cometId] = os.clock() + 20.0
+                    break
+                end
+            else
+                MiningEngine.CometBlacklist[cometId] = os.clock() + 12.0
+                break
+            end
+            task.wait(math.max(0.08, tonumber(Config.MineDelay) or 0.15))
+        end
+
+        if State.HRP and State.HRP.Anchored then
+            State.HRP.Anchored = false
+            State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+        end
+        if State.Humanoid then
+            State.Humanoid.AutoRotate = true
+        end
+    end)
+
+    MiningEngine.ActiveCometTarget = nil
+    MiningEngine.IsCometTarget = false
+    MiningEngine.LastCometCheckAt = 0
+    MiningEngine.HasActiveCometRock = false
+    State.IsMiningComet = false
+    return true
+end
+
 function MiningEngine.FindBestRock()
+    MiningEngine.IsCometTarget = false
+
     local rocksFolder = workspace:FindFirstChild("Rocks")
     if not rocksFolder or not State.HRP then
         MiningEngine.IsBackupTarget = false
@@ -3893,7 +5279,17 @@ function MiningEngine.FindBestRock()
                                     end
                                 end
 
+                                -- Finish already-damaged rocks right next to us (e.g. 2nd rock from Multi-Hit 2x) before gliding off to a new rock!
                                 local occupied = Config.AvoidPlayerOccupiedRocks and MiningEngine.IsRockOccupiedByPlayer(ch, otherPlayers, false)
+                                if not occupied and dist <= 18.0 and dy <= 8.0 then
+                                    local curHp = tonumber(ch:GetAttribute("Health")) or 0
+                                    local maxHp = tonumber(ch:GetAttribute("MaxHealth")) or 0
+                                    if maxHp > 0 and curHp > 0 and curHp < (maxHp - 0.5) then
+                                        tierScore = tierScore + 10000
+                                        score = score - 2500 - ((1 - (curHp / maxHp)) * 500)
+                                    end
+                                end
+
                                 if occupied then
                                     if tierScore > fallbackTierScore or (tierScore == fallbackTierScore and score < fallbackScore) then
                                         fallbackTierScore = tierScore
@@ -3941,6 +5337,96 @@ function MiningEngine.FindBestRock()
     return nil, math.huge
 end
 
+-- Finds a second valid target rock extremely close to `primaryRock` so we can stand in the middle and multi-hit both at once!
+function MiningEngine.FindOverlapPartnerRock(primaryRock)
+    if not Config.MineMultiRock or not primaryRock or not primaryRock.Parent then return nil end
+    if MiningEngine.MultiRockFallback and (MiningEngine.MultiRockFallback[primaryRock] or 0) > os.clock() then
+        return nil
+    end
+    local p1 = primaryRock:FindFirstChild("Hitbox") or primaryRock.PrimaryPart or primaryRock:FindFirstChildWhichIsA("BasePart")
+    if not p1 then return nil end
+    local rocksFolder = workspace:FindFirstChild("Rocks")
+    if not rocksFolder then return nil end
+
+    local pos1 = p1.Position
+    local r1 = math.max(p1.Size.X, p1.Size.Z) * 0.5
+    local maxGap = math.clamp(tonumber(Config.MineMultiRockMaxGap) or 8.5, 2.0, 12.0)
+    local misc = MiningEngine.GetMiscDialogues()
+    local isBackup = MiningEngine.IsBackupTarget == true
+    local matchFn = isBackup and MiningEngine.MatchesBackupRock or MiningEngine.MatchesTargetRock
+    local otherPlayers = Config.AvoidPlayerOccupiedRocks and MiningEngine.GetOtherPlayersData() or {}
+
+    local bestPartner = nil
+    local bestGap = math.huge
+
+    local function scan(container)
+        for _, ch in ipairs(container:GetChildren()) do
+            if ch ~= primaryRock and ch:IsA("Model") and (ch:GetAttribute("Health") ~= nil or ch:FindFirstChild("Hitbox") or ch:GetAttribute("RequiredDamage") ~= nil) then
+                if matchFn(ch.Name) and MiningEngine.IsRockMineable(ch, misc, isBackup) then
+                    local p2 = ch:FindFirstChild("Hitbox") or ch.PrimaryPart or ch:FindFirstChildWhichIsA("BasePart")
+                    if p2 then
+                        local pos2 = p2.Position
+                        if math.abs(pos2.Y - pos1.Y) <= 6.5 then
+                            local r2 = math.max(p2.Size.X, p2.Size.Z) * 0.5
+                            local cDist = Vector3.new(pos2.X - pos1.X, 0, pos2.Z - pos1.Z).Magnitude
+                            local gap = math.max(0, cDist - r1 - r2)
+                            if gap <= maxGap and gap < bestGap then
+                                local occupied = Config.AvoidPlayerOccupiedRocks and MiningEngine.IsRockOccupiedByPlayer(ch, otherPlayers, false)
+                                if not occupied then
+                                    local junkRevealed = false
+                                    if Config.FilterRocksByOre and not isBackup then
+                                        local rev = MiningEngine.GetRockRevealedOres(ch)
+                                        if #rev > 0 and not MiningEngine.RockHasWantedOre(ch, rev) then
+                                            junkRevealed = true
+                                        end
+                                    end
+                                    if not junkRevealed then
+                                        bestGap = gap
+                                        bestPartner = ch
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            elseif ch:IsA("Folder") or ch:IsA("BasePart") or ch:IsA("Model") then
+                scan(ch)
+            end
+        end
+    end
+
+    scan(rocksFolder)
+    return bestPartner
+end
+
+-- Promotes the surviving 2nd rock from Multi-Hit (2x) immediately when the 1st rock breaks, so we finish it instead of running off!
+function MiningEngine.PromoteSurvivingPartnerRock(brokenRock)
+    local partner = MiningEngine.PartnerRock
+    MiningEngine.PartnerRock = nil
+    MiningEngine.PartnerLastHp = nil
+    if not partner or partner == brokenRock or not MiningEngine.IsRockAlive(partner) then
+        return nil
+    end
+    local isBackup = MiningEngine.IsBackupTarget == true
+    local matchFn = isBackup and MiningEngine.MatchesBackupRock or MiningEngine.MatchesTargetRock
+    if not matchFn(partner.Name) or not MiningEngine.MatchesTargetZone(partner) then
+        MiningEngine.SetRockLocalCollision(partner, true)
+        return nil
+    end
+    if not MiningEngine.IsRockMineable(partner, nil, isBackup) then
+        MiningEngine.SetRockLocalCollision(partner, true)
+        return nil
+    end
+    if Config.FilterRocksByOre and not isBackup then
+        local rev = MiningEngine.GetRockRevealedOres(partner)
+        if #rev > 0 and not MiningEngine.RockHasWantedOre(partner, rev) then
+            MiningEngine.SetRockLocalCollision(partner, true)
+            return nil
+        end
+    end
+    return partner
+end
+
 function MiningEngine.SetRockLocalCollision(rock, canCollide)
     if not rock then return end
     pcall(function()
@@ -3959,13 +5445,21 @@ function MiningEngine.EnsurePickaxeEquipped()
         return true
     end
 
-    -- 1. Check Backpack
+    -- 1. Check Backpack (strictly Pickaxe — never accidentally equip a Weapon or Potion!)
     if LocalPlayer.Backpack then
-        local bpTool = LocalPlayer.Backpack:FindFirstChild("Pickaxe") or LocalPlayer.Backpack:FindFirstChildWhichIsA("Tool")
+        local bpTool = LocalPlayer.Backpack:FindFirstChild("Pickaxe")
+        if not bpTool then
+            for _, t in ipairs(LocalPlayer.Backpack:GetChildren()) do
+                if t:IsA("Tool") and (t.Name == "Pickaxe" or t:GetAttribute("IsPickaxe") == true) then
+                    bpTool = t
+                    break
+                end
+            end
+        end
         if bpTool and State.Humanoid and not State.IsUsingPotion then
-            State.Humanoid:EquipTool(bpTool)
-            task.wait(0.1)
-            if State.Character:FindFirstChild("Pickaxe") then return true end
+            pcall(function() State.Humanoid:EquipTool(bpTool) end)
+            task.wait(0.08)
+            if State.Character and State.Character:FindFirstChild("Pickaxe") then return true end
         end
     end
 
@@ -3973,10 +5467,10 @@ function MiningEngine.EnsurePickaxeEquipped()
     local pgui = LocalPlayer:FindFirstChild("PlayerGui")
     local hotbar = pgui and pgui:FindFirstChild("BackpackGui") and pgui.BackpackGui:FindFirstChild("Backpack") and pgui.BackpackGui.Backpack:FindFirstChild("Hotbar")
     local slot1 = hotbar and hotbar:FindFirstChild("1")
-    if slot1 and typeof(firesignal) == "function" then
-        firesignal(slot1.MouseButton1Click)
-        task.wait(0.1)
-        if State.Character:FindFirstChild("Pickaxe") then return true end
+    if slot1 and slot1:IsA("GuiButton") and typeof(firesignal) == "function" then
+        pcall(function() firesignal(slot1.MouseButton1Click) end)
+        task.wait(0.08)
+        if State.Character and State.Character:FindFirstChild("Pickaxe") then return true end
     end
 
     -- 3. Remote Equip via CharacterService
@@ -3985,7 +5479,7 @@ function MiningEngine.EnsurePickaxeEquipped()
         local pickaxeGuid = (type(pickaxeData) == "table" and pickaxeData.GUID) or (type(pickaxeData) == "string" and pickaxeData)
         if pickaxeGuid then
             pcall(function() Remotes.EquipItem:InvokeServer(pickaxeGuid) end)
-            task.wait(0.15)
+            task.wait(0.12)
             return true
         end
     end
@@ -3998,7 +5492,7 @@ function MiningEngine.ExecuteMineHit()
         Remotes.ToolActivated:InvokeServer("Pickaxe", false)
     end)
     -- Simultaneously spam Weapon alongside Pickaxe so nearby mobs take damage without cancelling active Auto-Parry
-    if Config.AutoDefense and not CombatEngine.IsBlockingOrParrying() then
+    if Config.AutoDefense and not CombatEngine.IsBlockingOrParrying() and os.clock() >= (CombatEngine.HoldAttackUntil or 0) then
         task.spawn(function()
             pcall(function()
                 Remotes.ToolActivated:InvokeServer("Weapon", false)
@@ -4014,7 +5508,7 @@ function MiningEngine.GetSavedSpotCFrame()
         if type(sp.lx) == "number" and type(sp.ly) == "number" and type(sp.lz) == "number" then
             local lv = Vector3.new(sp.lx, sp.ly, sp.lz)
             if lv.Magnitude > 0.01 then
-                return CFrame.lookAt(pos, pos + lv)
+                return NavEngine.SafeLookAt(pos, pos + lv)
             end
         end
         return CFrame.new(pos)
@@ -4073,8 +5567,15 @@ function MiningEngine.UpdateStatus()
     if not MiningEngine.StatusLabel then return end
     pcall(function()
         local pwr, pName = MiningEngine.GetPlayerPickaxePower()
-        if Config.AutoMine then
-            if State.TargetRock and MiningEngine.IsRockAlive(State.TargetRock) then
+        if Config.AutoMine or State.IsMiningComet then
+            if State.IsMiningComet and MiningEngine.ActiveCometTarget then
+                local c = MiningEngine.ActiveCometTarget
+                MiningEngine.StatusLabel:SetTitle(string.format("Mining COMET: %s [%d/%d]", tostring(c.kind or "Comet Rock"), math.ceil(c.hp or 0), math.ceil(c.maxHp or 8)))
+                MiningEngine.StatusLabel:SetDesc("Pickaxe: " .. tostring(pName) .. " (Power: " .. tostring(pwr) .. ")")
+            elseif RaidEngine and RaidEngine.MineYieldActive then
+                MiningEngine.StatusLabel:SetTitle("Auto Mine: Paused for Boss / Raid")
+                MiningEngine.StatusLabel:SetDesc("Will automatically resume mining after defeat")
+            elseif State.TargetRock and MiningEngine.IsRockAlive(State.TargetRock) then
                 local hp = State.TargetRock:GetAttribute("Health") or 0
                 local maxHp = State.TargetRock:GetAttribute("MaxHealth") or hp
                 MiningEngine.StatusLabel:SetTitle("Mining: " .. State.TargetRock.Name .. " [" .. tostring(hp) .. "/" .. tostring(maxHp) .. "]")
@@ -4092,6 +5593,7 @@ function MiningEngine.UpdateStatus()
 end
 
 function MiningEngine.SafeUnanchor()
+    MiningEngine.ActiveSunkenCF = nil
     if State.HRP and State.HRP.Anchored then
         if NavEngine and NavEngine.IsSunkenMode(Config.MinePositionMode) then
             State.HRP.CFrame = CFrame.new(State.HRP.Position + Vector3.new(0, 3.8, 0))
@@ -4103,11 +5605,476 @@ function MiningEngine.SafeUnanchor()
     end
 end
 
+-- Heartbeat Sunken-Mining & Mob-Defense Sky-Regen Pin:
+-- 1) During Mob Defense Low-HP Air Retreat, holds HRP strictly anchored at DefenseSkyAnchorCF out of mob reach.
+-- 2) During sunken mining, holds HRP anchored at ActiveSunkenCF so server ToolActivated unanchor pulses never bounce the character.
+trackConn(RunService.Heartbeat:Connect(function()
+    if not ScriptRunning then return end
+    local dcf = MiningEngine.DefenseSkyAnchorCF
+    if dcf then
+        local keepAir = Config.AutoMine and Config.MineKillMobsEnabled and Config.MineDefenseLowHpRetreat
+            and State.InDefenseRegen and State.HRP and State.Humanoid and State.Humanoid.Health > 0
+            and NavEngine.IsValidCF(dcf)
+        if keepAir then
+            if not State.HRP.Anchored then
+                State.HRP.Anchored = true
+            end
+            State.HRP.CFrame = dcf
+            State.HRP.AssemblyLinearVelocity = Vector3.zero
+            State.HRP.AssemblyAngularVelocity = Vector3.zero
+            if State.Humanoid.AutoRotate then
+                State.Humanoid.AutoRotate = false
+            end
+            return
+        else
+            MiningEngine.DefenseSkyAnchorCF = nil
+            if State.HRP and State.HRP.Anchored and not MiningEngine.ActiveSunkenCF and not (RaidEngine and RaidEngine.SkyAnchorCF) then
+                State.HRP.Anchored = false
+                State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+            end
+            if State.Humanoid then
+                State.Humanoid.AutoRotate = true
+            end
+        end
+    end
+    local scf = MiningEngine.ActiveSunkenCF
+    if not scf then return end
+    local keepPin = Config.AutoMine and not Config.StayAtSavedPos
+        and NavEngine and NavEngine.IsSunkenMode(Config.MinePositionMode) and not NavEngine.IsGliding
+        and State.TargetRock and State.HRP and State.Humanoid and State.Humanoid.Health > 0
+        and not State.IsInRaid and not State.IsAutoForging and not State.DrainingFullBag
+        and not State.IsCrafting and not State.IsBuyingPotions and not State.IsBuyingHealthPotions
+        and not State.IsMovingToRaidPad and not State.IsEnhancing and not State.IsMiningComet
+        and not State.IsUsingPotion and not State.UsingPotionCycle and not State.IsAutoSellingMenu
+        and not State.IsDoingQuestNpc and not State.InAutoDefense and not State.InDefenseRegen
+        and NavEngine.IsValidCF(scf)
+    if keepPin then
+        if not State.HRP.Anchored then
+            State.HRP.Anchored = true
+        end
+        State.HRP.CFrame = scf
+        State.HRP.AssemblyLinearVelocity = Vector3.zero
+        State.HRP.AssemblyAngularVelocity = Vector3.zero
+        if State.Humanoid.AutoRotate then
+            State.Humanoid.AutoRotate = false
+        end
+    else
+        MiningEngine.ActiveSunkenCF = nil
+    end
+end))
+
+-- Finds a threatening hostile mob while mining based on user's MineKillMobsTrigger & MineKillMobsRange
+function MiningEngine.FindMiningThreatMob()
+    if not Config.MineKillMobsEnabled or not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then
+        return nil
+    end
+    if not CombatEngine or type(CombatEngine.IsHostileMob) ~= "function" then
+        return nil
+    end
+    local living = workspace:FindFirstChild("Living")
+    if not living then return nil end
+
+    local now = os.clock()
+    local curHp = State.Humanoid.Health
+    if MiningEngine.LastHpSample ~= nil and curHp < (MiningEngine.LastHpSample - 0.5) then
+        MiningEngine.LastDamagedAt = now
+    end
+    MiningEngine.LastHpSample = curHp
+
+    local myPos = State.HRP.Position
+    local range = math.clamp(tonumber(Config.MineKillMobsRange) or 18, 8, 45)
+    local mode = Config.MineKillMobsTrigger or "Both (Near or Attacked)"
+    local checkNear = (mode == "When Nearby (Range)" or mode == "Both (Near or Attacked)")
+    local checkAttacked = (mode == "When Attacked (Damage / Parry)" or mode == "Both (Near or Attacked)")
+    local isAttacked = checkAttacked and ((now - (MiningEngine.LastDamagedAt or 0)) <= 4.5)
+
+    if not checkNear and not isAttacked then
+        return nil
+    end
+
+    local function isValidThreat(mob, maxDist)
+        if not mob or not mob.Parent or mob == State.Character then return false, math.huge end
+        if CombatEngine.Blacklist and (CombatEngine.Blacklist[mob] or 0) > now then return false, math.huge end
+        if not CombatEngine.IsHostileMob(mob) then return false, math.huge end
+        local mHrp = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChildWhichIsA("BasePart")
+        local mHum = mob:FindFirstChildOfClass("Humanoid")
+        if not mHrp or not mHum or mHum.Health <= 0 then return false, math.huge end
+        local diff = mHrp.Position - myPos
+        if math.abs(diff.Y) > 20 then return false, math.huge end
+        local d = diff.Magnitude
+        return d <= maxDist, d
+    end
+
+    -- Prioritize the exact mob that just attacked us if it's still alive nearby
+    if isAttacked and MiningEngine.LastAttackerMob then
+        local okAtk = isValidThreat(MiningEngine.LastAttackerMob, math.max(range + 16, 34))
+        if okAtk then
+            return MiningEngine.LastAttackerMob
+        end
+    end
+
+    local scanRadius = isAttacked and math.max(range, 26) or range
+    local bestMob, bestDist = nil, math.huge
+    for _, m in ipairs(living:GetChildren()) do
+        local okM, d = isValidThreat(m, scanRadius)
+        if okM and d < bestDist then
+            bestDist = d
+            bestMob = m
+        end
+    end
+    return bestMob
+end
+
+function MiningEngine.ClearDefenseRegen(unanchor)
+    local wasActive = State.InDefenseRegen or (MiningEngine.DefenseSkyAnchorCF ~= nil)
+    State.InDefenseRegen = false
+    MiningEngine.DefenseSkyAnchorCF = nil
+    if unanchor and wasActive then
+        if State.HRP and State.HRP.Anchored then
+            State.HRP.Anchored = false
+            State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+        end
+        if State.Humanoid then
+            State.Humanoid.AutoRotate = true
+        end
+        if not Config.Noclip and not (NavEngine and NavEngine.IsGliding) then
+            pcall(NavEngine.RestoreCharacterPhysics)
+        end
+    end
+end
+
+-- Computes a safe elevated air-regen CFrame above the player during Mob Defense (respects high cave ceilings)
+function MiningEngine.GetDefenseSkyRegenCF()
+    if not State.HRP then return nil end
+    local origin = State.HRP.Position
+    local targetY = origin.Y + 38.0
+    pcall(function()
+        local rp = RaycastParams.new()
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        local excl = { State.Character }
+        local living = workspace:FindFirstChild("Living")
+        if living then table.insert(excl, living) end
+        local rocks = workspace:FindFirstChild("Rocks")
+        if rocks then table.insert(excl, rocks) end
+        rp.FilterDescendantsInstances = excl
+        rp.IgnoreWater = true
+        local ceilHit = workspace:Raycast(origin + Vector3.new(0, 3.0, 0), Vector3.new(0, 62.0, 0), rp)
+        if ceilHit and ceilHit.Instance and ceilHit.Instance.CanCollide then
+            local underCeilY = ceilHit.Position.Y - 4.5
+            -- If the cave ceiling is high enough (>= +14 studs above mobs), hover safely just underneath it;
+            -- if it's a very low tunnel ceiling, rise cleanly above it (+32 studs) out of mob reach.
+            if underCeilY >= (origin.Y + 14.0) then
+                targetY = math.min(targetY, underCeilY)
+            else
+                targetY = origin.Y + 32.0
+            end
+        end
+    end)
+    return CFrame.new(origin.X, targetY, origin.Z)
+end
+
+-- Retreats smoothly into the air to regenerate HP & drink Health Potions (without overriding Auto Use Potions)
+function MiningEngine.RunDefenseLowHpRetreat()
+    if not Config.MineDefenseLowHpRetreat or not Config.MineKillMobsEnabled or not Config.AutoMine then
+        return false, 0
+    end
+    if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then
+        return false, 0
+    end
+    local enterHp = math.clamp(tonumber(Config.MineDefenseRetreatHP) or 35, 5, 90)
+    local resumeHp = math.max(enterHp + 10, math.clamp(tonumber(Config.MineDefenseResumeHP) or 85, 20, 100))
+    local hpPct = (State.Humanoid.Health / math.max(1, State.Humanoid.MaxHealth)) * 100
+    if hpPct > enterHp then
+        return false, 0
+    end
+
+    local startedAt = os.clock()
+    State.InDefenseRegen = true
+    MiningEngine.DefenseSkyAnchorCF = nil
+    if CombatEngine then
+        CombatEngine.ClearStanceLock()
+        CombatEngine.ReleaseBlockIfStuck()
+        CombatEngine.LastEngagedMob = nil
+    end
+
+    local safeCF = MiningEngine.GetDefenseSkyRegenCF()
+    if safeCF and State.HRP then
+        -- Smooth Anti-TP-safe climb into the air
+        local riseSpeed = math.clamp(tonumber(Config.GlideSpeed) or 50, 20, 52)
+        local riseStart = os.clock()
+        local curP = State.HRP.Position
+        local prevPos = curP
+        if State.HRP.Anchored then State.HRP.Anchored = false end
+        if State.Humanoid then State.Humanoid.AutoRotate = true end
+
+        while ScriptRunning and State.HRP and State.Humanoid and State.Humanoid.Health > 0 and (os.clock() - riseStart) < 4.5 do
+            local dt = RunService.Heartbeat:Wait()
+            if not Config.AutoMine or not Config.MineKillMobsEnabled or not Config.MineDefenseLowHpRetreat or not State.InDefenseRegen then break end
+            if State.IsInRaid or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsEnhancing or State.IsAutoSellingMenu or State.IsDoingQuestNpc then break end
+            if State.Character then
+                for _, pt in ipairs(State.Character:GetDescendants()) do
+                    if pt:IsA("BasePart") and pt.CanCollide then pt.CanCollide = false end
+                end
+            end
+            local actualP = State.HRP.Position
+            if (actualP - prevPos).Magnitude > 9.0 then
+                break
+            end
+            curP = actualP
+            local delta = safeCF.Position - curP
+            local dMag = delta.Magnitude
+            if dMag <= 2.5 then
+                State.HRP.CFrame = safeCF
+                State.HRP.AssemblyLinearVelocity = Vector3.zero
+                State.HRP.AssemblyAngularVelocity = Vector3.zero
+                break
+            end
+            local step = math.min(dMag, riseSpeed * dt, 2.5)
+            curP = curP + delta.Unit * step
+            prevPos = curP
+            State.HRP.CFrame = CFrame.new(curP) * safeCF.Rotation
+            State.HRP.AssemblyLinearVelocity = delta.Unit * math.min(riseSpeed, math.max(20, dMag * 6))
+            State.HRP.AssemblyAngularVelocity = Vector3.zero
+        end
+
+        if State.HRP and State.Humanoid and State.Humanoid.Health > 0 and State.InDefenseRegen and Config.AutoMine and Config.MineKillMobsEnabled and Config.MineDefenseLowHpRetreat then
+            local rem = (safeCF.Position - State.HRP.Position).Magnitude
+            local anchorCF = (rem <= 3.5) and safeCF or CFrame.new(State.HRP.Position)
+            MiningEngine.DefenseSkyAnchorCF = anchorCF
+            State.HRP.CFrame = anchorCF
+            State.HRP.Anchored = true
+            State.HRP.AssemblyLinearVelocity = Vector3.zero
+            State.HRP.AssemblyAngularVelocity = Vector3.zero
+            State.Humanoid.AutoRotate = false
+        end
+    end
+
+    local PE = State.PotionEngine
+    local waitAutoUseGraceUntil = os.clock() + 0.45
+
+    while ScriptRunning and Config.AutoMine and Config.MineKillMobsEnabled and Config.MineDefenseLowHpRetreat and State.InDefenseRegen do
+        if State.IsInRaid or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsEnhancing or State.IsAutoSellingMenu or State.IsDoingQuestNpc then
+            break
+        end
+        if RaidEngine and (RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid() or RaidEngine.GetActiveBossArena() ~= nil) then
+            break
+        end
+        if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then
+            break
+        end
+
+        hpPct = (State.Humanoid.Health / math.max(1, State.Humanoid.MaxHealth)) * 100
+        if hpPct >= resumeHp then
+            break
+        end
+
+        if MiningEngine.StatusLabel then
+            pcall(function()
+                local potStr = (PE and type(PE.GetTotalHealthPotionsOwned) == "function")
+                    and (" | Health Pots: " .. tostring(PE.GetTotalHealthPotionsOwned()))
+                    or ""
+                MiningEngine.StatusLabel:SetTitle(string.format("Defending [AIR REGEN] %.0f%% -> %.0f%%", hpPct, resumeHp))
+                MiningEngine.StatusLabel:SetDesc("Regenerating safely in the air" .. potStr)
+            end)
+        end
+
+        -- Cooperate cleanly with Auto Use Potions (never override an active drink or fight over tool equips):
+        -- Give Auto Use Potions brief first priority if it's already configured to drink Health Potions at this HP%,
+        -- otherwise drink the best owned Health Potion directly without re-equipping Pickaxe/Weapon mid-air.
+        if PE and type(PE.UseBestHealthPotion) == "function" and not State.IsUsingPotion and not State.UsingPotionCycle then
+            local autoUseHandlesHp = false
+            if Config.AutoUsePotions and hpPct <= (tonumber(Config.AutoUseHealthPct) or 55) and type(PE.ResolveSelectedIds) == "function" then
+                for _, pid in ipairs(PE.ResolveSelectedIds(Config.AutoUsePotionTypes, false)) do
+                    local pInfo = PE.IdToData and PE.IdToData[pid]
+                    if pInfo and pInfo.isHealth and PE.GetOwnedCount(pid) > 0 then
+                        autoUseHandlesHp = true
+                        break
+                    end
+                end
+            end
+            if (not autoUseHandlesHp) or os.clock() >= waitAutoUseGraceUntil then
+                PE.UseBestHealthPotion(true)
+            end
+        end
+
+        task.wait(0.25)
+    end
+
+    MiningEngine.ClearDefenseRegen(true)
+    if ScriptRunning and State.Humanoid and State.Humanoid.Health > 0 then
+        pcall(NavEngine.TouchSolidGroundBriefly, 0.06)
+    end
+    return true, (os.clock() - startedAt)
+end
+
+-- Pauses mining cleanly to eliminate nearby/attacking mobs using full CombatEngine stance + Auto-Parry, then restores Pickaxe & returns to the rock
+function MiningEngine.ClearMiningThreats()
+    if not Config.MineKillMobsEnabled or not Config.AutoMine then return false end
+    local threat = MiningEngine.FindMiningThreatMob()
+    if not threat then return false end
+
+    State.InAutoDefense = true
+    MiningEngine.SafeUnanchor()
+    if State.TargetRock then
+        MiningEngine.SetRockLocalCollision(State.TargetRock, true)
+    end
+    if State.Humanoid then
+        State.Humanoid.AutoRotate = true
+    end
+
+    local okRun, errRun = pcall(function()
+        local defenseStart = os.clock()
+        while ScriptRunning and Config.AutoMine and Config.MineKillMobsEnabled and (os.clock() - defenseStart) < 35.0 do
+            if State.IsInRaid or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsEnhancing or State.IsAutoSellingMenu or State.IsDoingQuestNpc then
+                break
+            end
+            if RaidEngine and (RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid() or RaidEngine.GetActiveBossArena() ~= nil) then
+                break
+            end
+            if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then
+                break
+            end
+
+            -- Low-HP Air Retreat: rise out of reach, regenerate + drink Health Potions (works alongside Auto Use Potions), then resume fight
+            if Config.MineDefenseLowHpRetreat then
+                local didRetreat, regenElapsed = MiningEngine.RunDefenseLowHpRetreat()
+                if didRetreat then
+                    -- Don't let sky-regen time eat into the 35s defense fight budget
+                    defenseStart = defenseStart + (regenElapsed or 0)
+                    if not ScriptRunning or not Config.AutoMine or not Config.MineKillMobsEnabled or not State.Humanoid or State.Humanoid.Health <= 0 then
+                        break
+                    end
+                end
+            end
+
+            local mHum = threat and threat.Parent and threat:FindFirstChildOfClass("Humanoid")
+            if not threat or not threat.Parent or not mHum or mHum.Health <= 0 or (CombatEngine.Blacklist and (CombatEngine.Blacklist[threat] or 0) > os.clock()) then
+                -- Current threat eliminated: check if another threat is still right next to us
+                MiningEngine.LastAttackerMob = nil
+                threat = MiningEngine.FindMiningThreatMob()
+                if not threat then
+                    break
+                end
+            end
+
+            if MiningEngine.StatusLabel then
+                pcall(function()
+                    MiningEngine.StatusLabel:SetTitle("Defending: " .. tostring(threat.Name))
+                    MiningEngine.StatusLabel:SetDesc("Clearing threat before resuming Auto Mine")
+                end)
+            end
+
+            local okEng, atkDelay = CombatEngine.EngageTargetMob(threat, { blacklistOnFail = true })
+            if not okEng then
+                if CombatEngine.Blacklist then
+                    CombatEngine.Blacklist[threat] = os.clock() + 8.0
+                end
+                threat = nil
+            end
+            task.wait(atkDelay or 0.08)
+        end
+    end)
+
+    MiningEngine.ClearDefenseRegen(true)
+    State.InAutoDefense = false
+    MiningEngine.LastAttackerMob = nil
+    MiningEngine.LastDamagedAt = 0
+    if CombatEngine then
+        CombatEngine.ClearStanceLock()
+        CombatEngine.LastEngagedMob = nil
+    end
+    if State.HRP and State.HRP.Anchored then
+        State.HRP.Anchored = false
+    end
+    if State.Humanoid then
+        State.Humanoid.AutoRotate = true
+        MiningEngine.LastHpSample = State.Humanoid.Health
+    end
+    -- Reset stuck-rock watchdog so time spent killing the mob never blacklists our current rock
+    MiningEngine.TargetLastDamageTime = os.clock()
+    if Config.AutoMine and Config.AutoEquipPickaxe and State.Humanoid and State.Humanoid.Health > 0 then
+        pcall(MiningEngine.EnsurePickaxeEquipped)
+    end
+    return true
+end
+
 -- Mining Task Loop (Anti-TP Protection & Target Latch Until Complete Destruction)
 task.spawn(function()
     while ScriptRunning do
+        local pausedForBoss = (Config.AutoMine and RaidEngine and RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid()) or false
+        if pausedForBoss then
+            if not RaidEngine.MineYieldActive then
+                RaidEngine.MineYieldActive = true
+                MiningEngine.SafeUnanchor()
+                if State.TargetRock then
+                    MiningEngine.SetRockLocalCollision(State.TargetRock, true)
+                end
+                State.TargetRock = nil
+                State.CurrentRock = nil
+                State.LastMinedRock = nil
+                State.ResumingAfterDeath = false
+                if NavEngine then
+                    NavEngine.CachedRock = nil
+                    -- NEVER cancel an active Raid/HealthPotion/Shop/Forge/Quest glide when Mining yields!
+                    local foreignGlideActive = State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsBuyingPotions or State.IsAutoForging or State.IsCrafting or State.IsDoingQuestNpc
+                    if NavEngine.IsGliding and not foreignGlideActive then
+                        NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
+                    end
+                end
+            end
+            pcall(MiningEngine.UpdateStatus)
+            task.wait(0.35)
+            continue
+        elseif RaidEngine and RaidEngine.MineYieldActive then
+            RaidEngine.MineYieldActive = false
+            if Config.AutoMine and Config.AutoEquipPickaxe then
+                pcall(MiningEngine.EnsurePickaxeEquipped)
+            end
+        end
+
         pcall(MiningEngine.UpdateStatus)
-        if Config.AutoMine and not State.IsAutoForging and not State.DrainingFullBag and not State.IsCrafting and not State.IsBuyingPotions and not State.CheckingPotionsOnStart and not State.IsUsingPotion and not State.UsingPotionCycle and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
+        local inAbyssLobby = (RaidEngine and type(RaidEngine.IsInAbyssLobby) == "function" and RaidEngine.IsInAbyssLobby()) or false
+        -- High-priority Comet Star / Meteor event rock interrupt (runs before regular AutoMine & interrupts AutoMobFarm; never interrupts Raids/Asura/AbyssLobby)
+        if not inAbyssLobby and Config.PrioritizeCometRocks and (Config.AutoMine or Config.AutoMobFarm) and MiningEngine.ShouldInterruptFarmForComet() then
+            local comet = MiningEngine.FindBestCometTarget()
+            if comet then
+                MiningEngine.MineCometTarget(comet)
+                task.wait(0.1)
+                continue
+            end
+        end
+        local raidLaunchHold = (Config.AutoRaid and RaidEngine and os.clock() < (RaidEngine.PartyLaunchHoldUntil or 0)) or false
+        local inActiveRaid = State.IsInRaid or (RaidEngine and RaidEngine.GetActiveBossArena() ~= nil) or false
+        if Config.AutoMine and not inActiveRaid and not inAbyssLobby and not raidLaunchHold and not State.IsAutoForging and not State.DrainingFullBag and not State.IsCrafting and not State.IsBuyingPotions and not State.IsBuyingHealthPotions and not State.IsMovingToRaidPad and not State.IsEnhancing and not State.IsMiningComet and not State.CheckingPotionsOnStart and not State.IsUsingPotion and not State.UsingPotionCycle and not State.IsAutoSellingMenu and not State.IsDoingQuestNpc and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
+            -- MOB DEFENSE SAFETY: pause mining cleanly to kill nearby/attacking mobs without slowing down normal pickaxe swings
+            if Config.MineKillMobsEnabled and MiningEngine.ClearMiningThreats() then
+                task.wait(0.08)
+                continue
+            end
+            -- BAG-FULL MOB LOOT & RUNE CLEAR WHILE MINING (never sells Ores; keeps your bag free when killing mobs while mining)
+            if (Config.AutoSellMobLootWhenFull or Config.AutoSellRunes) and ForgeEngine and type(ForgeEngine.GetStashCapacityStatus) == "function" and not State.SellingMobLoot and (os.clock() - (State.LastMobLootSellAttempt or 0)) >= 6.0 then
+                local used, cap, isFull = ForgeEngine.GetStashCapacityStatus()
+                if isFull then
+                    State.LastMobLootSellAttempt = os.clock()
+                    if Config.AutoSellMobLootWhenFull then
+                        State.SellingMobLoot = true
+                        MiningEngine.SafeUnanchor()
+                        local soldUnits, soldTypes, soldOk = ForgeEngine.SellAllMobLootExceptBlacklist()
+                        State.StashFullSignalUntil = 0
+                        State.SellingMobLoot = false
+                        if soldUnits > 0 and soldOk then
+                            Notify("Greedy Cey Auto-Sell", string.format("Bag full (%d/%d) -> Sold %d mob loot item(s) (%d types)!", used, cap, soldUnits, soldTypes), 3.5)
+                        elseif soldUnits > 0 then
+                            Notify("Greedy Cey Auto-Sell", "Bag full, attempted mob loot sell (check Greedy Cey)", 3.0)
+                        end
+                    end
+                    if Config.AutoSellRunes and type(State.SellUnkeptRunes) == "function" then
+                        State.SellUnkeptRunes(true)
+                    end
+                    MiningEngine.TargetLastDamageTime = os.clock()
+                    task.wait(0.2)
+                end
+            end
             -- STAY AT SAVED SPOT MODE (Anchored stationary farm, returns automatically after Auto-Forge / Death)
             if Config.StayAtSavedPos then
                 local savedCF = MiningEngine.GetSavedSpotCFrame()
@@ -4160,7 +6127,7 @@ task.spawn(function()
                                 local aimPoint = (math.abs(rPos.Y - savedCF.Position.Y) > 2.5)
                                     and rPos
                                     or Vector3.new(rPos.X, savedCF.Position.Y, rPos.Z)
-                                State.HRP.CFrame = CFrame.lookAt(savedCF.Position, aimPoint)
+                                State.HRP.CFrame = NavEngine.SafeLookAt(savedCF.Position, aimPoint, savedCF)
 
                                 if Config.AutoEquipPickaxe then
                                     MiningEngine.EnsurePickaxeEquipped()
@@ -4203,30 +6170,50 @@ task.spawn(function()
             local rock = State.TargetRock
             local rockMatches = rock and (MiningEngine.IsBackupTarget and MiningEngine.MatchesBackupRock(rock.Name) or MiningEngine.MatchesTargetRock(rock.Name))
             if not MiningEngine.IsRockAlive(rock) or not rockMatches or not MiningEngine.MatchesTargetZone(rock) then
-                -- Rock is destroyed, despawned, or unselected! Unanchor safely above floor before clearing latched target
-                MiningEngine.SafeUnanchor()
+                -- If we were multi-mining 2 rocks and the 1st broke, immediately promote the surviving 2nd rock right beside us!
+                local promoted = MiningEngine.PromoteSurvivingPartnerRock(rock)
                 if rock then MiningEngine.SetRockLocalCollision(rock, true) end
-                State.TargetRock = nil
-                State.CurrentRock = nil
-                State.LastMinedRock = nil
-                State.ResumingAfterDeath = false
-                MiningEngine.IsBackupTarget = false
-                NavEngine.CachedRock = nil
-                MiningEngine.TargetLastHp = nil
-                MiningEngine.TargetLastDamageTime = nil
-                MiningEngine.SwingsOnTarget = 0
-                MiningEngine.NoDamageSwings = 0
-
-                -- Search for the closest selected mineable rock
-                rock = MiningEngine.FindBestRock()
-                if rock and MiningEngine.IsRockMineable(rock, nil, MiningEngine.IsBackupTarget) then
+                if promoted then
+                    NavEngine.CachedRock = nil
+                    NavEngine.CachedPartnerRock = nil
+                    rock = promoted
                     State.TargetRock = rock
                     State.CurrentRock = rock
                     State.LastMinedRock = rock
+                    State.ResumingAfterDeath = false
                     MiningEngine.TargetLastHp = rock:GetAttribute("Health")
                     MiningEngine.TargetLastDamageTime = os.clock()
                     MiningEngine.SwingsOnTarget = 0
                     MiningEngine.NoDamageSwings = 0
+                else
+                    -- Rock is destroyed, despawned, or unselected! Unanchor safely above floor before clearing latched target
+                    MiningEngine.SafeUnanchor()
+                    State.TargetRock = nil
+                    State.CurrentRock = nil
+                    State.LastMinedRock = nil
+                    State.ResumingAfterDeath = false
+                    MiningEngine.IsBackupTarget = false
+                    MiningEngine.IsCometTarget = false
+                    NavEngine.CachedRock = nil
+                    NavEngine.CachedPartnerRock = nil
+                    MiningEngine.TargetLastHp = nil
+                    MiningEngine.TargetLastDamageTime = nil
+                    MiningEngine.SwingsOnTarget = 0
+                    MiningEngine.NoDamageSwings = 0
+
+                    -- Search for the closest selected mineable rock (automatically prefers any damaged rock right beside us)
+                    rock = MiningEngine.FindBestRock()
+                    if rock and MiningEngine.IsRockMineable(rock, nil, MiningEngine.IsBackupTarget) then
+                        State.TargetRock = rock
+                        State.CurrentRock = rock
+                        State.LastMinedRock = rock
+                        MiningEngine.TargetLastHp = rock:GetAttribute("Health")
+                        MiningEngine.TargetLastDamageTime = os.clock()
+                        MiningEngine.SwingsOnTarget = 0
+                        MiningEngine.NoDamageSwings = 0
+                    else
+                        rock = nil
+                    end
                 end
             end
 
@@ -4270,19 +6257,59 @@ task.spawn(function()
                     local charPos = State.HRP.Position
                     local isSunken = NavEngine.IsSunkenMode(Config.MinePositionMode)
 
-                    -- Disable local collision on target rock when mining underground so rock geometry never pushes us on top
+                    -- Check if a second valid target rock is close enough to multi-hit simultaneously from the middle!
+                    local prevPartner = MiningEngine.PartnerRock
+                    local partnerRock = nil
+                    if Config.MineMultiRock and not Config.StayAtSavedPos then
+                        if prevPartner and prevPartner ~= rock and MiningEngine.IsRockAlive(prevPartner) and MiningEngine.MatchesTargetZone(prevPartner) then
+                            local p2Check = prevPartner:FindFirstChild("Hitbox") or prevPartner.PrimaryPart or prevPartner:FindFirstChildWhichIsA("BasePart")
+                            if p2Check then
+                                local r1 = math.max(primary.Size.X, primary.Size.Z) * 0.5
+                                local r2 = math.max(p2Check.Size.X, p2Check.Size.Z) * 0.5
+                                local cDist = Vector3.new(p2Check.Position.X - rockPos.X, 0, p2Check.Position.Z - rockPos.Z).Magnitude
+                                local maxGap = math.clamp(tonumber(Config.MineMultiRockMaxGap) or 8.5, 2.0, 12.0)
+                                if math.max(0, cDist - r1 - r2) <= maxGap and (not MiningEngine.MultiRockFallback or (MiningEngine.MultiRockFallback[rock] or 0) <= os.clock()) then
+                                    partnerRock = prevPartner
+                                end
+                            end
+                        end
+                        if not partnerRock then
+                            partnerRock = MiningEngine.FindOverlapPartnerRock(rock)
+                        end
+                    end
+                    if prevPartner and prevPartner ~= partnerRock then
+                        MiningEngine.SetRockLocalCollision(prevPartner, true)
+                    end
+                    MiningEngine.PartnerRock = partnerRock
+
+                    -- Disable local collision on target rock(s) when mining underground so rock geometry never pushes us on top
                     if isSunken or (Config.MinePositionMode == "Inside Rock (Pebbles Only)" and rock.Name == "Pebble") then
                         MiningEngine.SetRockLocalCollision(rock, false)
+                        if partnerRock then
+                            MiningEngine.SetRockLocalCollision(partnerRock, false)
+                        end
                     end
 
-                    -- 1. Compute target stance CFrame (cached per rock so it never shifts mid-approach)
-                    local targetCFrame = NavEngine.GetMiningCFrame(rock, Config.MinePositionMode)
+                    -- 1. Compute target stance CFrame (uses multi-rock midpoint when a close partner rock exists!)
+                    local targetCFrame = NavEngine.GetMiningCFrame(rock, Config.MinePositionMode, partnerRock)
+                    if partnerRock and NavEngine.CachedPartnerRock ~= partnerRock then
+                        -- Multi-rock CFrame fell back to single-rock (e.g. obstacle in the gap): clear partner tag
+                        MiningEngine.SetRockLocalCollision(partnerRock, true)
+                        MiningEngine.PartnerRock = nil
+                        partnerRock = nil
+                    end
+                    if partnerRock and MiningEngine.StatusLabel then
+                        pcall(function()
+                            MiningEngine.StatusLabel:SetTitle("Mining (2x): " .. tostring(rock.Name) .. " + " .. tostring(partnerRock.Name))
+                        end)
+                    end
                     if targetCFrame then
                         local horizDist = Vector3.new(charPos.X - targetCFrame.Position.X, 0, charPos.Z - targetCFrame.Position.Z).Magnitude
                         local distToRock = (charPos - rockPos).Magnitude
 
                         -- 2. Clean Above-Ground Smooth Glide Approach: glide if horizontal XZ distance > 2.5 studs
                         if horizDist > 2.5 then
+                            MiningEngine.ActiveSunkenCF = nil
                             if State.HRP.Anchored then
                                 if isSunken then
                                     State.HRP.CFrame = CFrame.new(State.HRP.Position + Vector3.new(0, 3.8, 0))
@@ -4343,6 +6370,7 @@ task.spawn(function()
                         if horizDist <= 2.5 and State.HRP then
                             State.ResumingAfterDeath = false
                             if isSunken then
+                                MiningEngine.ActiveSunkenCF = targetCFrame
                                 if State.Humanoid and State.Humanoid.AutoRotate then
                                     State.Humanoid.AutoRotate = false
                                 end
@@ -4354,11 +6382,23 @@ task.spawn(function()
                                 -- Enforce horizontal sunken CFrame while anchored so floor collision can never pop us up
                                 State.HRP.CFrame = targetCFrame
                             else
+                                MiningEngine.ActiveSunkenCF = nil
+                                if State.HRP.Anchored then State.HRP.Anchored = false end
                                 if State.Humanoid and not State.Humanoid.AutoRotate then
                                     State.Humanoid.AutoRotate = true
                                 end
-                                local lookDir = Vector3.new(rockPos.X, State.HRP.Position.Y, rockPos.Z)
-                                State.HRP.CFrame = CFrame.lookAt(State.HRP.Position, lookDir)
+                                local aimPos = rockPos
+                                if partnerRock and partnerRock.Parent then
+                                    local p2 = partnerRock:FindFirstChild("Hitbox") or partnerRock.PrimaryPart or partnerRock:FindFirstChildWhichIsA("BasePart")
+                                    if p2 then
+                                        aimPos = (rockPos + p2.Position) * 0.5
+                                    end
+                                end
+                                local lookDir = Vector3.new(aimPos.X, State.HRP.Position.Y, aimPos.Z)
+                                if (lookDir - State.HRP.Position).Magnitude < 0.1 then
+                                    lookDir = Vector3.new(rockPos.X, State.HRP.Position.Y, rockPos.Z)
+                                end
+                                State.HRP.CFrame = NavEngine.SafeLookAt(State.HRP.Position, lookDir, State.HRP.CFrame)
                             end
                         end
 
@@ -4378,10 +6418,17 @@ task.spawn(function()
                             MiningEngine.ExecuteMineHit()
                             MiningEngine.SwingsOnTarget = (MiningEngine.SwingsOnTarget or 0) + 1
 
-                            -- Damage Tracking (Wall-clock time in stance, accounting for 0.50s-0.85s server swing windup)
+                            -- Damage Tracking (tracks both primary rock AND multi-hit partner rock HP)
                             local curHp = rock:GetAttribute("Health")
+                            local partnerHp = (partnerRock and partnerRock.Parent) and partnerRock:GetAttribute("Health") or nil
+                            local partnerTookDmg = (partnerHp and MiningEngine.PartnerLastHp and partnerHp < MiningEngine.PartnerLastHp) or false
+                            if partnerHp then
+                                MiningEngine.PartnerLastHp = partnerHp
+                            else
+                                MiningEngine.PartnerLastHp = nil
+                            end
                             if curHp and MiningEngine.TargetLastHp and curHp < MiningEngine.TargetLastHp then
-                                -- Hit connected! Reset zero-damage timer and record new HP
+                                -- Hit connected on primary rock! Reset zero-damage timer and record new HP
                                 MiningEngine.TargetLastHp = curHp
                                 MiningEngine.TargetLastDamageTime = os.clock()
                                 MiningEngine.NoDamageSwings = 0
@@ -4393,16 +6440,42 @@ task.spawn(function()
                                     MiningEngine.TargetLastDamageTime = os.clock()
                                 end
 
-                                -- TRUE WALL-CLOCK FAST SKIP PROTOCOL:
-                                -- A single pickaxe swing takes ~0.85s on the server. Wait at least 3.2s (or user setting)
-                                -- of continuous zero-damage time IN STANCE before blacklisting and skipping to another rock.
-                                local skipSeconds = math.max(Config.StuckRockThreshold or 4.0, 2.8)
-                                if (os.clock() - MiningEngine.TargetLastDamageTime) >= skipSeconds then
+                                -- If multi-rock midpoint failed to connect hits on primary rock after 1.8s:
+                                -- if partner rock IS actively taking damage, finish it first; otherwise fall back cleanly to solo rock stance!
+                                if partnerRock and (os.clock() - MiningEngine.TargetLastDamageTime) >= 1.8 then
+                                    if partnerTookDmg and MiningEngine.IsRockAlive(partnerRock) then
+                                        MiningEngine.SetRockLocalCollision(rock, true)
+                                        State.TargetRock = partnerRock
+                                        State.CurrentRock = partnerRock
+                                        State.LastMinedRock = partnerRock
+                                        MiningEngine.PartnerRock = nil
+                                        MiningEngine.PartnerLastHp = nil
+                                        NavEngine.CachedRock = nil
+                                        NavEngine.CachedPartnerRock = nil
+                                        MiningEngine.TargetLastHp = partnerRock:GetAttribute("Health")
+                                        MiningEngine.TargetLastDamageTime = os.clock()
+                                    else
+                                        MiningEngine.MultiRockFallback = MiningEngine.MultiRockFallback or {}
+                                        MiningEngine.MultiRockFallback[rock] = os.clock() + 18.0
+                                        MiningEngine.SetRockLocalCollision(partnerRock, true)
+                                        MiningEngine.PartnerRock = nil
+                                        MiningEngine.PartnerLastHp = nil
+                                        NavEngine.CachedRock = nil
+                                        NavEngine.CachedPartnerRock = nil
+                                        MiningEngine.TargetLastDamageTime = os.clock()
+                                    end
+                                elseif (os.clock() - MiningEngine.TargetLastDamageTime) >= math.max(Config.StuckRockThreshold or 4.0, 2.8) then
                                     MiningEngine.SafeUnanchor()
                                     local blDuration = Config.StuckRockBlacklistTime or 45
                                     MiningEngine.Blacklist[rock] = os.clock() + blDuration
                                     MiningEngine.SetRockLocalCollision(rock, true)
+                                    if partnerRock then
+                                        MiningEngine.SetRockLocalCollision(partnerRock, true)
+                                        MiningEngine.PartnerRock = nil
+                                        MiningEngine.PartnerLastHp = nil
+                                    end
                                     NavEngine.CachedRock = nil
+                                    NavEngine.CachedPartnerRock = nil
                                     State.TargetRock = nil
                                     State.CurrentRock = nil
                                     State.LastMinedRock = nil
@@ -4426,18 +6499,32 @@ task.spawn(function()
 
                             -- Check if this hit destroyed the rock
                             if not MiningEngine.IsRockAlive(rock) then
-                                MiningEngine.SafeUnanchor()
                                 MiningEngine.SetRockLocalCollision(rock, true)
+                                local promoted = MiningEngine.PromoteSurvivingPartnerRock(rock)
                                 NavEngine.CachedRock = nil
-                                State.TargetRock = nil
-                                State.CurrentRock = nil
-                                State.LastMinedRock = nil
-                                State.ResumingAfterDeath = false
-                                MiningEngine.TargetLastHp = nil
-                                MiningEngine.TargetLastDamageTime = nil
-                                MiningEngine.SwingsOnTarget = 0
-                                MiningEngine.NoDamageSwings = 0
-                                task.wait(0.18) -- Brief delay for ore drop replication before next rock
+                                NavEngine.CachedPartnerRock = nil
+                                if promoted then
+                                    -- Immediately switch onto the surviving 2nd rock right next to us instead of gliding away!
+                                    State.TargetRock = promoted
+                                    State.CurrentRock = promoted
+                                    State.LastMinedRock = promoted
+                                    State.ResumingAfterDeath = false
+                                    MiningEngine.TargetLastHp = promoted:GetAttribute("Health")
+                                    MiningEngine.TargetLastDamageTime = os.clock()
+                                    MiningEngine.SwingsOnTarget = 0
+                                    MiningEngine.NoDamageSwings = 0
+                                else
+                                    MiningEngine.SafeUnanchor()
+                                    State.TargetRock = nil
+                                    State.CurrentRock = nil
+                                    State.LastMinedRock = nil
+                                    State.ResumingAfterDeath = false
+                                    MiningEngine.TargetLastHp = nil
+                                    MiningEngine.TargetLastDamageTime = nil
+                                    MiningEngine.SwingsOnTarget = 0
+                                    MiningEngine.NoDamageSwings = 0
+                                    task.wait(0.18) -- Brief delay for ore drop replication before next rock
+                                end
                             end
                         end
                     end
@@ -4462,6 +6549,7 @@ task.spawn(function()
                 State.ResumingAfterDeath = false
             end
         else
+            MiningEngine.ActiveSunkenCF = nil
             if not Config.AutoMobFarm and not State.IsInRaid and not Config.AutoRaid then
                 if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
                 if State.Humanoid and not State.Humanoid.AutoRotate then State.Humanoid.AutoRotate = true end
@@ -4481,7 +6569,7 @@ end)
 -- ===================================================================
 -- 8. FORGE & MINIGAME AUTOMATION (Perfect QTE Auto-Solve & Balancer)
 -- ===================================================================
-local ForgeEngine = {
+ForgeEngine = {
     CraftRecipes = {
         "None", "Eye Ore", "Demonite", "Magmaite", "Mythril", "Darkryte",
         "Lightite", "Rainbow Crystal", "Arcane Crystal", "Heat Steel",
@@ -5886,7 +7974,8 @@ function ForgeEngine.EnsureDialogueHook()
                     end
                     origFn = hookfunction(fn, wrapper)
                     ForgeEngine.HookedDialogueFns[fn] = true
-                    OrigHooks["DialogueRemoteOnEvent_" .. tostring(idx) .. "_" .. tostring(#OrigHooks + 1)] = {
+                    ForgeEngine._DialogueHookSeq = (ForgeEngine._DialogueHookSeq or 0) + 1
+                    OrigHooks["DialogueRemoteOnEvent_" .. tostring(idx) .. "_" .. tostring(ForgeEngine._DialogueHookSeq)] = {
                         func = fn,
                         orig = origFn,
                     }
@@ -6156,13 +8245,14 @@ function ForgeEngine.SellSelectedOres()
     if not inv then return 0, 0, false end
 
     local favs = (State.PlayerData.Data and State.PlayerData.Data.Favorites) or {}
+    local blacklistedForgeOres = ForgeEngine.GetBlacklistedForgeOresMap()
     local basket = {}
     local oreTypesCount = 0
     local totalUnits = 0
 
     for _, oreName in ipairs(whitelistArr) do
         local cnt = inv[oreName]
-        if type(cnt) == "number" and cnt > 0 and not favs[oreName] then
+        if type(cnt) == "number" and cnt > 0 and not favs[oreName] and not blacklistedForgeOres[oreName] then
             local qty = math.floor(cnt)
             if qty > 0 then
                 basket[oreName] = qty
@@ -6196,7 +8286,8 @@ function ForgeEngine.IsLootBlacklisted(itemName)
     return false
 end
 
--- Sells all sellable Stash items (Essences, Shards/Fragments, Bones/Ores, Runes, Sellable Misc) EXCEPT MobLootSellBlacklist & Favorites
+-- Sells ONLY Mob Loot (Essences, Shards/Fragments, Sellable MiscQuest drops, and unkept Runes) to Greedy Cey.
+-- NEVER sells Ores (nor ForgeOreBlacklist ores); strictly respects Favorites, MobLootSellBlacklist, and Keep Runes (Do Not Sell) + Min Quality %.
 function ForgeEngine.SellAllMobLootExceptBlacklist()
     ResolvePlayerData()
     local data = State.PlayerData and State.PlayerData.Data
@@ -6204,50 +8295,63 @@ function ForgeEngine.SellAllMobLootExceptBlacklist()
     if not inv then return 0, 0, false end
 
     local favs = data.Favorites or {}
+    local blacklistedForgeOres = ForgeEngine.GetBlacklistedForgeOresMap()
     local itemTypes = (typeof(getrenv) == "function" and getrenv()._G and getrenv()._G.ItemTypes) or _G.ItemTypes or {}
     local okEx, Extras = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Extras) end)
+    local okR, Runes = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Runes) end)
+    local re = State.RuneEngine
+    if re and type(re.BuildRuneSellCatalog) == "function" and (#(re.RuneSellTypes or {}) == 0 or next(re.IdToDisplayName or {}) == nil) then
+        pcall(re.BuildRuneSellCatalog)
+    end
+    local minQual = math.clamp(tonumber(Config.RuneSellMinQuality) or 0, 0, 100)
+    local qualScope = Config.RuneSellQualityScope or "Checked Keep Runes Only"
 
     local basket = {}
     local typeCount = 0
     local totalUnits = 0
 
-    -- 1. Numeric Stash keys (Ore / Bones like Boneite, Dark Boneite, Royal Boneite, Slimite, plus mined Ores)
-    for itemName, cnt in pairs(inv) do
-        if type(cnt) == "number" and cnt > 0 and not favs[itemName] and not ForgeEngine.IsLootBlacklisted(itemName) then
-            local info = itemTypes[itemName]
-            local kind = type(info) == "table" and info[1] or nil
-            if kind == "Ore" or ForgeEngine.OreDataByName[itemName] then
-                local qty = math.floor(cnt)
-                if qty > 0 then
-                    basket[itemName] = qty
-                    typeCount = typeCount + 1
-                    totalUnits = totalUnits + qty
-                end
-            end
-        end
-    end
-
-    -- 2. Inventory.Misc entries (Material = Essences/Shards/Fragments, Rune = by GUID, MiscQuest if sellable)
+    -- Only sell Mob Loot from Inventory.Misc (NEVER sell Ores from top-level Inventory or any Ore-typed item!)
     if type(inv.Misc) == "table" then
         for _, entry in pairs(inv.Misc) do
             if type(entry) == "table" then
                 if entry.Id and entry.GUID then
                     local info = itemTypes[entry.Id]
                     local kind = type(info) == "table" and info[1] or nil
-                    if kind == "Rune" and not Config.AutoSellRunes and not favs[entry.GUID] and not favs[entry.Id]
-                        and not ForgeEngine.IsLootBlacklisted(entry.Id)
-                        and not ForgeEngine.IsLootBlacklisted(entry.GUID) then
-                        local qty = math.max(1, math.floor(entry.Quantity or 1))
-                        basket[entry.GUID] = qty
-                        typeCount = typeCount + 1
-                        totalUnits = totalUnits + qty
+                    local isRune = (kind == "Rune") or (okR and Runes and Runes.Runes and Runes.Runes[entry.Id] ~= nil)
+                    if isRune and not Config.AutoSellRunes and not favs[entry.GUID] and not favs[entry.Id] then
+                        local dispName = (re and re.IdToDisplayName and re.IdToDisplayName[entry.Id]) or entry.Id
+                        local lootBl = ForgeEngine.IsLootBlacklisted(entry.Id)
+                            or ForgeEngine.IsLootBlacklisted(entry.GUID)
+                            or ForgeEngine.IsLootBlacklisted(dispName)
+                        if not lootBl then
+                            -- Strictly respect "Keep Runes (Do Not Sell)" & Min Stat Quality % rules!
+                            local inKeepList = (re and type(re.IsRuneKept) == "function") and re.IsRuneKept(entry.Id, entry.GUID) or false
+                            local shouldKeep = inKeepList
+                            if minQual > 0 and re and type(re.ComputeRuneQuality) == "function" then
+                                local scorePct = re.ComputeRuneQuality(entry)
+                                if qualScope == "All Runes (Keep Any >= %)" then
+                                    shouldKeep = (scorePct >= minQual)
+                                else
+                                    shouldKeep = inKeepList and (scorePct >= minQual)
+                                end
+                            end
+                            if not shouldKeep then
+                                local qty = math.max(1, math.floor(entry.Quantity or 1))
+                                basket[entry.GUID] = qty
+                                typeCount = typeCount + 1
+                                totalUnits = totalUnits + qty
+                            end
+                        end
                     end
                 elseif entry.Name then
                     local itemName = entry.Name
                     local info = itemTypes[itemName]
                     local kind = type(info) == "table" and info[1] or nil
-                    local isSellable = (kind == "Material")
+                    local isOre = (kind == "Ore") or (ForgeEngine.OreDataByName and ForgeEngine.OreDataByName[itemName] ~= nil) or blacklistedForgeOres[itemName]
+                    local isSellable = (not isOre) and (
+                        (kind == "Material")
                         or (kind == "MiscQuest" and okEx and Extras and type(Extras.GetSellPrice) == "function" and Extras:GetSellPrice(itemName) ~= nil)
+                    )
                     if isSellable and not favs[itemName] and not ForgeEngine.IsLootBlacklisted(itemName) then
                         local qty = math.max(1, math.floor(entry.Quantity or 1))
                         if qty > 0 then
@@ -6990,6 +9094,94 @@ function ForgeEngine.SetWeaponHuntStatus(title, desc)
     ForgeEngine.SetStatus(title, desc)
 end
 
+-- Cleanly resumes and completes an interrupted server-saved forge (PlayerData.Data.PreviousForge)
+-- WITHOUT overwriting FC.Ores, calling EndForge, or double-triggering Melt (prevents disconnect-rejoin crashes & lost ores)
+function ForgeEngine._FinishPendingPreviousForge(FC, ForgeUI, PS, forgeModel, preGuids)
+    ResolvePlayerData()
+    local prevForge = State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.PreviousForge
+    local midActive = FC and FC.ForgeActive and FC.Sequence ~= nil and FC.Sequence ~= "OreSelect" and FC.Sequence ~= "Close"
+    if not prevForge and not midActive then
+        return false, nil
+    end
+
+    if type(ForgeEngine.EnsureMinigameHooks) == "function" then
+        pcall(ForgeEngine.EnsureMinigameHooks, FC)
+    end
+    ForgeEngine.SetWeaponHuntStatus("Resuming Interrupted Forge...", "Completing saved PreviousForge before rolling new ores...")
+
+    local forgePos = forgeModel:IsA("Model") and forgeModel:GetPivot().Position or forgeModel.Position
+    if State.HRP and (State.HRP.Position - forgePos).Magnitude > 10 then
+        NavEngine.GlideTo(CFrame.new(forgePos + Vector3.new(0, 2.8, 0)), Config.GlideSpeed or 55, true)
+    end
+
+    if not FC.ForgeActive then
+        runAsGameThread(function()
+            if PS and type(PS.Forge) == "function" then
+                pcall(function() PS:Forge(forgeModel):await() end)
+            elseif Remotes.ProximityForge then
+                pcall(function() Remotes.ProximityForge:InvokeServer(forgeModel) end)
+            end
+        end, 4.5)
+        if not FC.ForgeActive then
+            runAsGameThread(function()
+                pcall(function() FC:StartForge(forgeModel) end)
+            end, 2.5)
+        end
+    end
+
+    -- Give ForgeController's native PreviousForge resume task.delay(0.4) time to transition out of OreSelect into Melt
+    local startAt = os.clock()
+    local enteredActive = (FC.Sequence ~= nil and FC.Sequence ~= "OreSelect" and FC.Sequence ~= "Close")
+    while ScriptRunning and FC.ForgeActive and not enteredActive and (os.clock() - startAt) < 4.0 do
+        task.wait(0.12)
+        if FC.Sequence and FC.Sequence ~= "OreSelect" and FC.Sequence ~= "Close" then
+            enteredActive = true
+            break
+        end
+        ResolvePlayerData()
+        if not (State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.PreviousForge) then
+            break
+        end
+    end
+
+    local resumedItem = nil
+    local waitStart = os.clock()
+    local oreSelectSince = nil
+    while ScriptRunning and (os.clock() - waitStart) < 90.0 do
+        task.wait(0.25)
+        ResolvePlayerData()
+        local curEq = State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.Inventory and State.PlayerData.Data.Inventory.Equipments
+        if curEq then
+            for _, item in ipairs(curEq) do
+                if type(item) == "table" and item.GUID and not preGuids[item.GUID] then
+                    resumedItem = item
+                    break
+                end
+            end
+        end
+        local stillPrev = State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.PreviousForge ~= nil
+        if resumedItem and FC.Sequence == "OreSelect" and not stillPrev then
+            break
+        end
+        if (os.clock() - waitStart) > 5.0 and not FC.ForgeActive and not stillPrev then
+            break
+        end
+        if not resumedItem and not stillPrev and FC.Sequence == "OreSelect" then
+            oreSelectSince = oreSelectSince or os.clock()
+            if (os.clock() - oreSelectSince) > 3.0 then break end
+        else
+            oreSelectSince = nil
+        end
+    end
+
+    if resumedItem and resumedItem.GUID then
+        preGuids[resumedItem.GUID] = true
+    end
+    ForgeEngine.WaitForMinigamesClear(4.0)
+    task.wait(0.3)
+    return true, resumedItem
+end
+
 function ForgeEngine._EnsureForgeOpen(FC, ForgeUI, PS, forgeModel)
     if type(ForgeEngine.EnsureMinigameHooks) == "function" then
         pcall(ForgeEngine.EnsureMinigameHooks, FC)
@@ -7027,7 +9219,7 @@ function ForgeEngine._EnsureForgeOpen(FC, ForgeUI, PS, forgeModel)
         local pgui = LocalPlayer:FindFirstChild("PlayerGui")
         local osFrame = pgui and pgui:FindFirstChild("Forge") and pgui.Forge:FindFirstChild("OreSelect")
         local openWait = os.clock()
-        while FC.ForgeActive and osFrame and not osFrame.Visible and (os.clock() - openWait) < 2.0 do
+        while FC.ForgeActive and FC.Sequence == "OreSelect" and osFrame and not osFrame.Visible and (os.clock() - openWait) < 2.0 do
             task.wait(0.1)
         end
     end)
@@ -7036,43 +9228,165 @@ end
 
 function ForgeEngine.RecycleItemByGuid(guid, itemObj)
     if not guid or not Remotes.RecycleBasket then
-        return false, "no_remote"
+        return false, "no_remote", 0
     end
-    local canAfford = true
+
+    local expectedOres = {}
     local priceCost = nil
+    local canAfford = true
     pcall(function()
         local RecycleUtil = safeRequire(ReplicatedStorage.Shared.Utils.RecycleUtil)
-        if RecycleUtil and type(RecycleUtil.GetPrice) == "function" and type(RecycleUtil.GetOres) == "function" and itemObj then
-            local ores = RecycleUtil.GetOres(itemObj)
-            if ores then
-                priceCost = tonumber(RecycleUtil.GetPrice(ores))
-                ResolvePlayerData()
-                local gold = tonumber(State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.Gold) or 0
-                if priceCost and priceCost > gold then
-                    canAfford = false
+        local Equipments = safeRequire(ReplicatedStorage.Shared.Data.Equipments)
+        if RecycleUtil and itemObj then
+            local reconstructed = (type(RecycleUtil.ReconstructOres) == "function" and RecycleUtil.ReconstructOres(itemObj))
+                or itemObj.OresSpent
+                or itemObj.Ores
+            if type(reconstructed) == "table" and type(RecycleUtil.GetOres) == "function" then
+                local ro = RecycleUtil.GetOres(reconstructed)
+                if type(ro) == "table" then
+                    expectedOres = ro
                 end
+            end
+            -- Use identity-2 safe ForgeEngine.SafeCalcPrice (raw Equipments:CalculatePrice throws at identity 8)
+            local basePrice = Equipments and tonumber(ForgeEngine.SafeCalcPrice(Equipments, itemObj))
+            if basePrice and basePrice > 0 and type(RecycleUtil.GetPrice) == "function" then
+                priceCost = tonumber(RecycleUtil.GetPrice(basePrice))
+            elseif basePrice and basePrice > 0 then
+                priceCost = basePrice
+            end
+            ResolvePlayerData()
+            local gold = tonumber(State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.Gold) or 0
+            if priceCost and priceCost > gold then
+                canAfford = false
             end
         end
     end)
     if not canAfford then
-        return false, "insufficient_gold"
+        return false, "insufficient_gold", 0
     end
-    local ok, res = pcall(function()
-        return Remotes.RecycleBasket:InvokeServer({ [guid] = true })
-    end)
-    if ok and res ~= false then
-        return true, priceCost
+
+    local function snapshotExpectedOres()
+        ResolvePlayerData()
+        local inv = State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.Inventory
+        local snap = {}
+        if type(inv) == "table" then
+            for oreName in pairs(expectedOres) do
+                snap[oreName] = tonumber(inv[oreName]) or 0
+            end
+        end
+        return snap
     end
-    return false, "rejected"
+
+    local function hasGuidInEquipments()
+        ResolvePlayerData()
+        local invEq = State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.Inventory and State.PlayerData.Data.Inventory.Equipments
+        if type(invEq) == "table" then
+            for _, eq in ipairs(invEq) do
+                if type(eq) == "table" and eq.GUID == guid then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
+    -- Brief settle after Showcase -> OreSelect so server finishes committing the forged item before RecycleBasket
+    task.wait(0.25)
+    local preOreSnap = snapshotExpectedOres()
+    local hadItemBefore = hasGuidInEquipments()
+    if not hadItemBefore then
+        return false, "not_in_inventory", 0
+    end
+
+    for attemptTry = 1, 3 do
+        if attemptTry <= 2 then
+            pcall(function()
+                Remotes.RecycleBasket:InvokeServer({ [guid] = true })
+            end)
+        else
+            -- Fallback on attempt 3 via identity-2 Knit InventoryService:RecycleBasket
+            runAsGameThread(function()
+                local KnitPkg = safeRequire(ReplicatedStorage.Shared.Packages.Knit)
+                local invSvc = KnitPkg and KnitPkg.GetService("InventoryService")
+                if invSvc and type(invSvc.RecycleBasket) == "function" then
+                    pcall(function() invSvc:RecycleBasket({ [guid] = true }):await() end)
+                end
+            end, 3.0)
+        end
+
+        -- Remotes.RecycleBasket returns true even on failure; verify actual GUID removal + ore replication
+        local waitDeadline = os.clock() + (attemptTry == 1 and 1.8 or 1.4)
+        while os.clock() < waitDeadline do
+            if not hasGuidInEquipments() then
+                -- Give Replica one brief beat to finish replicating restored ore counters
+                local postDeadline = os.clock() + 0.55
+                while os.clock() < postDeadline do
+                    ResolvePlayerData()
+                    local inv = State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.Inventory
+                    if type(inv) == "table" then
+                        local allReturned = true
+                        for oreName, expAmt in pairs(expectedOres) do
+                            local beforeVal = preOreSnap[oreName] or 0
+                            local curVal = tonumber(inv[oreName]) or 0
+                            if curVal < beforeVal + expAmt then
+                                allReturned = false
+                                break
+                            end
+                        end
+                        if allReturned then
+                            break
+                        end
+                    end
+                    task.wait(0.05)
+                end
+                local actualDelta = 0
+                if type(State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.Inventory) == "table" then
+                    local inv = State.PlayerData.Data.Inventory
+                    for oreName in pairs(expectedOres) do
+                        local beforeVal = preOreSnap[oreName] or 0
+                        local curVal = tonumber(inv[oreName]) or 0
+                        actualDelta = actualDelta + math.max(0, curVal - beforeVal)
+                    end
+                end
+                if actualDelta <= 0 and hadItemBefore then
+                    for _, expAmt in pairs(expectedOres) do
+                        actualDelta = actualDelta + (tonumber(expAmt) or 0)
+                    end
+                end
+                return true, priceCost, actualDelta
+            end
+            task.wait(0.08)
+        end
+        task.wait(0.25)
+    end
+
+    return false, "not_removed", 0
 end
 
 function ForgeEngine._RunSingleForgeRoll(FC, ForgeUI, PS, forgeModel, rollBatch, targetItemType, lockedClass, preGuids, statusPrefix)
     ForgeEngine.WaitForMinigamesClear(4.0)
+
+    -- Hard double-melt guard: if PreviousForge or an active sequence is already running, NEVER inject or call Melt a second time!
+    ResolvePlayerData()
+    local hasPrev = (State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.PreviousForge ~= nil)
+    if hasPrev or (FC.ForgeActive and FC.Sequence ~= nil and FC.Sequence ~= "OreSelect") then
+        local _, resumed = ForgeEngine._FinishPendingPreviousForge(FC, ForgeUI, PS, forgeModel, preGuids)
+        if resumed then
+            return resumed, nil
+        end
+    end
+
     local pgui = LocalPlayer:FindFirstChild("PlayerGui")
     local osFrame = pgui and pgui:FindFirstChild("Forge") and pgui.Forge:FindFirstChild("OreSelect")
     local osWait = os.clock()
-    while FC.ForgeActive and osFrame and not osFrame.Visible and (os.clock() - osWait) < 2.5 do
+    while FC.ForgeActive and FC.Sequence == "OreSelect" and osFrame and not osFrame.Visible and (os.clock() - osWait) < 2.5 do
         task.wait(0.1)
+    end
+    if FC.ForgeActive and FC.Sequence ~= "OreSelect" then
+        local _, resumed = ForgeEngine._FinishPendingPreviousForge(FC, ForgeUI, PS, forgeModel, preGuids)
+        if resumed then
+            return resumed, nil
+        end
     end
     if State.PourMouseDown then
         State.PourMouseDown = false
@@ -7130,7 +9444,7 @@ function ForgeEngine._RunSingleForgeRoll(FC, ForgeUI, PS, forgeModel, rollBatch,
             if retryDone and FC.Sequence == "OreSelect" then
                 ForgeEngine.CloseForgeCleanly(FC, ForgeUI)
                 task.wait(0.45)
-                if ForgeEngine._EnsureForgeOpen(FC, ForgeUI, PS, forgeModel) then
+                if ForgeEngine._EnsureForgeOpen(FC, ForgeUI, PS, forgeModel) and FC.Sequence == "OreSelect" then
                     inject()
                     triggerMelt()
                 end
@@ -7197,6 +9511,7 @@ function ForgeEngine.RunWeaponHunt1111(opts)
     local targetName = tostring(Config.WeaponHuntTarget or "Any Straight Sword")
     local matchedItem = nil
     local attempt = 0
+    local totalRefundedOres = 0
 
     local ok, err = pcall(function()
         if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
@@ -7233,7 +9548,7 @@ function ForgeEngine.RunWeaponHunt1111(opts)
 
         local huntDudGuids = {}
         local function flushDuds()
-            if Config.WeaponHuntSellDuds == false or not next(huntDudGuids) then return end
+            if Config.WeaponHuntSellDuds ~= true or not next(huntDudGuids) then return end
             ResolvePlayerData()
             local favs = (State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.Favorites) or {}
             local basket = {}
@@ -7246,6 +9561,51 @@ function ForgeEngine.RunWeaponHunt1111(opts)
             if next(basket) then
                 ForgeEngine.SellEquipmentBasket(basket)
                 task.wait(0.3)
+            end
+        end
+
+        local foundCount = 0
+        local function stopHuntToggleUI()
+            Config.WeaponHuntRunning = false
+            if ForgeEngine.WeaponHuntRunToggle and ForgeEngine.WeaponHuntRunToggle.SetValue then
+                pcall(function() ForgeEngine.WeaponHuntRunToggle:SetValue(false, true) end)
+            end
+        end
+
+        -- 0. If the server has a saved interrupted forge (PreviousForge) or active sequence, finish & evaluate/refund it FIRST instead of closing or double-melting!
+        local hadPrevForge, resumedItem = ForgeEngine._FinishPendingPreviousForge(FC, ForgeUI, PS, forgeModel, preGuids)
+        if hadPrevForge and resumedItem then
+            local isResumedMatch = ForgeEngine.DoesWeaponMatchHuntTarget(Equipments, resumedItem, targetName)
+            local rQlty = math.round(tonumber(resumedItem.Quality) or 100)
+            if isResumedMatch then
+                matchedItem = resumedItem
+                foundCount = foundCount + 1
+                if Config.AutoEquipBestArmor and Remotes.EquipItem then
+                    pcall(function() Remotes.EquipItem:InvokeServer(resumedItem) end)
+                    task.wait(0.2)
+                end
+                local msg = string.format("Resumed forge yielded %s (~%d%%)!", tostring(resumedItem.Type), rQlty)
+                if Config.WeaponHuntStopOnCraft ~= false then
+                    stopHuntToggleUI()
+                    State.DrainingFullBag = false
+                    State.ManualDrainOnce = false
+                    ForgeEngine.SetWeaponHuntStatus("1-1-1-1 Target Obtained!", msg)
+                    Notify("1-1-1-1 Target Sword Found!", msg, 5.0)
+                    ForgeEngine.CloseForgeCleanly(FC, ForgeUI)
+                    return
+                else
+                    ForgeEngine.SetWeaponHuntStatus(string.format("Found #%d: %s (~%d%%)", foundCount, tostring(resumedItem.Type), rQlty), "Kept target -> Continuing hunt...")
+                    Notify("1-1-1-1 Target Found (#" .. tostring(foundCount) .. ")", msg .. " Continuing hunt...", 3.5)
+                end
+            elseif Config.WeaponHuntRefundDuds and resumedItem.GUID then
+                local rOk, _, rCnt = ForgeEngine.RecycleItemByGuid(resumedItem.GUID, resumedItem)
+                if rOk then
+                    totalRefundedOres = totalRefundedOres + (tonumber(rCnt) or 0)
+                elseif Config.WeaponHuntSellDuds == true then
+                    huntDudGuids[resumedItem.GUID] = true
+                end
+            elseif Config.WeaponHuntSellDuds == true and resumedItem.GUID then
+                huntDudGuids[resumedItem.GUID] = true
             end
         end
 
@@ -7267,7 +9627,7 @@ function ForgeEngine.RunWeaponHunt1111(opts)
             if not rollBatch then
                 ForgeEngine.SetWeaponHuntStatus("1-1-1-1 Hunt: Finished", rollErr or "Ores depleted")
                 Notify("1-1-1-1 Weapon Hunt", rollErr or "Out of required hunt ores.", 3.5)
-                Config.WeaponHuntRunning = false
+                stopHuntToggleUI()
                 break
             end
 
@@ -7284,7 +9644,7 @@ function ForgeEngine.RunWeaponHunt1111(opts)
                 if stillFull or stillRem <= 0 then
                     ForgeEngine.SetWeaponHuntStatus("1-1-1-1 Hunt: Bag Full", "Equipment bag full — free a slot to continue")
                     Notify("1-1-1-1 Weapon Hunt", "Equipment bag full! Clear/unfavorite a slot.", 3.5)
-                    Config.WeaponHuntRunning = false
+                    stopHuntToggleUI()
                     break
                 end
                 if not ForgeEngine._EnsureForgeOpen(FC, ForgeUI, PS, forgeModel) then
@@ -7295,12 +9655,12 @@ function ForgeEngine.RunWeaponHunt1111(opts)
             attempt = attempt + 1
             ForgeEngine.SetWeaponHuntStatus(
                 string.format("1-1-1-1 Roll #%d -> %s", attempt, targetName),
-                "Forging 1-1-1-1 batch..."
+                string.format("Forging 1-1-1-1 batch... (Refunded: %d ores)", totalRefundedOres)
             )
 
             local newItem, failReason = ForgeEngine._RunSingleForgeRoll(
                 FC, ForgeUI, PS, forgeModel, rollBatch, "Weapon", nil, preGuids,
-                string.format("1-1-1-1 #%d", attempt)
+                string.format("1-1-1-1 #%d (Ref:%d)", attempt, totalRefundedOres)
             )
             if not newItem then
                 ForgeEngine.SetWeaponHuntStatus("1-1-1-1 Hunt: Interrupted", "Reason: " .. tostring(failReason))
@@ -7311,29 +9671,47 @@ function ForgeEngine.RunWeaponHunt1111(opts)
             local qlty = math.round(tonumber(newItem.Quality) or 100)
             if isMatch then
                 matchedItem = newItem
-                Config.WeaponHuntRunning = false
+                foundCount = foundCount + 1
                 if Config.AutoEquipBestArmor and Remotes.EquipItem then
                     pcall(function() Remotes.EquipItem:InvokeServer(newItem) end)
                     task.wait(0.2)
                 end
                 local msg = string.format("Rolled %s (~%d%%) on Attempt #%d!", tostring(newItem.Type), qlty, attempt)
-                ForgeEngine.SetWeaponHuntStatus("1-1-1-1 Target Obtained!", msg)
-                Notify("1-1-1-1 Target Sword Found!", msg, 5.0)
-                break
+                if Config.WeaponHuntStopOnCraft ~= false then
+                    stopHuntToggleUI()
+                    State.DrainingFullBag = false
+                    State.ManualDrainOnce = false
+                    ForgeEngine.SetWeaponHuntStatus("1-1-1-1 Target Obtained!", msg)
+                    Notify("1-1-1-1 Target Sword Found!", msg, 5.0)
+                    break
+                else
+                    ForgeEngine.SetWeaponHuntStatus(
+                        string.format("Found #%d: %s (~%d%%)", foundCount, tostring(newItem.Type), qlty),
+                        "Kept target -> Continuing 1-1-1-1 hunt..."
+                    )
+                    Notify("1-1-1-1 Target Found (#" .. tostring(foundCount) .. ")", msg .. " Continuing hunt...", 3.5)
+                    task.wait(0.85)
+                end
             else
                 local refunded = false
-                local refundErr = nil
+                local refundErrOrCost = nil
+                local refundedCount = 0
                 if Config.WeaponHuntRefundDuds and newItem.GUID then
-                    refunded, refundErr = ForgeEngine.RecycleItemByGuid(newItem.GUID, newItem)
+                    refunded, refundErrOrCost, refundedCount = ForgeEngine.RecycleItemByGuid(newItem.GUID, newItem)
+                    if refunded then
+                        totalRefundedOres = totalRefundedOres + (tonumber(refundedCount) or 0)
+                    end
                 end
-                if not refunded and Config.WeaponHuntSellDuds ~= false and newItem.GUID then
+                if not refunded and Config.WeaponHuntSellDuds == true and newItem.GUID then
                     huntDudGuids[newItem.GUID] = true
                 end
                 local stepDesc = refunded
-                    and ("Not target (" .. targetName .. ") -> Refunded Ores! Rolling again...")
-                    or (refundErr == "insufficient_gold"
+                    and string.format("Not target (%s) -> +%d Ores Refunded! (Total: %d)", targetName, tonumber(refundedCount) or 0, totalRefundedOres)
+                    or (refundErrOrCost == "insufficient_gold"
                         and ("Not enough Gold to refund -> Rolling again...")
-                        or ("Not target (" .. targetName .. ") -> Rolling again..."))
+                        or (refundErrOrCost == "not_removed"
+                            and ("Refund failed (server kept item) -> Rolling again...")
+                            or ("Not target (" .. targetName .. ") -> Rolling again...")))
                 ForgeEngine.SetWeaponHuntStatus(
                     string.format("Roll #%d: %s (~%d%%)", attempt, tostring(newItem.Type), qlty),
                     stepDesc
@@ -7518,7 +9896,8 @@ function ForgeEngine.ExecuteArmorForgeAndSell(customBatchOrQueue, itemTypeOverri
             end
         end
 
-        -- 1. Open Forge cleanly once (if stuck mid-sequence, close & wait cleanly first)
+        -- 1. If server has an interrupted forge (PreviousForge), cleanly finish it FIRST instead of closing/overwriting it!
+        ForgeEngine._FinishPendingPreviousForge(FC, ForgeUI, PS, forgeModel, preGuids)
         if FC.ForgeActive and FC.Sequence ~= "OreSelect" then
             ForgeEngine.CloseForgeCleanly(FC, ForgeUI)
             task.wait(0.6)
@@ -8038,6 +10417,17 @@ local WebhookEngine = {
 -- Background Auto-Forge Profit Loop & Continuous 1-1-1-1 Weapon Hunt Loop
 task.spawn(function()
     while ScriptRunning do
+        local inAbyssOrRaid = State.IsInRaid
+            or State.IsBuyingHealthPotions
+            or State.IsMovingToRaidPad
+            or (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.IsInAbyssLobby() or RaidEngine.GetActiveBossArena() ~= nil))
+        if inAbyssOrRaid then
+            if State.DrainingFullBag and not State.ManualDrainOnce then
+                State.DrainingFullBag = false
+            end
+            task.wait(0.6)
+            continue
+        end
         if Config.WeaponHuntRunning and not State.IsAutoForging then
             pcall(ForgeEngine.RunWeaponHunt1111, { triggeredByLoop = true })
             task.wait(0.5)
@@ -8182,7 +10572,9 @@ function ForgeEngine.EnsureMinigameHooks(fcInstance)
         end
     end)
 
-    -- 1. Auto-Hammer: Hook HammerMinigame.CreateNote (Synchronous oldCreateNote + exact server-clock click)
+    -- 1. Auto-Hammer: Pure Server-Clock Hook on HammerMinigame.CreateNote (Zero UI / Zero VIM / 100% Precision)
+    -- HammerMinigame.Start computes `v88 = now - p84.StartTime`, calls `CreateNote(...)`, and returns `now - v88` to the server.
+    -- Sleeping cleanly until exact `Lifetime * gradeRatio` (25/44 = Perfect) returns sub-frame Perfect timing on PC & Mobile!
     if not OrigHooks["AutoHammer_NoteHook"] then
         pcall(function()
             local hammerMod = fcFolder:FindFirstChild("HammerMinigame")
@@ -8190,38 +10582,10 @@ function ForgeEngine.EnsureMinigameHooks(fcInstance)
             if HammerMG and type(HammerMG.CreateNote) == "function" then
                 local oldCreateNote
                 oldCreateNote = safeHook(HammerMG, "CreateNote", "AutoHammer_NoteHook", function(self, noteData, anvilPart, markerAttachment)
-                    local hammerActive = Config.AutoHammer or State.IsAutoForging
-                    local capturedFrame = nil
-                    local childConn = nil
-                    local pgui = LocalPlayer:FindFirstChild("PlayerGui")
-                    local hammerUI = pgui and pgui:FindFirstChild("Forge") and pgui.Forge:FindFirstChild("HammerMinigame")
-
-                    if hammerActive and ScriptRunning and type(noteData) == "table" then
-                        -- Mathematically enforce "Perfect" rating on timing calculation
-                        if type(noteData.TimingIntervals) == "table" then
-                            for _, interval in ipairs(noteData.TimingIntervals) do
-                                if type(interval) == "table" and interval.Name == "Perfect" then
-                                    interval.Interval = 999999
-                                end
-                            end
-                        end
-
-                        if hammerUI then
-                            childConn = hammerUI.ChildAdded:Connect(function(ch)
-                                if not capturedFrame and ch:IsA("GuiButton") and ch.Name == "Frame" and not ch:GetAttribute("AetherHooked") then
-                                    ch:SetAttribute("AetherHooked", true)
-                                    capturedFrame = ch
-                                    if childConn then
-                                        childConn:Disconnect()
-                                        childConn = nil
-                                    end
-                                end
-                            end)
-                        end
-
+                    if ScriptRunning and (Config.AutoHammer or State.IsAutoForging) and type(noteData) == "table" then
                         local lifetime = tonumber(noteData.Lifetime)
                         if lifetime and lifetime > 0 then
-                            local targetZIndex = noteData.ZIndex
+                            local tStart = workspace:GetServerTimeNow()
                             local gradeRatio = 25 / 44
                             if not State.IsAutoForging then
                                 if Config.HammerGrade == "Great" then
@@ -8230,100 +10594,75 @@ function ForgeEngine.EnsureMinigameHooks(fcInstance)
                                     gradeRatio = (25 / 44) + 0.078
                                 end
                             end
-                            -- Pre-lead by 1 frame (0.012s) so CreateNote's `while not u19 do task.wait() end` wakes up right at Lifetime * 25/44
-                            local perfectDelay = math.max(0.01, (lifetime * gradeRatio) - 0.012)
-                            local fireAtServer = workspace:GetServerTimeNow() + perfectDelay
-
-                            task.delay(math.max(0, perfectDelay - 0.03), function()
-                                if childConn then
-                                    childConn:Disconnect()
-                                    childConn = nil
-                                end
-                                while ScriptRunning and workspace:GetServerTimeNow() < fireAtServer do
-                                    RunService.Heartbeat:Wait()
-                                end
-                                if not ScriptRunning or not (Config.AutoHammer or State.IsAutoForging) then return end
-                                pcall(function()
-                                    local ui = hammerUI
-                                    if not ui or not ui.Parent then
-                                        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-                                        ui = pg and pg:FindFirstChild("Forge") and pg.Forge:FindFirstChild("HammerMinigame")
-                                    end
-                                    if not ui or not ui.Visible then return end
-
-                                    local btn = capturedFrame
-                                    if not btn or not btn.Parent then
-                                        for _, child in ipairs(ui:GetChildren()) do
-                                            if child:IsA("GuiButton") and child.Name == "Frame"
-                                                and not child:GetAttribute("AetherClicked")
-                                                and (not targetZIndex or child.ZIndex == targetZIndex) then
-                                                btn = child
-                                                break
-                                            end
-                                        end
-                                    end
-
-                                    if btn and btn.Parent and not btn:GetAttribute("AetherClicked") then
-                                        btn:SetAttribute("AetherClicked", true)
-                                        if typeof(firesignal) == "function" then
-                                            firesignal(btn.MouseButton1Click)
-                                            pcall(function() firesignal(btn.Activated) end)
-                                        else
-                                            local vim = game:GetService("VirtualInputManager")
-                                            local cx = btn.AbsolutePosition.X + (btn.AbsoluteSize.X * 0.5)
-                                            local cy = btn.AbsolutePosition.Y + (btn.AbsoluteSize.Y * 0.5)
-                                            pcall(function()
-                                                vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
-                                                vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
-                                            end)
-                                        end
-                                    end
-                                end)
-                            end)
+                            local targetDur = math.max(0.01, lifetime * gradeRatio)
+                            local fireAt = tStart + targetDur
+                            if targetDur > 0.035 then
+                                task.wait(targetDur - 0.025)
+                            end
+                            while ScriptRunning and workspace:GetServerTimeNow() < fireAt do
+                                RunService.Heartbeat:Wait()
+                            end
+                            return true
                         end
                     end
-                    local res = oldCreateNote and oldCreateNote(self, noteData, anvilPart, markerAttachment)
-                    if childConn then
-                        childConn:Disconnect()
-                        childConn = nil
-                    end
-                    return res
+                    return oldCreateNote(self, noteData, anvilPart, markerAttachment)
                 end)
             end
         end)
     end
 
-    -- 2. GolemMinigame Phase Hooks (Mould / Build / Awaken)
+    -- 2. GolemMinigame Native Hooks (Mould / Build / Awaken)
+    -- Uses GolemMinigame's native built-in `AutoPlay = true` driver (zero VIM / zero mouse clicks, 100% PC & Mobile safe)
+    -- and enforces exact 1.0 (100% Perfect Masterwork) accuracy on Mould and Build return values sent to ForgeService!
     if not OrigHooks["Golem_Mould"] then
         pcall(function()
             local golemMod = fcFolder:FindFirstChild("GolemMinigame")
             local GolemMG = golemMod and safeRequire(golemMod)
             if type(GolemMG) == "table" then
+                ForgeEngine.GolemMG = GolemMG
                 if type(GolemMG.Mould) == "function" and not OrigHooks["Golem_Mould"] then
                     local oldMould
                     oldMould = safeHook(GolemMG, "Mould", "Golem_Mould", function(self, ...)
+                        local auto = ScriptRunning and (Config.AutoPour or State.IsAutoForging)
+                        local prevAuto = GolemMG.AutoPlay
                         State.GolemPhase = "Mould"
+                        if auto then GolemMG.AutoPlay = true end
                         local res = table.pack(pcall(oldMould, self, ...))
+                        GolemMG.AutoPlay = prevAuto
                         if State.GolemPhase == "Mould" then State.GolemPhase = nil end
                         if not res[1] then error(res[2]) end
+                        if auto then
+                            return 1.0
+                        end
                         return table.unpack(res, 2, res.n)
                     end)
                 end
                 if type(GolemMG.Build) == "function" and not OrigHooks["Golem_Build"] then
                     local oldBuild
                     oldBuild = safeHook(GolemMG, "Build", "Golem_Build", function(self, ...)
+                        local auto = ScriptRunning and (Config.AutoHammer or State.IsAutoForging)
+                        local prevAuto = GolemMG.AutoPlay
                         State.GolemPhase = "Build"
+                        if auto then GolemMG.AutoPlay = true end
                         local res = table.pack(pcall(oldBuild, self, ...))
+                        GolemMG.AutoPlay = prevAuto
                         if State.GolemPhase == "Build" then State.GolemPhase = nil end
                         if not res[1] then error(res[2]) end
+                        if auto and res[2] ~= nil then
+                            return res[2], 1.0
+                        end
                         return table.unpack(res, 2, res.n)
                     end)
                 end
                 if type(GolemMG.Awaken) == "function" and not OrigHooks["Golem_Awaken"] then
                     local oldAwaken
                     oldAwaken = safeHook(GolemMG, "Awaken", "Golem_Awaken", function(self, ...)
+                        local auto = ScriptRunning and (Config.AutoHammer or State.IsAutoForging)
+                        local prevAuto = GolemMG.AutoPlay
                         State.GolemPhase = "Awaken"
+                        if auto then GolemMG.AutoPlay = true end
                         local res = table.pack(pcall(oldAwaken, self, ...))
+                        GolemMG.AutoPlay = prevAuto
                         if State.GolemPhase == "Awaken" then State.GolemPhase = nil end
                         if not res[1] then error(res[2]) end
                         return table.unpack(res, 2, res.n)
@@ -8454,127 +10793,6 @@ task.spawn(function()
         if ForgeEngine.EnsureMinigameHooks() then break end
         task.wait(0.5)
     end
-
-    -- Golem Build + Awaken UI child handler
-    pcall(function()
-        local vim = game:GetService("VirtualInputManager")
-        local function clickGolemButton(btn)
-            if not btn or not btn.Parent or btn:GetAttribute("AetherClicked") then return end
-            btn:SetAttribute("AetherClicked", true)
-            if typeof(firesignal) == "function" then
-                pcall(function() firesignal(btn.MouseButton1Click) end)
-                pcall(function() firesignal(btn.Activated) end)
-            else
-                local cx = btn.AbsolutePosition.X + (btn.AbsoluteSize.X * 0.5)
-                local cy = btn.AbsolutePosition.Y + (btn.AbsoluteSize.Y * 0.5)
-                pcall(function()
-                    vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
-                    vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
-                end)
-            end
-        end
-
-        local function handleGolemHammerChild(ch)
-            if not ScriptRunning or not ch or not ch:IsA("GuiButton") or ch.Name ~= "Frame" then return end
-            if ch:GetAttribute("AetherHooked") or ch:GetAttribute("AetherGolemHandled") then return end
-            local t0 = os.clock()
-            local inner = ch:FindFirstChild("Frame")
-            local circle = inner and inner:FindFirstChild("Circle")
-            local s0 = circle and circle.Size.X.Scale or 2.5
-
-            task.defer(function()
-                if not ScriptRunning or not ch.Parent then return end
-                if ch:GetAttribute("AetherHooked") or ch:GetAttribute("AetherGolemHandled") then return end
-                if not (Config.AutoHammer or State.IsAutoForging) then return end
-                ch:SetAttribute("AetherGolemHandled", true)
-
-                inner = inner or ch:FindFirstChild("Frame")
-                circle = circle or (inner and inner:FindFirstChild("Circle"))
-                if not circle then return end
-
-                if circle.Visible and State.GolemPhase ~= "Awaken" then
-                    -- Golem Build timingNote: Circle shrinks linearly from s0 -> 0 over Lifetime (1.15-1.45s); Perfect = 25/44 elapsed (19/44 remaining scale)
-                    if s0 <= 0.05 then s0 = math.max(circle.Size.X.Scale, 2.5) end
-                    local gradeRemain = 19 / 44 -- Perfect (0.4318)
-                    if Config.HammerGrade == "Great" then
-                        gradeRemain = 1 - (25 / 44 + 0.055)
-                    elseif Config.HammerGrade == "Good" then
-                        gradeRemain = 1 - (25 / 44 + 0.078)
-                    end
-                    local targetScale = s0 * gradeRemain
-                    local targetElapsedRatio = 1 - gradeRemain
-                    local fireAt = nil
-
-                    local rsConn
-                    rsConn = RunService.RenderStepped:Connect(function()
-                        if not ScriptRunning or not ch.Parent or ch:GetAttribute("AetherClicked") or not (Config.AutoHammer or State.IsAutoForging) then
-                            if rsConn then rsConn:Disconnect(); rsConn = nil end
-                            return
-                        end
-                        local curScale = circle.Size.X.Scale
-                        local now = os.clock()
-                        local dt = now - t0
-                        if not fireAt and dt > 0.02 and curScale < s0 * 0.97 then
-                            local rate = (s0 - curScale) / dt
-                            if rate > 0.1 then
-                                local estLifetime = s0 / rate
-                                fireAt = t0 + (estLifetime * targetElapsedRatio)
-                            end
-                        end
-                        if curScale <= targetScale or (fireAt and now >= fireAt) or dt >= 1.45 then
-                            if rsConn then rsConn:Disconnect(); rsConn = nil end
-                            clickGolemButton(ch)
-                        end
-                    end)
-                else
-                    -- Golem Awaken heart prompt: listens to UserInputService.InputBegan (MouseButton1 / Space), requires 20 mashes (MashGain = 0.05)
-                    task.spawn(function()
-                        local deadline = os.clock() + 12.0
-                        while ScriptRunning and ch.Parent and os.clock() < deadline and (Config.AutoHammer or State.IsAutoForging) do
-                            local cx = ch.AbsolutePosition.X + (ch.AbsoluteSize.X * 0.5)
-                            local cy = ch.AbsolutePosition.Y + (ch.AbsoluteSize.Y * 0.5)
-                            local sent = pcall(function()
-                                vim:SendMouseButtonEvent(cx, cy, 0, true, game, 0)
-                                vim:SendMouseButtonEvent(cx, cy, 0, false, game, 0)
-                            end)
-                            if not sent then
-                                pcall(function()
-                                    vim:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
-                                    vim:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
-                                end)
-                            end
-                            task.wait(0.02)
-                        end
-                    end)
-                end
-            end)
-        end
-
-        local boundHammerUIs = {}
-        local function bindHammerUI(hm)
-            if not hm or boundHammerUIs[hm] then return end
-            boundHammerUIs[hm] = true
-            for _, ch in ipairs(hm:GetChildren()) do
-                handleGolemHammerChild(ch)
-            end
-            trackConn(hm.ChildAdded:Connect(handleGolemHammerChild))
-        end
-
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        local fg = pg and pg:FindFirstChild("Forge")
-        local hm = fg and fg:FindFirstChild("HammerMinigame")
-        if hm then
-            bindHammerUI(hm)
-        elseif pg then
-            local watchConn
-            watchConn = trackConn(pg.DescendantAdded:Connect(function(desc)
-                if desc.Name == "HammerMinigame" and desc.Parent and desc.Parent.Name == "Forge" then
-                    bindHammerUI(desc)
-                    if watchConn then pcall(function() watchConn:Disconnect() end) end
-                end
-            end))
-        end
-    end)
 end)
 
 -- 8B. Minigame Controller Loop: Auto Mold Breaker & Showcase Accept (Melt/Pour handled via hooks in 8A-2)
@@ -8650,80 +10868,7 @@ task.spawn(function()
     end
 end)
 
--- 8C. Dedicated Non-Blocking RenderStepped Pour Balancer (Golem Mould only; Armor/Weapon Pour handled via hook in 8A-2)
-do
-    local vim = game:GetService("VirtualInputManager")
-    local lastMouldAreaY = nil
-    local mouldWaitUntil = 0
-    local function setPourHold(down)
-        local cam = workspace.CurrentCamera
-        local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
-        local clickX = math.floor(vp.X * 0.5)
-        local clickY = math.floor(vp.Y * 0.88)
-        local ok = pcall(function()
-            vim:SendMouseButtonEvent(clickX, clickY, 0, down, game, 0)
-        end)
-        if not ok then
-            if down and typeof(mouse1press) == "function" then
-                pcall(mouse1press)
-            elseif (not down) and typeof(mouse1release) == "function" then
-                pcall(mouse1release)
-            end
-        end
-    end
-    trackConn(RunService.RenderStepped:Connect(function()
-        if not ScriptRunning then return end
-        local pgui = LocalPlayer:FindFirstChild("PlayerGui")
-        local forgeGui = pgui and pgui:FindFirstChild("Forge")
-        local pourMG = forgeGui and forgeGui:FindFirstChild("PourMinigame")
-        if pourMG and pourMG.Visible and (Config.AutoPour or State.IsAutoForging) then
-            local frame = pourMG:FindFirstChild("Frame")
-            local area = frame and frame:FindFirstChild("Area")
-            local line = frame and frame:FindFirstChild("Line")
-            -- Ignore the 0.25s entry/exit slide tween so AutoPour never holds/clicks into Hammer/Showcase
-            local frameOnScreen = frame and frame.Position.X.Scale > 0.50 and frame.Position.X.Scale < 0.96
-            if frame and area and line and frameOnScreen then
-                -- PourMinigame.Inside.Visible stays false during normal PourMinigame, so ONLY treat State.GolemPhase == "Mould" as Golem Mould!
-                if State.GolemPhase ~= "Mould" then
-                    if State.PourMouseDown then
-                        State.PourMouseDown = false
-                        setPourHold(false)
-                    end
-                    return
-                end
-
-                local areaCenter = area.AbsolutePosition.Y + (area.AbsoluteSize.Y * 0.5)
-                -- Golem Mould stops on MouseButton1 release across 3 fixed checkpoints; Line.AnchorPoint.Y == 0 matches 1 - fill
-                local lineTop = line.AbsolutePosition.Y
-                if lastMouldAreaY and math.abs(areaCenter - lastMouldAreaY) > 4 then
-                    mouldWaitUntil = 0
-                    lastMouldAreaY = areaCenter
-                end
-                if State.PourMouseDown then
-                    if lineTop <= areaCenter + 0.5 then
-                        State.PourMouseDown = false
-                        setPourHold(false)
-                        lastMouldAreaY = areaCenter
-                        mouldWaitUntil = os.clock() + 0.08
-                    end
-                else
-                    if os.clock() >= mouldWaitUntil and lineTop > areaCenter + 1.5 and frame.Position.X.Scale < 0.98 then
-                        lastMouldAreaY = areaCenter
-                        State.PourMouseDown = true
-                        setPourHold(true)
-                    end
-                end
-            end
-        else
-            lastMouldAreaY = nil
-            mouldWaitUntil = 0
-            if State.PourMouseDown then
-                State.PourMouseDown = false
-                setPourHold(false)
-            end
-        end
-    end))
-end
+-- (Golem Mould / Build / Awaken, Hammer, Melt, and Pour are all driven natively via hooks in 8A / 8A-2 with zero VIM input!)
 
 -- ===================================================================
 -- 9. CRAFTING & ECONOMY AUTOMATION (Priority: Auto Mine/Combat > Auto Craft > Auto Forge)
@@ -9196,8 +11341,8 @@ task.spawn(function()
         end
 
         -- Background Auto Craft scheduling: Priority is Auto Mine / Auto Combat > Auto Craft > Auto Forge
-        if Config.AutoCraft and not State.IsAutoForging and not State.DrainingFullBag and not State.IsCrafting and not State.IsBuyingPotions and (now - (State.LastCraftRequest or 0) >= 4.0) then
-            local inRaidRun = RaidEngine and RaidEngine.IsInActiveRun()
+        if Config.AutoCraft and not State.IsAutoForging and not State.DrainingFullBag and not State.IsCrafting and not State.IsBuyingPotions and not State.IsBuyingHealthPotions and not State.IsAutoSellingMenu and not State.IsDoingQuestNpc and (now - (State.LastCraftRequest or 0) >= 4.0) then
+            local inRaidRun = RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.IsInAbyssLobby() or (RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid()))
             if not inRaidRun then
                 local farmActive = (Config.AutoMine == true) or (Config.AutoMobFarm == true) or (Config.AutoRaid == true)
                 local hasAnywhere = CraftEngine.HasCraftAnywhere()
@@ -9231,8 +11376,8 @@ task.spawn(function()
             if Remotes.ClaimMailAll then pcall(function() Remotes.ClaimMailAll:InvokeServer() end) end
         end
 
-        -- Auto-Equip Best Armor (Helmet, Chestplate, Leggings by CalculateHealth)
-        if Config.AutoEquipBestArmor and not State.IsAutoForging then
+        -- Auto-Equip Best Armor (Helmet, Chestplate, Leggings by CalculateHealth) — never interrupts active Raids, Asura, or Healing
+        if Config.AutoEquipBestArmor and not State.IsAutoForging and not inRaidForStash and not State.IsUsingPotion and not State.UsingPotionCycle and not (RaidEngine and RaidEngine.RecoveringHP) then
             pcall(ForgeEngine.EquipBestArmor)
         end
 
@@ -9319,14 +11464,36 @@ function CombatEngine.FindClosestMob()
     return bestNormalMob or bestShieldedMob
 end
 
--- Shared weapon swing helper used by EngageTargetMob & continuous autoclicker (swings unconditionally regardless of distance)
+-- Shared weapon swing helper used by EngageTargetMob & continuous autoclicker
 function CombatEngine.TrySwingWeapon(mHRP)
     if not State.HRP then return false end
+    -- Hard no-attack gate while healing, drinking potions, air-regenerating, or evading/recovering in Boss Arena
+    if State.IsUsingPotion or State.UsingPotionCycle or State.InDefenseRegen then return false end
+    if RaidEngine and (RaidEngine.RecoveringHP or RaidEngine.AsuraState == "HEALING" or RaidEngine.AsuraState == "EVADING" or RaidEngine.AsuraState == "VOID_RECOVERY" or RaidEngine.AsuraState == "CUTSCENE") then
+        return false
+    end
     local heldTool = State.Character and State.Character:FindFirstChildWhichIsA("Tool")
-    local hasWeapon = heldTool and heldTool.Name ~= "Pickaxe" and heldTool.Name ~= "PortalTool"
+    local hasWeapon = heldTool
+        and heldTool.Name ~= "Pickaxe"
+        and heldTool.Name ~= "PortalTool"
+        and heldTool.Name ~= "Inventory"
+        and not heldTool.Name:find("Potion", 1, true)
+        and heldTool:GetAttribute("MiscJSON") == nil
+    if not hasWeapon then return false end
+    -- Hold attacks during counter/invulnerable stances (e.g. Asura Prophecy Vision) so we never trigger counter-teleport procs
+    local tgtMob = (mHRP and mHRP.Parent) or State.CurrentMob or State.TargetMob
+    if tgtMob and tgtMob.Parent then
+        local activeSk = CombatEngine.GetActiveBossSkill(tgtMob, true)
+        if activeSk and activeSk.holdAttacks then
+            return false
+        end
+    end
     local nowAtk = os.clock()
+    if nowAtk < (CombatEngine.HoldAttackUntil or 0) then
+        return hasWeapon
+    end
     local inFlight = CombatEngine.InFlightAttacks or 0
-    if hasWeapon and (nowAtk - (CombatEngine.LastMobAttack or 0)) >= 0.06 and inFlight < 3 and not CombatEngine.IsBlockingOrParrying() and Remotes.ToolActivated then
+    if (nowAtk - (CombatEngine.LastMobAttack or 0)) >= 0.06 and inFlight < 3 and not CombatEngine.IsBlockingOrParrying() and Remotes.ToolActivated then
         CombatEngine.LastMobAttack = nowAtk
         CombatEngine.InFlightAttacks = inFlight + 1
         task.spawn(function()
@@ -9339,21 +11506,29 @@ function CombatEngine.TrySwingWeapon(mHRP)
     return hasWeapon
 end
 
--- Continuous weapon autoclicker loop for Auto Mob Farm & Auto Raid (keeps swinging even while actively traveling to enemies)
+-- Continuous weapon autoclicker loop for Auto Mob Farm & Auto Raid (strictly muted while healing, drinking potions, evading, or parrying)
 task.spawn(function()
     while ScriptRunning do
-        local raidActive = Config.AutoRaid and (State.IsInRaid or (game.PlaceId == 84980181568016) or workspace:GetAttribute("AbyssRun") == true or workspace:FindFirstChild("RaidLevels") ~= nil)
-        local recoveringHp = _G.__TheForge_RaidEngine and _G.__TheForge_RaidEngine.RecoveringHP
-        if (Config.AutoMobFarm or raidActive)
+        local raidActive = Config.AutoRaid and (State.IsInRaid or (game.PlaceId == 84980181568016) or workspace:GetAttribute("AbyssRun") == true or workspace:FindFirstChild("RaidLevels") ~= nil or (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.RecoveringHP or RaidEngine.GetActiveBossArena() ~= nil)))
+        local recoveringHp = State.InDefenseRegen or (RaidEngine and (RaidEngine.RecoveringHP or RaidEngine.AsuraState == "HEALING" or RaidEngine.AsuraState == "EVADING" or RaidEngine.AsuraState == "VOID_RECOVERY" or RaidEngine.AsuraState == "CUTSCENE")) or false
+        if (Config.AutoMobFarm or raidActive or State.InAutoDefense)
             and (Config.AutoAttackMob ~= false)
             and not recoveringHp
+            and not CombatEngine.ActiveSkillName
+            and not CombatEngine.IsBlockingOrParrying()
+            and os.clock() >= (CombatEngine.HoldAttackUntil or 0)
+            and not State.IsUsingPotion
+            and not State.UsingPotionCycle
             and not State.IsAutoForging
             and not State.DrainingFullBag
             and not State.IsCrafting
             and not State.IsBuyingPotions
+            and not State.IsBuyingHealthPotions
+            and not State.IsMiningComet
             and not State.SellingMobLoot
+            and not State.IsDoingQuestNpc
             and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
-            local hasTarget = (State.CurrentMob ~= nil) or (State.TargetMob ~= nil) or raidActive
+            local hasTarget = (State.CurrentMob ~= nil) or (State.TargetMob ~= nil) or raidActive or State.InAutoDefense
             if hasTarget then
                 CombatEngine.EnsureWeaponEquipped()
                 CombatEngine.TrySwingWeapon()
@@ -9381,7 +11556,10 @@ function CombatEngine.SetHoverStance(enabled)
         return
     end
 
-    if not hrp or not hum then return end
+    if not hrp or not hum or hum.Health <= 0 or hum:GetState() == Enum.HumanoidStateType.Dead then
+        CombatEngine.HoverLockActive = false
+        return
+    end
     if hrp.Anchored then
         hrp.Anchored = false
     end
@@ -9442,33 +11620,146 @@ end
 function CombatEngine.ClearStanceLock()
     CombatEngine.ActiveStanceCF = nil
     CombatEngine.ActiveStanceMob = nil
+    CombatEngine.LastStanceWritePos = nil
     CombatEngine.SetHoverStance(false)
 end
 
--- Continuous per-frame unanchored hover lock & live target tracking so CharacterController never bounces HRP, kiting mobs cannot outrun swings, and client->server CFrame replication stays 100% live
+-- AFK Backup Kill Switch & Distance Override state (Tower of Hell, Abyss, Boss Arenas, and Auto Mobs)
+CombatEngine.KillWatchdog = {
+    mob = nil,
+    lastHp = nil,
+    lastDamageAt = 0,
+    overrideActive = false,
+    overrideStartedAt = 0,
+    angleIdx = 1,
+    lastAngleStepAt = 0,
+}
+
+function CombatEngine.ResetKillWatchdog()
+    local wd = CombatEngine.KillWatchdog
+    wd.mob = nil
+    wd.lastHp = nil
+    wd.lastDamageAt = 0
+    wd.overrideActive = false
+    wd.overrideStartedAt = 0
+    wd.angleIdx = 1
+    wd.lastAngleStepAt = 0
+end
+
+function CombatEngine.UpdateKillWatchdog(mob, hum, enableBackup)
+    local wd = CombatEngine.KillWatchdog
+    local now = os.clock()
+    if not enableBackup or not mob or not hum then
+        if wd.overrideActive then CombatEngine.ResetKillWatchdog() end
+        return false, 1
+    end
+    local curHp = hum.Health
+    if wd.mob ~= mob then
+        wd.mob = mob
+        wd.lastHp = curHp
+        wd.lastDamageAt = now
+        wd.overrideActive = false
+        wd.overrideStartedAt = 0
+        wd.angleIdx = 1
+        wd.lastAngleStepAt = now
+        return false, 1
+    end
+    if wd.lastHp and curHp < (wd.lastHp - 0.5) then
+        -- Target took real damage: reset watchdog & exit Distance Override cleanly
+        wd.lastHp = curHp
+        wd.lastDamageAt = now
+        if wd.overrideActive then
+            wd.overrideActive = false
+            wd.overrideStartedAt = 0
+            wd.angleIdx = 1
+        end
+        return false, 1
+    end
+    if not wd.lastHp or curHp > wd.lastHp then
+        wd.lastHp = curHp
+    end
+    local timeout = math.clamp(tonumber(Config.RaidBackupKillTimeout) or 10, 4, 45)
+    if not wd.overrideActive and (now - (wd.lastDamageAt or now)) >= timeout then
+        wd.overrideActive = true
+        wd.overrideStartedAt = now
+        wd.angleIdx = 1
+        wd.lastAngleStepAt = now
+    elseif wd.overrideActive and (now - (wd.overrideStartedAt or now)) >= 4.5 and (now - (wd.lastAngleStepAt or 0)) >= 2.0 then
+        -- Stage 2: smoothly cycle 4 cardinal angles around the stuck NPC to clear wall/pillar LOS blocks
+        wd.angleIdx = (wd.angleIdx % 4) + 1
+        wd.lastAngleStepAt = now
+    end
+    return wd.overrideActive, wd.angleIdx
+end
+
+function CombatEngine.GetBackupCloseCFrame(mob, angleIdx)
+    if not mob or not mob.Parent then return nil end
+    local mHRP = mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChildWhichIsA("BasePart")
+    if not mHRP then return nil end
+    local closeDist = math.clamp(tonumber(Config.RaidBackupCloseDistance) or 2.0, 1.2, 3.5)
+    local mPos = mHRP.Position
+    local dirs = {
+        Vector3.new(0, 0, 1),
+        Vector3.new(1, 0, 0),
+        Vector3.new(0, 0, -1),
+        Vector3.new(-1, 0, 0),
+    }
+    local d = dirs[((angleIdx or 1) - 1) % 4 + 1]
+    local rawPos = mPos + (d * closeDist)
+    local floorHit = NavEngine.RaycastSolidFloor(Vector3.new(rawPos.X, mPos.Y + 6.0, rawPos.Z), Vector3.new(0, -14.0, 0))
+    if floorHit and math.abs(floorHit.Position.Y - mPos.Y) <= 6.0 then
+        rawPos = Vector3.new(rawPos.X, math.max(mPos.Y, floorHit.Position.Y + NavEngine.GetCharacterStandOffset()), rawPos.Z)
+    end
+    local safePos = NavEngine.ClampPosToBossArena(rawPos, false)
+    local lookAt = Vector3.new(mPos.X, safePos.Y, mPos.Z)
+    return NavEngine.SafeLookAt(safePos, lookAt, State.HRP and State.HRP.CFrame)
+end
+
+-- Anti-TP Safe Heartbeat-only hover lock & live target tracking:
+-- Detects server rubberbands/wave teleports immediately (zero spam-teleport tug-of-war) and strictly clamps per-frame step delta.
 do
-    local function applyStanceLock(isHeartbeat)
+    local lastHeartbeatAt = os.clock()
+    local function applyStanceLock()
+        local now = os.clock()
+        local dt = math.clamp(now - lastHeartbeatAt, 1 / 120, 0.05)
+        lastHeartbeatAt = now
         if not ScriptRunning then return end
+        if State.InDefenseRegen or State.InAirPotionDrink or (RaidEngine and (RaidEngine.RecoveringHP or RaidEngine.AsuraState == "HEALING")) then
+            return
+        end
         local cf = CombatEngine.ActiveStanceCF
-        if not cf or not State.HRP then return end
-        if Config.MobFarmPositionMode == "Behind Enemy" or (not Config.AutoMobFarm and not Config.AutoRaid) then
+        if not cf or not State.HRP or not NavEngine.IsValidCF(cf) then return end
+        if not State.Humanoid or State.Humanoid.Health <= 0 or State.Humanoid:GetState() == Enum.HumanoidStateType.Dead then
             CombatEngine.ClearStanceLock()
             return
         end
-        if State.IsBuyingPotions or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.SellingMobLoot then
+        if Config.MobFarmPositionMode == "Behind Enemy" or (not Config.AutoMobFarm and not Config.AutoRaid and not State.InAutoDefense) then
             CombatEngine.ClearStanceLock()
             return
         end
-        if os.clock() < (CombatEngine.DodgeUntil or 0) then
+        if State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsEnhancing or State.IsMiningComet or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.SellingMobLoot or State.IsAutoSellingMenu or State.IsDoingQuestNpc then
+            CombatEngine.ClearStanceLock()
             return
         end
-        -- Never rubberband a server teleport (e.g. Wave 2 / Floor transition) back to stale Wave 1 coordinates
-        if (State.HRP.Position - cf.Position).Magnitude > 65 then
+        if now < (CombatEngine.DodgeUntil or 0) or now < (CombatEngine.RubberbandPauseUntil or 0) then
+            return
+        end
+        local curPos = State.HRP.Position
+        -- Detect server AntiCheat rubberband or server wave/floor teleport BEFORE writing: NEVER snap back into a rubberband!
+        if CombatEngine.LastStanceWritePos and (curPos - CombatEngine.LastStanceWritePos).Magnitude > 6.5 then
+            CombatEngine.ClearStanceLock()
+            if State.HRP.Anchored then State.HRP.Anchored = false end
+            if State.Humanoid then State.Humanoid.AutoRotate = true end
+            CombatEngine.RubberbandPauseUntil = now + 0.70
+            return
+        end
+        if (curPos - cf.Position).Magnitude > 14.0 then
+            -- Target or server moved too far for stance-lock micro-tracking: hand off cleanly to smooth glide
             CombatEngine.ClearStanceLock()
             return
         end
         CombatEngine.SetHoverStance(true)
-        if isHeartbeat and not CombatEngine.ActiveSkillName then
+        if not CombatEngine.ActiveSkillName then
             local mob = CombatEngine.ActiveStanceMob
             local mHum = mob and mob.Parent and mob:FindFirstChildOfClass("Humanoid")
             local mHRP = mob and mob.Parent and (mob:FindFirstChild("HumanoidRootPart") or mob:FindFirstChildWhichIsA("BasePart"))
@@ -9480,28 +11771,107 @@ do
             local dx, dz = mPos.X - cf.Position.X, mPos.Z - cf.Position.Z
             local horizSq = dx * dx + dz * dz
             local isUnder = (Config.MobFarmPositionMode == "Under Map" or Config.MobFarmPositionMode == "Underground" or Config.MobFarmPositionMode == "Underneath Enemy")
-            local expectedY = mPos.Y + (CombatEngine.ActiveStanceYOffset or (isUnder and -6.0 or (Config.MobFarmVerticalOffset or 5.5)))
-            if horizSq < 784 and (horizSq > 0.04 or math.abs(expectedY - cf.Position.Y) > 0.25) then
+            local gj = CombatEngine.GolemJumpState and CombatEngine.GolemJumpState[mob]
+            local gjActive = gj and now < (gj.untilAt or 0)
+            local asuraSurface = isUnder and CombatEngine.ShouldSurfaceForAsura and CombatEngine.ShouldSurfaceForAsura(mob)
+            local desiredOff = isUnder and -math.clamp(Config.MobFarmUnderOffset or 6.0, 2.5, 14.0) or math.clamp(Config.MobFarmVerticalOffset or 5.5, 2.5, 12.0)
+            local minAboveY = gjActive and math.max(mPos.Y + 4.0, (gj.apexY or mPos.Y) + 4.5) or (mPos.Y + math.min(desiredOff, 2.5))
+            local isSideFallback = (not gjActive) and (horizSq >= 4.0)
+            local fellBelowBoss = (not isUnder) and (not isSideFallback) and (cf.Position.Y < minAboveY)
+
+            local expectedY = mPos.Y + desiredOff
+            if horizSq < 400 and (fellBelowBoss or gjActive or asuraSurface or horizSq > 0.04 or math.abs(expectedY - cf.Position.Y) > 0.25) then
                 local liveCF = NavEngine.GetMobFarmCFrame(mob, Config.MobFarmPositionMode)
-                if liveCF then
+                if liveCF and NavEngine.IsValidCF(liveCF) then
                     cf = liveCF
                     CombatEngine.ActiveStanceYOffset = liveCF.Position.Y - mPos.Y
                     CombatEngine.ActiveStanceCF = cf
                 end
             end
+            local isSideNow = (not gjActive) and (((mPos.X - cf.Position.X) ^ 2 + (mPos.Z - cf.Position.Z) ^ 2) >= 4.0)
+            if not isUnder and not isSideNow and cf.Position.Y < minAboveY then
+                local liftY = gjActive and (minAboveY + 1.0) or math.max(minAboveY, mPos.Y + desiredOff)
+                cf = NavEngine.SafeLookAt(Vector3.new(cf.Position.X, liftY, cf.Position.Z), Vector3.new(mPos.X + 0.05, mPos.Y, mPos.Z), cf)
+                CombatEngine.ActiveStanceCF = cf
+            end
         end
-        State.HRP.CFrame = cf
+        -- Hard Anti-TP per-frame displacement clamp: smoothly step toward cf.Position instead of snapping 10-60 studs in 1 frame
+        local safeSpeed = math.clamp(tonumber(Config.GlideSpeed) or 50, 20, 54)
+        local maxStep = math.min(safeSpeed * dt, 2.5)
+        local delta = cf.Position - curPos
+        local dMag = delta.Magnitude
+        local writeCF = cf
+        if dMag > maxStep and dMag > 0.01 then
+            local stepPos = curPos + delta.Unit * maxStep
+            writeCF = CFrame.new(stepPos) * cf.Rotation
+        end
+        writeCF = CombatEngine.ApplyParryFacing(writeCF)
+        if not NavEngine.IsValidCF(writeCF) then return end
+        CombatEngine.LastStanceWritePos = writeCF.Position
+        State.HRP.CFrame = writeCF
         State.HRP.AssemblyLinearVelocity = Vector3.zero
         State.HRP.AssemblyAngularVelocity = Vector3.zero
     end
-    trackConn(RunService.RenderStepped:Connect(function() applyStanceLock(false) end))
-    trackConn(RunService.Heartbeat:Connect(function() applyStanceLock(true) end))
+    trackConn(RunService.Heartbeat:Connect(applyStanceLock))
+
+    -- Hook GolemJumpDive.Handler (Jump & Slam) so we capture exact Bezier apexY & duration (zero AssemblyLinearVelocity during TweenService jump!)
+    CombatEngine.GolemJumpState = CombatEngine.GolemJumpState or {}
+    task.spawn(function()
+        pcall(function()
+            local fx = ReplicatedStorage:FindFirstChild("Assets") and ReplicatedStorage.Assets:FindFirstChild("Effects")
+            local gjd = fx and fx:FindFirstChild("GolemJumpDive")
+            local handlerMod = gjd and gjd:FindFirstChild("Handler")
+            local GJD = handlerMod and safeRequire(handlerMod)
+            if type(GJD) == "table" then
+                if type(GJD.Jump) == "function" and not OrigHooks["GolemJumpDive_Jump"] then
+                    local oldJump
+                    oldJump = safeHook(GJD, "Jump", "GolemJumpDive_Jump", function(hrp, startPos, apexPos, landPos, speed, ...)
+                        pcall(function()
+                            local mob = hrp and hrp.Parent
+                            if mob and typeof(apexPos) == "Vector3" and typeof(startPos) == "Vector3" then
+                                local dur = 1 / math.max(0.25, tonumber(speed) or 1.0)
+                                CombatEngine.GolemJumpState[mob] = {
+                                    apexY = math.max(apexPos.Y, startPos.Y + 18),
+                                    landPos = landPos,
+                                    untilAt = os.clock() + dur + 0.85,
+                                }
+                            end
+                        end)
+                        return oldJump(hrp, startPos, apexPos, landPos, speed, ...)
+                    end)
+                end
+                if type(GJD.Slam) == "function" and not OrigHooks["GolemJumpDive_Slam"] then
+                    local oldSlam
+                    oldSlam = safeHook(GJD, "Slam", "GolemJumpDive_Slam", function(hrp, ...)
+                        pcall(function()
+                            local mob = hrp and hrp.Parent
+                            if mob and hrp:IsA("BasePart") then
+                                local prev = CombatEngine.GolemJumpState[mob]
+                                local apexY = (prev and prev.apexY) or (hrp.Position.Y + 14)
+                                CombatEngine.GolemJumpState[mob] = {
+                                    apexY = math.max(apexY, hrp.Position.Y + 12),
+                                    landPos = hrp.Position,
+                                    untilAt = math.max((prev and prev.untilAt) or 0, os.clock() + 0.55),
+                                }
+                            end
+                        end)
+                        return oldSlam(hrp, ...)
+                    end)
+                end
+            end
+        end)
+    end)
 end
 
 -- Shared melee engagement routine used by both AutoMobFarm and RaidEngine
 function CombatEngine.EngageTargetMob(mob, opts)
     if not mob or not mob.Parent or not State.HRP or not State.Humanoid then
         return false, 0.14
+    end
+    -- Yield cleanly without blacklisting the mob while safely drinking potions in the air
+    if State.InAirPotionDrink or State.IsUsingPotion or State.UsingPotionCycle then
+        CombatEngine.ClearStanceLock()
+        return true, 0.12
     end
     local loopDelay = 0.14
     State.CurrentMob = mob
@@ -9557,6 +11927,14 @@ function CombatEngine.EngageTargetMob(mob, opts)
         end
     end
 
+    -- Yield cleanly right after any server rubberband / wave teleport so we never trigger an Anti-TP tug-of-war
+    if os.clock() < (CombatEngine.RubberbandPauseUntil or 0) then
+        CombatEngine.ClearStanceLock()
+        return true, 0.10
+    end
+
+    local safeCombatSpeed = math.clamp(tonumber(Config.GlideSpeed) or 50, 20, 54)
+
     -- Evade Asura / Boss multi-hit skill moves (Barrage/Quadruple Slash, Decimate, Worldsplitter, Buddha, ProphecyVision)
     local bossSkill = (Config.EvadeBossSkills ~= false) and CombatEngine.GetActiveBossSkill(mob) or nil
     if bossSkill then
@@ -9571,31 +11949,42 @@ function CombatEngine.EngageTargetMob(mob, opts)
             if usesAnchorStance then
                 CombatEngine.SetHoverStance(true)
                 if horizDistFromBoss < (safeDist - 4.0) then
-                    local evadeSpeed = math.max(Config.GlideSpeed or 55, 95)
+                    local evadeSpeed = safeCombatSpeed
                     local stepStart = os.clock()
-                    while ScriptRunning and State.HRP and mob.Parent and hum.Health > 0 and (os.clock() - stepStart) < 0.28 do
+                    local prevWritePos = curPos
+                    local startHrp = State.HRP
+                    while ScriptRunning and State.HRP and State.HRP == startHrp and State.Humanoid and State.Humanoid.Health > 0 and mob.Parent and hum.Health > 0 and (os.clock() - stepStart) < 0.35 do
                         local dt = RunService.Heartbeat:Wait()
-                        if not State.HRP or not mob.Parent or hum.Health <= 0 then break end
-                        if not Config.AutoMobFarm and not Config.AutoRaid then break end
+                        if not State.HRP or State.HRP ~= startHrp or not State.Humanoid or State.Humanoid.Health <= 0 or not mob.Parent or hum.Health <= 0 then break end
+                        if not Config.AutoMobFarm and not Config.AutoRaid and not State.InAutoDefense then break end
                         local pNow = State.HRP.Position
+                        if (pNow - prevWritePos).Magnitude > 7.5 then
+                            CombatEngine.ClearStanceLock()
+                            CombatEngine.RubberbandPauseUntil = os.clock() + 0.65
+                            break
+                        end
                         local delta = retreatCF.Position - pNow
                         local dMag = delta.Magnitude
                         CombatEngine.SetHoverStance(true)
                         State.HRP.AssemblyLinearVelocity = Vector3.zero
                         State.HRP.AssemblyAngularVelocity = Vector3.zero
-                        if dMag <= 1.5 then
+                        if dMag <= 2.2 then
                             CombatEngine.ActiveStanceCF = retreatCF
+                            CombatEngine.LastStanceWritePos = retreatCF.Position
                             State.HRP.CFrame = retreatCF
                             break
                         end
-                        local nextPos = pNow + delta.Unit * math.min(dMag, evadeSpeed * dt)
+                        local nextPos = pNow + delta.Unit * math.min(dMag, evadeSpeed * dt, 2.5)
                         local nextCF = CFrame.new(nextPos) * retreatCF.Rotation
+                        prevWritePos = nextPos
                         CombatEngine.ActiveStanceCF = nextCF
+                        CombatEngine.LastStanceWritePos = nextPos
                         State.HRP.CFrame = nextCF
                     end
                 else
                     CombatEngine.SetHoverStance(true)
                     CombatEngine.ActiveStanceCF = CFrame.new(curPos) * retreatCF.Rotation
+                    CombatEngine.LastStanceWritePos = curPos
                     State.HRP.CFrame = CombatEngine.ActiveStanceCF
                     State.HRP.AssemblyLinearVelocity = Vector3.zero
                     State.HRP.AssemblyAngularVelocity = Vector3.zero
@@ -9605,7 +11994,7 @@ function CombatEngine.EngageTargetMob(mob, opts)
                 if State.HRP.Anchored then State.HRP.Anchored = false end
                 if State.Humanoid then State.Humanoid.AutoRotate = true end
                 if horizDistFromBoss < (safeDist - 4.0) then
-                    if (curPos - retreatCF.Position).Magnitude > 14 then
+                    if (curPos - retreatCF.Position).Magnitude > 3.0 then
                         NavEngine.NavigateTo(retreatCF, true)
                     else
                         State.HRP.CFrame = retreatCF
@@ -9617,6 +12006,71 @@ function CombatEngine.EngageTargetMob(mob, opts)
         return true, 0.06
     else
         CombatEngine.ActiveSkillName = nil
+    end
+
+    -- AFK Backup Kill Switch & Distance Override (activates if target takes 0 damage for timeout)
+    local isRaidContext = State.IsInRaid or (opts and opts.isRaid == true)
+    local backupEnable = (Config.RaidBackupKillSwitch ~= false) and (isRaidContext or Config.AutoMobFarm)
+    local backupOverride, backupAngleIdx = CombatEngine.UpdateKillWatchdog(mob, hum, backupEnable)
+    if backupOverride then
+        CombatEngine.EnsureWeaponEquipped()
+        local closeCF = CombatEngine.GetBackupCloseCFrame(mob, backupAngleIdx)
+        if closeCF then
+            local pNow = State.HRP.Position
+            local dClose = (closeCF.Position - pNow).Magnitude
+            CombatEngine.ClearStanceLock()
+            if State.HRP.Anchored then State.HRP.Anchored = false end
+            if dClose > 3.5 then
+                -- Smooth Anti-TP safe glide right into close melee range
+                local slideStart = os.clock()
+                local prevWritePos = pNow
+                local maxSlide = math.clamp((dClose / safeCombatSpeed) + 0.6, 0.8, 3.5)
+                local startHrp = State.HRP
+                while ScriptRunning and State.HRP and State.HRP == startHrp and State.Humanoid and State.Humanoid.Health > 0 and mob.Parent and hum.Health > 0 and (os.clock() - slideStart) < maxSlide do
+                    if not Config.AutoMobFarm and not Config.AutoRaid and not State.InAutoDefense then break end
+                    local dt = RunService.Heartbeat:Wait()
+                    if not State.HRP or State.HRP ~= startHrp or not State.Humanoid or State.Humanoid.Health <= 0 or not mob.Parent or hum.Health <= 0 then break end
+                    if State.Character then
+                        for _, pt in ipairs(State.Character:GetDescendants()) do
+                            if pt:IsA("BasePart") and pt.CanCollide then pt.CanCollide = false end
+                        end
+                    end
+                    local cNow = State.HRP.Position
+                    if (cNow - prevWritePos).Magnitude > 7.5 then
+                        CombatEngine.RubberbandPauseUntil = os.clock() + 0.65
+                        break
+                    end
+                    local liveClose = CombatEngine.GetBackupCloseCFrame(mob, backupAngleIdx)
+                    if not liveClose then break end
+                    local delta = liveClose.Position - cNow
+                    local dm = delta.Magnitude
+                    if dm <= 2.2 then
+                        State.HRP.CFrame = liveClose
+                        State.HRP.AssemblyLinearVelocity = Vector3.zero
+                        CombatEngine.TrySwingWeapon(mHRP)
+                        break
+                    end
+                    local stepPos = cNow + delta.Unit * math.min(dm, safeCombatSpeed * dt, 2.5)
+                    prevWritePos = stepPos
+                    State.HRP.CFrame = CFrame.new(stepPos) * liveClose.Rotation
+                    State.HRP.AssemblyLinearVelocity = Vector3.zero
+                    State.HRP.AssemblyAngularVelocity = Vector3.zero
+                    if dm <= 10.0 then
+                        CombatEngine.TrySwingWeapon(mHRP)
+                    end
+                end
+                if not Config.Noclip and not NavEngine.IsGliding then
+                    pcall(NavEngine.RestoreCharacterPhysics)
+                end
+            else
+                if State.Humanoid then State.Humanoid.AutoRotate = false end
+                State.HRP.CFrame = closeCF
+                State.HRP.AssemblyLinearVelocity = Vector3.zero
+                State.HRP.AssemblyAngularVelocity = Vector3.zero
+            end
+            CombatEngine.TrySwingWeapon(mHRP)
+            return true, 0.04
+        end
     end
 
     local targetCFrame = NavEngine.GetMobFarmCFrame(mob, posMode)
@@ -9661,21 +12115,33 @@ function CombatEngine.EngageTargetMob(mob, opts)
                 end
                 return false, loopDelay
             end
-        elseif horizDist > 2.2 or vertDist > 3.0 then
-            -- Unanchored physics hover across the whole arena (client->server CFrame replication stays 100% live!)
-            local slideSpeed = math.max(Config.GlideSpeed or 55, isKitingTarget and 85 or 55)
+        elseif horizDist > 2.2 or vertDist > 2.6 then
+            -- Smooth Anti-TP safe unanchored hover slide (strictly capped at safeCombatSpeed <= 54 studs/s + rubberband guard)
+            local slideSpeed = safeCombatSpeed
             local maxSlideTime = math.clamp((fullDist / slideSpeed) + 0.8, 1.2, 6.0)
             local slideStart = os.clock()
+            local prevWritePos = charPos
             CombatEngine.SetHoverStance(true)
-            while ScriptRunning and State.HRP and mob.Parent and hum.Health > 0 and (os.clock() - slideStart) < maxSlideTime do
-                if State.IsBuyingPotions or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.SellingMobLoot then break end
-                if not Config.AutoMobFarm and not Config.AutoRaid then break end
-                if os.clock() < (CombatEngine.DodgeUntil or 0) then break end
+            local startHrp = State.HRP
+            while ScriptRunning and State.HRP and State.HRP == startHrp and State.Humanoid and State.Humanoid.Health > 0 and mob.Parent and hum.Health > 0 and (os.clock() - slideStart) < maxSlideTime do
+                if State.IsBuyingPotions or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.SellingMobLoot or State.IsAutoSellingMenu or State.IsDoingQuestNpc then break end
+                if not Config.AutoMobFarm and not Config.AutoRaid and not State.InAutoDefense then break end
+                if os.clock() < (CombatEngine.DodgeUntil or 0) or os.clock() < (CombatEngine.RubberbandPauseUntil or 0) then break end
                 local dt = RunService.Heartbeat:Wait()
-                if not State.HRP or not mob.Parent or hum.Health <= 0 then break end
+                if not State.HRP or State.HRP ~= startHrp or not State.Humanoid or State.Humanoid.Health <= 0 or not mob.Parent or hum.Health <= 0 then break end
+                if State.Character then
+                    for _, pt in ipairs(State.Character:GetDescendants()) do
+                        if pt:IsA("BasePart") and pt.CanCollide then pt.CanCollide = false end
+                    end
+                end
+                local curPos = State.HRP.Position
+                if (curPos - prevWritePos).Magnitude > 7.5 then
+                    CombatEngine.ClearStanceLock()
+                    CombatEngine.RubberbandPauseUntil = os.clock() + 0.70
+                    break
+                end
                 local liveTarget = NavEngine.GetMobFarmCFrame(mob, posMode)
                 if not liveTarget then break end
-                local curPos = State.HRP.Position
                 local delta = liveTarget.Position - curPos
                 local dMag = delta.Magnitude
                 CombatEngine.SetHoverStance(true)
@@ -9683,19 +12149,25 @@ function CombatEngine.EngageTargetMob(mob, opts)
                 State.HRP.AssemblyAngularVelocity = Vector3.zero
                 CombatEngine.ActiveStanceMob = mob
                 CombatEngine.ActiveStanceYOffset = liveTarget.Position.Y - mHRP.Position.Y
-                if dMag <= 1.4 then
+                if dMag <= 2.2 then
                     CombatEngine.ActiveStanceCF = liveTarget
+                    CombatEngine.LastStanceWritePos = liveTarget.Position
                     State.HRP.CFrame = liveTarget
                     CombatEngine.TrySwingWeapon(mHRP)
                     break
                 end
-                local stepPos = curPos + delta.Unit * math.min(dMag, slideSpeed * dt)
+                local stepPos = curPos + delta.Unit * math.min(dMag, slideSpeed * dt, 2.5)
                 local nextCF = CFrame.new(stepPos) * liveTarget.Rotation
+                prevWritePos = stepPos
                 CombatEngine.ActiveStanceCF = nextCF
+                CombatEngine.LastStanceWritePos = stepPos
                 State.HRP.CFrame = nextCF
                 if dMag <= 16.0 then
                     CombatEngine.TrySwingWeapon(mHRP)
                 end
+            end
+            if not Config.Noclip and not NavEngine.IsGliding then
+                pcall(NavEngine.RestoreCharacterPhysics)
             end
         end
     elseif not behindHold and (mobDistHoriz > (isKitingTarget and 26.0 or 14.0) or heightDiff > 6.0) then
@@ -9717,11 +12189,12 @@ function CombatEngine.EngageTargetMob(mob, opts)
     end
 
     -- Refresh CFrame after transit and hold stance cleanly
-    local isDodging = os.clock() < (CombatEngine.DodgeUntil or 0)
+    local isDodging = os.clock() < (CombatEngine.DodgeUntil or 0) or os.clock() < (CombatEngine.RubberbandPauseUntil or 0)
     if behindHold then
         -- Hold steady in melee range behind/flanking enemy instead of circling every time enemy turns
         CombatEngine.ActiveStanceCF = nil
         CombatEngine.ActiveStanceMob = nil
+        CombatEngine.LastStanceWritePos = nil
         if State.HRP and not isDodging then
             if State.HRP.Anchored then State.HRP.Anchored = false end
             if not Config.Noclip and not NavEngine.IsGliding then
@@ -9731,9 +12204,7 @@ function CombatEngine.EngageTargetMob(mob, opts)
             if not CombatEngine.IsBlockingOrParrying() then
                 local pNow = State.HRP.Position
                 local lookTarget = Vector3.new(mHRP.Position.X, pNow.Y, mHRP.Position.Z)
-                if (lookTarget - pNow).Magnitude > 0.1 then
-                    State.HRP.CFrame = CFrame.lookAt(pNow, lookTarget)
-                end
+                State.HRP.CFrame = NavEngine.SafeLookAt(pNow, lookTarget, State.HRP.CFrame)
             end
             if CombatEngine.TrySwingWeapon(mHRP) then
                 loopDelay = isKitingTarget and 0.03 or 0.04
@@ -9749,16 +12220,25 @@ function CombatEngine.EngageTargetMob(mob, opts)
         charPos = State.HRP.Position
         horizDist = Vector3.new(charPos.X - targetCFrame.Position.X, 0, charPos.Z - targetCFrame.Position.Z).Magnitude
         vertDist = math.abs(charPos.Y - targetCFrame.Position.Y)
-        if usesAnchorStance and horizDist <= 6.0 and vertDist <= 8.0 then
+        fullDist = (charPos - targetCFrame.Position).Magnitude
+        if usesAnchorStance and fullDist <= 2.6 then
             CombatEngine.SetHoverStance(true)
             CombatEngine.ActiveStanceMob = mob
             CombatEngine.ActiveStanceYOffset = targetCFrame.Position.Y - mHRP.Position.Y
             CombatEngine.ActiveStanceCF = targetCFrame
-            State.HRP.CFrame = targetCFrame
+            CombatEngine.LastStanceWritePos = targetCFrame.Position
+            State.HRP.CFrame = CombatEngine.ApplyParryFacing(targetCFrame)
             State.HRP.AssemblyLinearVelocity = Vector3.zero
             State.HRP.AssemblyAngularVelocity = Vector3.zero
+        elseif usesAnchorStance and fullDist <= 10.0 then
+            -- Never snap > 2.6 studs: activate stance lock and let Heartbeat step smoothly into position
+            CombatEngine.SetHoverStance(true)
+            CombatEngine.ActiveStanceMob = mob
+            CombatEngine.ActiveStanceYOffset = targetCFrame.Position.Y - mHRP.Position.Y
+            CombatEngine.ActiveStanceCF = targetCFrame
+            CombatEngine.LastStanceWritePos = charPos
         elseif isBehind and horizDist <= (isKitingTarget and 26.0 or 14.0) then
-            -- Behind Enemy short reposition: stay unanchored on solid floor and intercept kiting mobs immediately
+            -- Behind Enemy Anti-TP safe smooth reposition (NEVER instant-teleports 14-26 studs!)
             CombatEngine.ClearStanceLock()
             CombatEngine.LastBehindReposition = os.clock()
             if State.HRP.Anchored then State.HRP.Anchored = false end
@@ -9771,10 +12251,51 @@ function CombatEngine.EngageTargetMob(mob, opts)
                 safePos = Vector3.new(safePos.X, State.HRP.Position.Y, safePos.Z)
             end
             local rot = CombatEngine.IsBlockingOrParrying() and State.HRP.CFrame.Rotation or targetCFrame.Rotation
-            State.HRP.CFrame = CFrame.new(safePos) * rot
-            local curVelY = State.HRP.AssemblyLinearVelocity.Y
-            State.HRP.AssemblyLinearVelocity = Vector3.new(0, math.max(curVelY, 0), 0)
-            State.HRP.AssemblyAngularVelocity = Vector3.zero
+            local dBehind = (safePos - charPos).Magnitude
+            if dBehind <= 2.6 then
+                State.HRP.CFrame = CFrame.new(safePos) * rot
+                local curVelY = State.HRP.AssemblyLinearVelocity.Y
+                State.HRP.AssemblyLinearVelocity = Vector3.new(0, math.max(curVelY, 0), 0)
+                State.HRP.AssemblyAngularVelocity = Vector3.zero
+            else
+                -- Smooth Heartbeat interpolation capped strictly at safeCombatSpeed <= 54 studs/s
+                local bStart = os.clock()
+                local prevWritePos = charPos
+                local maxDur = math.clamp((dBehind / safeCombatSpeed) + 0.35, 0.25, 1.4)
+                local startHrp = State.HRP
+                while ScriptRunning and State.HRP and State.HRP == startHrp and State.Humanoid and State.Humanoid.Health > 0 and mob.Parent and hum.Health > 0 and (os.clock() - bStart) < maxDur do
+                    local dt = RunService.Heartbeat:Wait()
+                    if not State.HRP or State.HRP ~= startHrp or not State.Humanoid or State.Humanoid.Health <= 0 or not mob.Parent or hum.Health <= 0 then break end
+                    if not Config.AutoMobFarm and not Config.AutoRaid and not State.InAutoDefense then break end
+                    local cNow = State.HRP.Position
+                    if (cNow - prevWritePos).Magnitude > 7.5 then
+                        CombatEngine.RubberbandPauseUntil = os.clock() + 0.65
+                        break
+                    end
+                    local liveCF = NavEngine.GetMobFarmCFrame(mob, posMode)
+                    if not liveCF then break end
+                    local dest = liveCF.Position
+                    if cNow.Y > dest.Y and (cNow.Y - dest.Y) <= 1.6 then
+                        dest = Vector3.new(dest.X, cNow.Y, dest.Z)
+                    end
+                    local delta = dest - cNow
+                    local dm = delta.Magnitude
+                    local lRot = CombatEngine.IsBlockingOrParrying() and State.HRP.CFrame.Rotation or liveCF.Rotation
+                    if dm <= 2.4 then
+                        State.HRP.CFrame = CFrame.new(dest) * lRot
+                        State.HRP.AssemblyLinearVelocity = Vector3.zero
+                        break
+                    end
+                    local stepPos = cNow + delta.Unit * math.min(dm, safeCombatSpeed * dt, 2.5)
+                    prevWritePos = stepPos
+                    State.HRP.CFrame = CFrame.new(stepPos) * lRot
+                    State.HRP.AssemblyLinearVelocity = Vector3.zero
+                    State.HRP.AssemblyAngularVelocity = Vector3.zero
+                    if dm <= 10.0 then
+                        CombatEngine.TrySwingWeapon(mHRP)
+                    end
+                end
+            end
             if isKitingTarget and State.Humanoid then
                 pcall(function() State.Humanoid:MoveTo(mHRP.Position) end)
             end
@@ -9782,6 +12303,7 @@ function CombatEngine.EngageTargetMob(mob, opts)
         elseif isBehind then
             CombatEngine.ActiveStanceCF = nil
             CombatEngine.ActiveStanceMob = nil
+            CombatEngine.LastStanceWritePos = nil
             if State.HRP.Anchored then State.HRP.Anchored = false end
             if State.Humanoid then State.Humanoid.AutoRotate = true end
         end
@@ -9800,8 +12322,15 @@ end
 task.spawn(function()
     while ScriptRunning do
         local loopDelay = 0.14
-        local raidActive = Config.AutoRaid and (State.IsInRaid or (game.PlaceId == 84980181568016) or workspace:GetAttribute("AbyssRun") == true or workspace:FindFirstChild("RaidLevels") ~= nil)
-        if Config.AutoMobFarm and not raidActive and not State.IsAutoForging and not State.DrainingFullBag and not State.IsCrafting and not State.IsBuyingPotions and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
+        local raidActive = Config.AutoRaid and (State.IsInRaid or (game.PlaceId == 84980181568016) or workspace:GetAttribute("AbyssRun") == true or workspace:FindFirstChild("RaidLevels") ~= nil or (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.RecoveringHP or RaidEngine.GetActiveBossArena() ~= nil)))
+        local cometPausedMob = Config.PrioritizeCometRocks and MiningEngine and MiningEngine.ShouldInterruptFarmForComet and MiningEngine.ShouldInterruptFarmForComet()
+        if cometPausedMob and not raidActive then
+            CombatEngine.ClearStanceLock()
+            task.wait(0.35)
+            continue
+        end
+        local inAbyssLobby = (RaidEngine and type(RaidEngine.IsInAbyssLobby) == "function" and RaidEngine.IsInAbyssLobby()) or false
+        if Config.AutoMobFarm and not raidActive and not inAbyssLobby and not State.CheckingPotionsOnStart and not State.IsDeathRestockingPotions and not State.IsAutoForging and not State.DrainingFullBag and not State.IsCrafting and not State.IsBuyingPotions and not State.IsBuyingHealthPotions and not State.IsMovingToRaidPad and not State.IsEnhancing and not State.IsMiningComet and not State.IsAutoSellingMenu and not State.IsDoingQuestNpc and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
             -- Auto-Sell Mob Loot to Greedy Cey -> Auto-Sell Unchecked Runes when bag hits capacity
             if (Config.AutoSellMobLootWhenFull or Config.AutoSellRunes) and (os.clock() - (State.LastMobLootSellAttempt or 0)) >= 6.0 then
                 local used, cap, isFull = ForgeEngine.GetStashCapacityStatus()
@@ -9879,7 +12408,7 @@ task.spawn(function()
             end
         elseif not raidActive then
             CombatEngine.LastEngagedMob = nil
-            if not Config.AutoMine and not State.IsAutoForging then
+            if not Config.AutoMine and not State.IsAutoForging and not State.IsMiningComet then
                 CombatEngine.ClearStanceLock()
                 if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
                 if State.Humanoid and not State.Humanoid.AutoRotate then State.Humanoid.AutoRotate = true end
@@ -9902,7 +12431,7 @@ end)
 -- ===================================================================
 -- 10B. AUTO RAID & AUTO ABYSS ENGINE (Abyss Cards, Party, Orbs & Gates)
 -- ===================================================================
-local RaidEngine = {
+RaidEngine = {
     OwnedCards = {},
     CrossedGates = {},
     OpenedChests = {},
@@ -9911,12 +12440,17 @@ local RaidEngine = {
     CurrentWave = 0,
     EnemiesLeft = nil,
     IsEnded = false,
+    PendingAbyssLeave = false,
+    LastMidFloorLeaveFloor = 0,
+    MidFloorLeaveWaitUntil = 0,
     StatusText = "Idle",
     LastPartyAction = 0,
     LastEnterAttempt = 0,
     LastLeaveAttempt = 0,
     LastCardPick = 0,
     LastReviveAttempt = 0,
+    BossCooldownUntil = {},
+    MineYieldActive = false,
     RaidPlaceSet = { [84980181568016] = true },
     -- All 38 Abyss Card Weights (Balanced prioritizes highest Attack/DMG + Defense/DR/HP stats)
     CardMeta = {
@@ -10052,6 +12586,7 @@ function RaidEngine.GetAvailablePartyModes()
     end
     push("Abyss")
     push("Tower Of Hell")
+    push("Guild Boss")
     local prox = workspace:FindFirstChild("Proximity")
     if prox then
         for _, d in ipairs(prox:GetDescendants()) do
@@ -10070,6 +12605,52 @@ function RaidEngine.GetAvailablePartyModes()
         end
     end)
     return modes
+end
+
+RaidEngine.GuildPlaceSet = {
+    [77021753415709] = true,
+    [89037353106852] = true,
+    [110832125818259] = true,
+}
+RaidEngine.GuildBossState = nil
+RaidEngine.GuildBossStateAt = 0
+RaidEngine.LastGuildTravelAt = 0
+RaidEngine.LastGuildSummonAt = 0
+RaidEngine.NoEnemySince = nil
+
+function RaidEngine.IsInGuildIsland()
+    if RaidEngine.GuildPlaceSet[game.PlaceId] then return true end
+    local ok, res = pcall(function()
+        local GI = safeRequire(ReplicatedStorage.Shared.Data.GuildIsland)
+        if GI and type(GI.IsHere) == "function" then
+            return GI.IsHere() == true
+        end
+        if GI and type(GI.PlaceIds) == "table" then
+            for _, pid in pairs(GI.PlaceIds) do
+                if tonumber(pid) == game.PlaceId then return true end
+            end
+        end
+        return false
+    end)
+    return ok and res == true
+end
+
+function RaidEngine.RefreshGuildBossState(force)
+    if not RaidEngine.IsInGuildIsland() then
+        RaidEngine.GuildBossState = nil
+        return nil
+    end
+    local now = os.clock()
+    if not force and RaidEngine.GuildBossState and (now - (RaidEngine.GuildBossStateAt or 0)) < 3.0 then
+        return RaidEngine.GuildBossState
+    end
+    if not Remotes.GuildGetBossState then return RaidEngine.GuildBossState end
+    local ok, res = pcall(function() return Remotes.GuildGetBossState:InvokeServer() end)
+    if ok and type(res) == "table" then
+        RaidEngine.GuildBossState = res
+        RaidEngine.GuildBossStateAt = now
+    end
+    return RaidEngine.GuildBossState
 end
 
 function RaidEngine.IsInAbyssLobby()
@@ -10190,18 +12771,92 @@ function RaidEngine.GetBossWindowInfo(mode)
         local cfg = Bosses and Bosses[mode]
         if type(cfg) == "table" then
             local TimeUtil = safeRequire(ReplicatedStorage.Shared.Utils.TimeUtil)
-            local open, rem, eventClosed = true, 0, false
+            local open, rem, eventClosed, alreadyKilled = true, 0, false, false
             if TimeUtil and cfg.SpawnInterval then
-                local timeUntilNext = select(1, TimeUtil.GetTimeUntilNextInterval(cfg.SpawnInterval))
-                local elapsed = TimeUtil.GetUTC() - timeUntilNext
+                local tStart, tRem = TimeUtil.GetTimeUntilNextInterval(cfg.SpawnInterval)
+                local elapsed = TimeUtil.GetUTC() - tStart
                 local dur = cfg.ActiveDuration or cfg.SpawnInterval
-                open = elapsed <= dur
-                rem = open and math.max(0, dur - elapsed) or math.max(0, timeUntilNext - TimeUtil.GetUTC())
+                local windowOpen = elapsed <= dur
+                if not cfg.NoKillLock then
+                    local pd = State.PlayerData or ResolvePlayerData()
+                    local kb = pd and pd.Data and pd.Data.KilledBosses
+                    local killedAt = type(kb) == "table" and tonumber(kb[mode]) or nil
+                    if killedAt and tStart and killedAt >= tStart then
+                        alreadyKilled = true
+                    end
+                end
+                open = windowOpen and (not alreadyKilled)
+                rem = (alreadyKilled or not windowOpen)
+                    and math.max(0, tonumber(tRem) or math.max(0, (tStart + cfg.SpawnInterval) - TimeUtil.GetUTC()))
+                    or math.max(0, dur - elapsed)
             end
-            info = { isBoss = true, open = open and not eventClosed, remainingSec = rem, cfg = cfg }
+            info = { isBoss = true, open = open and not eventClosed, alreadyKilled = alreadyKilled, remainingSec = rem, cfg = cfg }
         end
     end)
     return info
+end
+
+function RaidEngine.IsInAbyssRun()
+    if workspace:GetAttribute("AbyssRun") == true then return true end
+    if tonumber(workspace:GetAttribute("AbyssFloor")) ~= nil then return true end
+    return false
+end
+
+function RaidEngine.GetCurrentAbyssFloor()
+    local attrFloor = tonumber(workspace:GetAttribute("AbyssFloor"))
+    if attrFloor and attrFloor > 0 then
+        RaidEngine.CurrentFloor = attrFloor
+        return attrFloor
+    end
+    if RaidEngine.IsInAbyssRun() then
+        local hudFloor = nil
+        pcall(function()
+            local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+            local r = pg and pg:FindFirstChild("Raid")
+            local inf = r and r:FindFirstChild("InfoFrame")
+            local cw = inf and inf:FindFirstChild("CurrentWave")
+            if cw and type(cw.Text) == "string" then
+                hudFloor = tonumber(cw.Text:match("FLOOR%s*(%d+)"))
+            end
+        end)
+        if hudFloor and hudFloor > 0 then
+            RaidEngine.CurrentFloor = hudFloor
+            return hudFloor
+        end
+        if (RaidEngine.CurrentWave or 0) > 0 then
+            if (RaidEngine.CurrentFloor or 0) < RaidEngine.CurrentWave then
+                RaidEngine.CurrentFloor = RaidEngine.CurrentWave
+            end
+            return RaidEngine.CurrentFloor
+        end
+    end
+    return RaidEngine.CurrentFloor or 0
+end
+
+function RaidEngine.IsAbyssCardOfferOpen()
+    local isOpen = false
+    pcall(function()
+        local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+        local ac = pg and pg:FindFirstChild("AbyssCards")
+        local ov = ac and ac:FindFirstChild("Overlay")
+        if ov and ov.Visible then
+            isOpen = true
+        end
+    end)
+    return isOpen
+end
+
+function RaidEngine.ShouldStopAbyss(floorNum, isClearedCardOffer)
+    if not ScriptRunning or not Config.AutoRaid then return false end
+    local stopFloor = math.floor(tonumber(Config.AbyssStopFloor) or 0)
+    if stopFloor <= 0 or not RaidEngine.IsInAbyssRun() then return false end
+    if RaidEngine.PendingAbyssLeave then return true end
+    local f = tonumber(floorNum) or RaidEngine.GetCurrentAbyssFloor() or 0
+    if isClearedCardOffer then
+        -- CardOffer fires after clearing `f`, right before entering `f + 1` (e.g. clearing Floor 5 -> next is Floor 6)
+        return (f + 1) >= stopFloor or f >= stopFloor
+    end
+    return f >= stopFloor
 end
 
 function RaidEngine.IsInActiveRun()
@@ -10210,7 +12865,72 @@ function RaidEngine.IsInActiveRun()
     if RaidEngine.RaidPlaceSet[game.PlaceId] then return true end
     if (RaidEngine.CurrentWave or 0) > 0 and not RaidEngine.IsEnded then return true end
     if RaidEngine.GetActiveBossArena() ~= nil then return true end
+    if RaidEngine.IsInGuildIsland() then
+        local gbs = RaidEngine.GuildBossState
+        if gbs and gbs.State == "Fighting" then return true end
+        if RaidEngine.IsNearActiveBossMob(550) then return true end
+    end
     return false
+end
+
+function RaidEngine.IsAsuraYieldSupported()
+    if Config.AutoAsuraToTower then
+        return true
+    end
+    return RaidEngine.NormalizeMode(Config.RaidMode) == "Asura's Incarnate"
+end
+
+function RaidEngine.ShouldPauseMiningForRaid()
+    if not Config.AutoMineYieldToBoss or not Config.AutoRaid or not RaidEngine.IsAsuraYieldSupported() then
+        return false
+    end
+    if State.IsInRaid or RaidEngine.IsInActiveRun() or RaidEngine.GetActiveBossArena() ~= nil then
+        return true
+    end
+    if RaidEngine.StrandedSince ~= nil or State.IsBuyingHealthPotions then
+        return true
+    end
+    if os.clock() < (RaidEngine.ArenaLoadingUntil or 0) then
+        return true
+    end
+    if RaidEngine.LastPartyActivateAt and (os.clock() - RaidEngine.LastPartyActivateAt) < 15.0 then
+        return true
+    end
+    if Config.RaidAutoCreateStart then
+        local effMode = select(1, RaidEngine.ResolveEffectiveMode())
+        local bossInfo = RaidEngine.GetBossWindowInfo(effMode)
+        local onCd = os.clock() < ((RaidEngine.BossCooldownUntil and RaidEngine.BossCooldownUntil[effMode]) or 0)
+        if bossInfo then
+            return (bossInfo.open == true) and (not onCd)
+        end
+        -- When AutoAsuraToTower reached target tickets and switches to Tower Of Hell, pause mining to run Tower
+        if Config.AutoAsuraToTower and effMode == "Tower Of Hell" then
+            return true
+        end
+        return false
+    end
+    return false
+end
+
+-- True only when RaidEngine is actively running or about to enter a raid/boss right now (allows AutoBuyPotions while waiting on boss cooldowns or out of Tower tickets)
+function RaidEngine.IsBusyForShop()
+    if State.IsInRaid or State.IsBuyingHealthPotions or State.IsMovingToRaidPad then return true end
+    if RaidEngine.IsInActiveRun() or RaidEngine.GetActiveBossArena() ~= nil then return true end
+    if RaidEngine.StrandedSince ~= nil or os.clock() < (RaidEngine.ArenaLoadingUntil or 0) then return true end
+    if RaidEngine.LastPartyActivateAt and (os.clock() - RaidEngine.LastPartyActivateAt) < 15.0 then return true end
+    if not Config.AutoRaid or not Config.RaidAutoCreateStart then return false end
+    local effMode = select(1, RaidEngine.ResolveEffectiveMode())
+    if effMode == "Tower Of Hell" then
+        return RaidEngine.GetRaidTicketCount() >= 1
+    end
+    local bossInfo = RaidEngine.GetBossWindowInfo(effMode)
+    if bossInfo then
+        if bossInfo.alreadyKilled or not bossInfo.open then return false end
+        local cdUntil = (RaidEngine.BossCooldownUntil and RaidEngine.BossCooldownUntil[effMode]) or 0
+        if os.clock() < cdUntil then return false end
+        return true
+    end
+    return true
 end
 
 function RaidEngine.GetPartyState()
@@ -10288,6 +13008,10 @@ function RaidEngine.ScoreCard(cardId, strategy)
     if ownedCount > 0 and rarity ~= "Fusion" then
         bonus = bonus + 4
     end
+    -- Always prioritize Green (Abyssal) cards above all other rarities while preserving relative ranking on Milestone floors
+    if rarity == "Abyssal" then
+        bonus = bonus + 250
+    end
     return base + bonus, (meta and meta.name) or (live and live.Name) or ("Card " .. tostring(cardId)), rarity
 end
 
@@ -10332,24 +13056,26 @@ function RaidEngine.HandleCardOffer(offer)
     return false
 end
 
-function RaidEngine.FindClosestRaidEnemy()
+function RaidEngine.FindClosestRaidEnemy(expandedScan)
     if not State.HRP then return nil end
     local hrpPos = State.HRP.Position
     local now = os.clock()
+    local maxHoriz = expandedScan and 1200 or 450
+    local maxVert = expandedScan and 400 or 160
     -- Prioritize unshielded adds/minions (e.g. Crystal Centipede, Abyssal Watcher) whenever a Boss is immune/shielded
-    local bestNormalMob, bestNormalDist = nil, 450 -- Stay inside current floor arena; adjacent floor slots are 3,000 studs across void
-    local bestShieldedMob, bestShieldedDist = nil, 450
+    local bestNormalMob, bestNormalDist = nil, maxHoriz
+    local bestShieldedMob, bestShieldedDist = nil, maxHoriz
     local function scanContainer(root)
         if not root then return end
         for _, m in ipairs(root:GetChildren()) do
             if CombatEngine.IsHostileMob(m) then
-                local bl = RaidEngine.BlacklistedMobs[m]
+                local bl = (not expandedScan) and RaidEngine.BlacklistedMobs[m]
                 if not bl or now >= bl then
                     local mHRP = m:FindFirstChild("HumanoidRootPart") or m:FindFirstChildWhichIsA("BasePart")
                     if mHRP then
                         local voidLimit = (workspace.FallenPartsDestroyHeight or -500) + 60
                         local d = (mHRP.Position - hrpPos).Magnitude
-                        if d <= 450 and mHRP.Position.Y > voidLimit and math.abs(mHRP.Position.Y - hrpPos.Y) <= 160 then
+                        if d <= maxHoriz and mHRP.Position.Y > voidLimit and math.abs(mHRP.Position.Y - hrpPos.Y) <= maxVert then
                             if CombatEngine.IsBossShielded(m) then
                                 if d < bestShieldedDist then
                                     bestShieldedDist = d
@@ -10420,7 +13146,7 @@ function RaidEngine.BreakBossShieldPumpkin()
         standPos = Vector3.new(floorHit.Position.X, floorHit.Position.Y + NavEngine.GetCharacterStandOffset(), floorHit.Position.Z)
     end
     if (State.HRP.Position - bestPart.Position).Magnitude > 9.0 then
-        NavEngine.NavigateTo(CFrame.lookAt(standPos, bestPart.Position), false)
+        NavEngine.NavigateTo(NavEngine.SafeLookAt(standPos, bestPart.Position), false)
     end
     if Remotes.ToolActivated and (State.HRP.Position - bestPart.Position).Magnitude <= 12.0 then
         pcall(function() Remotes.ToolActivated:InvokeServer("Pickaxe", false) end)
@@ -10499,6 +13225,9 @@ function RaidEngine.CollectHealOrb(orbPart)
     local orbRoot = (orbPart.Parent and orbPart.Parent.Name == "HealOrb") and orbPart.Parent or orbPart
     CombatEngine.ClearStanceLock()
     CombatEngine.LastEngagedMob = nil
+    -- Release any active Sky-Anchor pin before gliding down to grab the HealOrb
+    RaidEngine.SkyAnchorCF = nil
+    RaidEngine.SafeRegenCF = nil
     if State.HRP.Anchored then State.HRP.Anchored = false end
     State.Humanoid.AutoRotate = true
     local ok = NavEngine.NavigateTo(CFrame.new(orbPart.Position + Vector3.new(0, 1.0, 0)), false)
@@ -10658,31 +13387,138 @@ function RaidEngine.GetSafeRegenSpot()
     else
         local arena, aCF, aSz = RaidEngine.GetActiveBossArena()
         if arena and aCF and aSz then
-            local marginX = math.max(25, math.min(aSz.X * 0.42, 110))
-            local marginZ = math.max(25, math.min(aSz.Z * 0.42, 110))
-            safeX = math.clamp(safeX, aCF.Position.X - marginX, aCF.Position.X + marginX)
-            safeZ = math.clamp(safeZ, aCF.Position.Z - marginZ, aCF.Position.Z + marginZ)
+            -- Keep Boss Arena Top Regen well INWARD toward center (never perched on outer walls where boss dash/lunge clips into the void!)
+            local bSpawn = arena:FindFirstChild("BossSpawnLocation", true)
+            local cX = (bSpawn and bSpawn:IsA("BasePart") and bSpawn.Position.X) or aCF.Position.X
+            local cZ = (bSpawn and bSpawn:IsA("BasePart") and bSpawn.Position.Z) or aCF.Position.Z
+            local b = NavEngine and NavEngine.GetBossPlayableBounds and NavEngine.GetBossPlayableBounds(arena, aCF, aSz)
+            if b then
+                cX = (b.minX + b.maxX) * 0.5
+                cZ = (b.minZ + b.maxZ) * 0.5
+                local innerPadX = math.max(26, (b.maxX - b.minX) * 0.28)
+                local innerPadZ = math.max(26, (b.maxZ - b.minZ) * 0.28)
+                local loX = math.min(b.minX + innerPadX, cX)
+                local hiX = math.max(b.maxX - innerPadX, cX)
+                local loZ = math.min(b.minZ + innerPadZ, cZ)
+                local hiZ = math.max(b.maxZ - innerPadZ, cZ)
+                safeX = math.clamp(safeX, loX, hiX)
+                safeZ = math.clamp(safeZ, loZ, hiZ)
+            else
+                local marginX = math.max(12, math.min(aSz.X * 0.22, 42))
+                local marginZ = math.max(12, math.min(aSz.Z * 0.22, 42))
+                safeX = math.clamp(safeX, cX - marginX, cX + marginX)
+                safeZ = math.clamp(safeZ, cZ - marginZ, cZ + marginZ)
+            end
             maxOuterCapY = aCF.Position.Y + (aSz.Y * 0.48)
         end
     end
 
-    local safeY = targetTopY
-    if maxOuterCapY then
-        safeY = math.min(safeY, maxOuterCapY - 6.0)
+    -- Raycast straight up from arena floor to detect solid Boss Arena / Raid roofs (e.g. Island4BossArena ceiling at Y=163.1)
+    local ceilHit = workspace:Raycast(Vector3.new(safeX, baseFloorY + 6.0, safeZ), Vector3.new(0, 180, 0), floorRp)
+    if ceilHit and ceilHit.Instance and ceilHit.Instance.CanCollide and ceilHit.Position.Y > baseFloorY + 25.0 then
+        local physCap = ceilHit.Position.Y - 2.0
+        if not maxOuterCapY or physCap < maxOuterCapY then
+            maxOuterCapY = physCap
+        end
     end
-    safeY = math.max(safeY, hrpPos.Y + 55)
+
+    -- Apply outer ceiling clamp LAST so hrpPos.Y + 55 can NEVER push the player above a solid Boss Arena roof!
+    local safeY = math.max(targetTopY, hrpPos.Y + 55)
+    if maxOuterCapY then
+        safeY = math.min(safeY, maxOuterCapY - 8.0)
+    end
+    safeY = math.max(safeY, baseFloorY + 28.0)
     return CFrame.new(safeX, safeY, safeZ), false
 end
 
-function RaidEngine.LeaveRun()
-    RaidEngine.LastLeaveAttempt = os.clock()
+function RaidEngine.ClearHealAnchor(unanchor)
+    local wasAnchored = (RaidEngine.SkyAnchorCF ~= nil) or RaidEngine.RecoveringHP
     RaidEngine.RecoveringHP = false
     RaidEngine.SafeRegenCF = nil
+    RaidEngine.SkyAnchorCF = nil
+    if unanchor and State.HRP and (wasAnchored or State.HRP.Anchored) then
+        State.HRP.Anchored = false
+        State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+    end
+    if unanchor and State.Humanoid then
+        State.Humanoid.AutoRotate = true
+    end
+    if NavEngine and type(NavEngine.RestoreCharacterVisibility) == "function" then
+        pcall(NavEngine.RestoreCharacterVisibility, false)
+    end
+end
+
+function RaidEngine.InvokeAbyssLeave(fromCardOffer)
+    RaidEngine.LastLeaveAttempt = os.clock()
+    RaidEngine.AsuraState = "IDLE"
+    RaidEngine.ClearHealAnchor(true)
     CombatEngine.ActiveStanceCF = nil
-    if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
-    if State.Humanoid then State.Humanoid.AutoRotate = true end
-    if RaidEngine.IsInActiveRun() then
-        if Remotes.AbyssLeave then
+
+    local leftViaUI = false
+    if fromCardOffer or RaidEngine.IsAbyssCardOfferOpen() then
+        pcall(function()
+            local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+            local ac = pg and pg:FindFirstChild("AbyssCards")
+            local ov = ac and ac:FindFirstChild("Overlay")
+            local panel = ov and ov:FindFirstChild("Panel")
+            local leaveBtn = panel and panel:FindFirstChild("Leave")
+            if ov and ov.Visible and leaveBtn and typeof(firesignal) == "function" then
+                local lbl = leaveBtn:FindFirstChild("Label")
+                if not lbl or lbl.Text ~= "Sure? Leave" then
+                    firesignal(leaveBtn.Activated)
+                    task.wait(0.05)
+                end
+                firesignal(leaveBtn.Activated)
+                task.wait(0.15)
+                if not ov.Visible then
+                    leftViaUI = true
+                end
+            end
+        end)
+    end
+
+    if leftViaUI then
+        return true, true
+    end
+
+    local ok, res = false, nil
+    if Remotes.AbyssLeave then
+        ok, res = pcall(function() return Remotes.AbyssLeave:InvokeServer() end)
+    end
+
+    -- Clean up AbyssCards overlay & camera dim if we bypassed the UI Leave button directly
+    if ok and res ~= false and (fromCardOffer or RaidEngine.IsAbyssCardOfferOpen()) then
+        pcall(function()
+            local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+            local ac = pg and pg:FindFirstChild("AbyssCards")
+            local ov = ac and ac:FindFirstChild("Overlay")
+            if ov and ov.Visible then ov.Visible = false end
+            local sg = pg and pg:FindFirstChild("StatusGui")
+            if sg and sg.Enabled == false then sg.Enabled = true end
+            local cam = workspace.CurrentCamera
+            local dim = cam and cam:FindFirstChild("AbyssCardsDim")
+            if dim then dim:Destroy() end
+        end)
+    end
+
+    return ok, res
+end
+
+function RaidEngine.LeaveRun(abyssStopOnly)
+    RaidEngine.LastLeaveAttempt = os.clock()
+    RaidEngine.AsuraState = "IDLE"
+    RaidEngine.ClearHealAnchor(true)
+    CombatEngine.ActiveStanceCF = nil
+    if RaidEngine.IsInGuildIsland() then
+        if Remotes.GuildLeave then
+            pcall(function() return Remotes.GuildLeave:InvokeServer() end)
+        end
+    elseif abyssStopOnly and RaidEngine.IsInAbyssRun() then
+        return RaidEngine.InvokeAbyssLeave(false)
+    elseif RaidEngine.IsInActiveRun() then
+        if RaidEngine.IsInAbyssRun() then
+            RaidEngine.InvokeAbyssLeave(false)
+        elseif Remotes.AbyssLeave then
             pcall(function() return Remotes.AbyssLeave:InvokeServer() end)
         end
         if Remotes.RaidGoToIsland then
@@ -10727,7 +13563,7 @@ end
 
 
 function RaidEngine.MoveToPartySpot(padPos, maxDist, modeLabel, isAuto)
-    if not padPos or not State.HRP or not State.Humanoid then return false end
+    if not padPos or not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return false end
     if isAuto and (not Config.AutoRaid or not Config.RaidAutoCreateStart) then return false end
     local safeRadius = math.max(3.0, math.min(maxDist or 6, 8) - 2.0)
     local dist = (padPos - State.HRP.Position).Magnitude
@@ -10736,11 +13572,48 @@ function RaidEngine.MoveToPartySpot(padPos, maxDist, modeLabel, isAuto)
         return false
     end
     if dist > safeRadius then
-        if State.HRP.Anchored then State.HRP.Anchored = false end
+        -- Hold Mining/Combat off BEFORE waypoint teleport & throughout pad approach so MiningLoop never tugs us back mid-warp!
+        State.IsMovingToRaidPad = true
+        RaidEngine.PartyLaunchHoldUntil = os.clock() + 6.0
+        State.TargetRock = nil
+        State.CurrentRock = nil
+        State.TargetMob = nil
+        if NavEngine then NavEngine.CachedRock = nil end
+        if CombatEngine then CombatEngine.ClearStanceLock() end
+        if State.HRP.Anchored then
+            if MiningEngine and MiningEngine.SafeUnanchor then
+                MiningEngine.SafeUnanchor()
+            else
+                State.HRP.Anchored = false
+            end
+        end
         State.Humanoid.AutoRotate = true
-        RaidEngine.StatusText = "Gliding to " .. tostring(modeLabel or "Party") .. " Spot..."
-        local ok = NavEngine.NavigateTo(CFrame.new(padPos + Vector3.new(0, 2.0, 0)), not isAuto)
-        if not ok or not State.HRP then return false end
+
+        -- Use unlocked island waypoint shortcut for Asura's Temple instead of climbing cliffs across the map
+        if dist > 140 and modeLabel == "Asura's Incarnate" and TeleportEngine
+            and type(TeleportEngine.IsWaypointUnlocked) == "function"
+            and TeleportEngine.IsWaypointUnlocked("Asura's Temple") then
+            RaidEngine.StatusText = "Warping to Asura's Temple..."
+            pcall(TeleportEngine.TeleportToWaypoint, "Asura's Temple")
+            task.wait(0.35)
+            if not State.HRP then
+                State.IsMovingToRaidPad = false
+                return false
+            end
+            dist = (padPos - State.HRP.Position).Magnitude
+        end
+
+        if dist > safeRadius then
+            RaidEngine.StatusText = "Gliding to " .. tostring(modeLabel or "Party") .. " Spot..."
+            local ok = NavEngine.NavigateTo(CFrame.new(padPos + Vector3.new(0, 2.0, 0)), true)
+            State.IsMovingToRaidPad = false
+            if not ok or not State.HRP then
+                return false
+            end
+        else
+            State.IsMovingToRaidPad = false
+        end
+        RaidEngine.PartyLaunchHoldUntil = os.clock() + 4.5
     end
     if isAuto and (not Config.AutoRaid or not Config.RaidAutoCreateStart) then return false end
     -- Settle right on the pad so server proximity validation always passes
@@ -10758,20 +13631,136 @@ function RaidEngine.CreateAndStartParty(mode, tier, activateNow, isAuto)
         return false, "Idle"
     end
     local now = os.clock()
-    if (now - (RaidEngine.LastPartyAction or 0)) < 2.8 then
-        return false, RaidEngine.StatusText or "Preparing Party..."
+    if (now - (RaidEngine.LastPartyAction or 0)) < 2.4 then
+        return false, RaidEngine.LastPartyMsg or "Preparing Party..."
     end
     RaidEngine.LastPartyAction = now
 
     if RaidEngine.IsInActiveRun() then return false, "Already in Run" end
 
+    local function runPreRunHealthPotGate()
+        if not Config.RaidAutoBuyHealthPots then return "ok", nil end
+        local pe = State.PotionEngine
+        if not pe or type(pe.EnsureHealthPotionsStock) ~= "function" then return "ok", nil end
+        local targetHpStock = math.clamp(math.floor(tonumber(Config.RaidHealthPotStock) or 5), 1, 10)
+        local ownedHp = (type(pe.GetTotalHealthPotionsOwned) == "function") and pe.GetTotalHealthPotionsOwned() or 0
+        if ownedHp >= targetHpStock then
+            RaidEngine.HpGateRetryCount = 0
+            return "ok", nil
+        end
+
+        local sinceArena = RaidEngine.LastBossArenaAt and (os.clock() - RaidEngine.LastBossArenaAt) or 999
+        if RaidEngine.IsInActiveRun()
+            or RaidEngine.GetActiveBossArena() ~= nil
+            or RaidEngine.IsNearActiveBossMob(450)
+            or os.clock() < (RaidEngine.ArenaLoadingUntil or 0)
+            or sinceArena < 1.5 then
+            return "wait", "Settling before Health Potion restock..."
+        end
+
+        RaidEngine.StatusText = string.format("Restocking Health Potions (%d/%d)...", ownedHp, targetHpStock)
+        local bought, reason = pe.EnsureHealthPotionsStock(targetHpStock, false)
+        local nowOwned = (type(pe.GetTotalHealthPotionsOwned) == "function") and pe.GetTotalHealthPotionsOwned() or (ownedHp + (bought or 0))
+        if nowOwned >= targetHpStock then
+            RaidEngine.HpGateRetryCount = 0
+            if bought > 0 then
+                RaidEngine.StatusText = string.format("Restocked Health Potions (%d/%d)", nowOwned, targetHpStock)
+                task.wait(0.2)
+                if isAuto and (not Config.AutoRaid or not Config.RaidAutoCreateStart) then
+                    return "stop", "Stopped"
+                end
+            end
+            return "ok", nil
+        elseif reason == "no_gold" or reason == "stash_full" then
+            RaidEngine.HpGateRetryCount = 0
+            return "ok", nil
+        elseif reason == "busy" or reason == "settling" or reason == "cooldown" then
+            return "wait", "Waiting to restock Health Potions..."
+        elseif (RaidEngine.HpGateRetryCount or 0) < 3 then
+            -- Never walk into Asura/Tower/Abyss/Guild half-stocked if a partial purchase or glide interrupt left us below targetHpStock!
+            RaidEngine.HpGateRetryCount = (RaidEngine.HpGateRetryCount or 0) + 1
+            return "wait", string.format("Topping up Health Potions (%d/%d)...", nowOwned, targetHpStock)
+        end
+        RaidEngine.HpGateRetryCount = 0
+        return "ok", nil
+    end
+
+    -- Guild Boss (Fallen Guardian / Rotating Guild Golem Boss on Guild Island)
+    if mode == "Guild Boss" then
+        if not RaidEngine.IsInGuildIsland() then
+            -- Restock Health Potions on Main Island BEFORE traveling to Guild Island
+            local gateState, gateMsg = runPreRunHealthPotGate()
+            if gateState == "wait" or gateState == "stop" then
+                return false, gateMsg
+            end
+            if not Remotes.GuildTravel then
+                return false, "GuildService unavailable"
+            end
+            if (now - (RaidEngine.LastGuildTravelAt or 0)) < 16.0 then
+                return false, string.format("Guild Travel CD (%ds)", math.ceil(16.0 - (now - (RaidEngine.LastGuildTravelAt or 0))))
+            end
+            RaidEngine.LastGuildTravelAt = now
+            if Config.AutoExecOnTeleport and MiscEngine and type(MiscEngine.QueueOnTeleportNow) == "function" then
+                pcall(MiscEngine.QueueOnTeleportNow, false)
+            end
+            local okT, resT = pcall(function() return Remotes.GuildTravel:InvokeServer() end)
+            if okT and resT ~= false then
+                return true, "Traveling to Guild Island..."
+            end
+            return false, "Join a Guild first (or Travel on cooldown)"
+        end
+
+        local gbs = RaidEngine.RefreshGuildBossState(true)
+        if not gbs then
+            return false, "Waiting for Guild Boss state..."
+        end
+        local srvNow = (tonumber(gbs.Now) or os.time()) + (os.clock() - (RaidEngine.GuildBossStateAt or os.clock()))
+        if gbs.State == "Fighting" then
+            return true, "Guild Boss Fighting!"
+        elseif gbs.State == "Countdown" then
+            local rem = math.max(0, math.ceil((tonumber(gbs.CountdownEndsAt) or srvNow) - srvNow))
+            return true, string.format("Guild Boss Awakening (%ds)...", rem)
+        elseif gbs.Defeated then
+            if Config.GuildBossAutoLeaveAfterKill and gbs.ChestClaimed and Remotes.GuildLeave then
+                if Config.AutoExecOnTeleport and MiscEngine and type(MiscEngine.QueueOnTeleportNow) == "function" then
+                    pcall(MiscEngine.QueueOnTeleportNow, false)
+                end
+                pcall(function() Remotes.GuildLeave:InvokeServer() end)
+                return true, "Guild Boss Defeated -> Leaving Guild Island..."
+            end
+            local remSec = math.max(0, math.floor((tonumber(gbs.ResetsAt) or srvNow) - srvNow))
+            local hrs = math.floor(remSec / 3600)
+            local mins = math.floor((remSec % 3600) / 60)
+            return false, string.format("Guild Boss Defeated (Resets in %dh %dm)", hrs, mins)
+        elseif srvNow < (tonumber(gbs.RetryAt) or 0) then
+            return false, string.format("Guild Boss Resting (%ds)", math.ceil((tonumber(gbs.RetryAt) or srvNow) - srvNow))
+        elseif gbs.CanSummon and Remotes.GuildSummonBoss then
+            if (now - (RaidEngine.LastGuildSummonAt or 0)) >= 6.0 then
+                RaidEngine.LastGuildSummonAt = now
+                local okS, resS = pcall(function() return Remotes.GuildSummonBoss:InvokeServer() end)
+                task.delay(0.6, function() pcall(RaidEngine.RefreshGuildBossState, true) end)
+                if okS and resS ~= false then
+                    return true, "Summoning Guild Boss!"
+                end
+            end
+            return false, "Summoning Guild Boss..."
+        else
+            return false, "Waiting for Officer/Leader to summon Guild Boss..."
+        end
+    end
+
     if mode == "Abyss" and not RaidEngine.IsInAbyssLobby() then
+        -- Enter Abyss Lobby FIRST — once inside Abyss Lobby, runPreRunHealthPotGate() buys directly from the Abyss Lobby potion stand!
         if Remotes.AbyssEnter and (now - (RaidEngine.LastEnterAttempt or 0)) >= 5.0 then
             RaidEngine.LastEnterAttempt = now
+            RaidEngine.AbyssEnteringUntil = now + 2.5
+            if Config.AutoExecOnTeleport and MiscEngine and type(MiscEngine.QueueOnTeleportNow) == "function" then
+                pcall(MiscEngine.QueueOnTeleportNow, false)
+            end
             pcall(function() return Remotes.AbyssEnter:InvokeServer() end)
             return true, "Entering Abyss Lobby..."
         end
-        return false, "Wait AbyssEnter"
+        return false, "Entering Abyss Lobby..."
     elseif mode ~= "Abyss" and RaidEngine.IsInAbyssLobby() then
         local prox = workspace:FindFirstChild("Proximity")
         local retStand = prox and prox:FindFirstChild("AbyssReturn")
@@ -10819,21 +13808,38 @@ function RaidEngine.CreateAndStartParty(mode, tier, activateNow, isAuto)
     end
     RaidEngine.StrandedSince = nil
 
-    -- Pre-run Health Potion restock in Abyss Lobby / Island before walking to the gate and starting
-    if Config.RaidAutoBuyHealthPots
-        and not RaidEngine.IsInActiveRun()
-        and not RaidEngine.GetActiveBossArena()
-        and not RaidEngine.IsNearActiveBossMob(450)
-        and os.clock() >= (RaidEngine.ArenaLoadingUntil or 0)
-        and (not RaidEngine.LastBossArenaAt or (os.clock() - RaidEngine.LastBossArenaAt) >= 8.0)
-        and (not RaidEngine.LastPartyActivateAt or (os.clock() - RaidEngine.LastPartyActivateAt) >= 15.0)
-        and State.PotionEngine
-        and type(State.PotionEngine.EnsureHealthPotionsStock) == "function" then
-        local bought = State.PotionEngine.EnsureHealthPotionsStock(Config.RaidHealthPotStock or 5)
-        if bought > 0 then
-            RaidEngine.StatusText = string.format("Bought Health Potions x%d", bought)
-            task.wait(0.2)
-            if isAuto and (not Config.AutoRaid or not Config.RaidAutoCreateStart) then return false, "Stopped" end
+    if mode == "Tower Of Hell" and RaidEngine.GetRaidTicketCount() <= 0 then
+        return false, "No Raid Tickets (0) — farm Asura first"
+    end
+
+    local bossInfo = RaidEngine.GetBossWindowInfo(mode)
+    if bossInfo and bossInfo.alreadyKilled then
+        -- If not yielding to AutoMine, pre-restock Health Potions during Asura cooldown so we're ready on spawn
+        if not (Config.AutoMine and Config.AutoMineYieldToBoss) then
+            local gateState, gateMsg = runPreRunHealthPotGate()
+            if gateState == "wait" or gateState == "stop" then
+                return false, gateMsg
+            end
+        end
+        local waitSec = math.ceil(bossInfo.remainingSec or 0)
+        local prefix = (Config.AutoMine and Config.AutoMineYieldToBoss and RaidEngine.IsAsuraYieldSupported()) and "Mining" or "Cooldown"
+        return false, string.format("%s (%s defeated — next in %ds)", prefix, tostring(mode), waitSec)
+    end
+    if Config.AutoMine and Config.AutoMineYieldToBoss and RaidEngine.IsAsuraYieldSupported() then
+        local cdUntil = (RaidEngine.BossCooldownUntil and RaidEngine.BossCooldownUntil[mode]) or 0
+        if os.clock() < cdUntil then
+            return false, string.format("Mining (%s CD %ds)", tostring(mode), math.ceil(cdUntil - os.clock()))
+        end
+        if bossInfo and not bossInfo.open then
+            return false, string.format("Mining (%s in %ds)", tostring(mode), math.ceil(bossInfo.remainingSec or 0))
+        end
+    end
+
+    -- Strict Pre-Run Health Potion Gate: ALWAYS restock (or settle first after Boss Arena) before moving to Asura / Tower / Abyss pad
+    do
+        local gateState, gateMsg = runPreRunHealthPotGate()
+        if gateState == "wait" or gateState == "stop" then
+            return false, gateMsg
         end
     end
 
@@ -10880,21 +13886,105 @@ function RaidEngine.CreateAndStartParty(mode, tier, activateNow, isAuto)
             return false, "Aligning at party spot..."
         end
         if isAuto and (not Config.AutoRaid or not Config.RaidAutoCreateStart) then return false, "Stopped" end
+        if Config.AutoExecOnTeleport and (mode == "Tower Of Hell" or mode == "Abyss") and MiscEngine and type(MiscEngine.QueueOnTeleportNow) == "function" then
+            pcall(MiscEngine.QueueOnTeleportNow, false)
+        end
         RaidEngine.LastPartyActivateAt = os.clock()
+        RaidEngine.PartyLaunchHoldUntil = os.clock() + 6.0
+        RaidEngine.LastActivatedMode = mode
         local okCall, res = pcall(function() return Remotes.PartyActivate:InvokeServer() end)
-        return okCall and (res ~= false), (okCall and res ~= false) and ("Starting " .. tostring(mode) .. "...") or "Waiting at Party Spot..."
+        local started = okCall and (res ~= false) and not (type(res) == "table" and res.Success == false)
+        if started then
+            RaidEngine.BossActivateFails = 0
+            return true, "Starting " .. tostring(mode) .. "..."
+        else
+            RaidEngine.LastPartyActivateAt = nil
+            RaidEngine.PartyLaunchHoldUntil = 0
+            RaidEngine.BossActivateFails = (RaidEngine.BossActivateFails or 0) + 1
+            if bossInfo and bossInfo.isBoss and RaidEngine.BossActivateFails >= 2 then
+                RaidEngine.BossActivateFails = 0
+                local nextWait = 30.0
+                pcall(function()
+                    local TimeUtil = safeRequire(ReplicatedStorage.Shared.Utils.TimeUtil)
+                    if TimeUtil and bossInfo.cfg and bossInfo.cfg.SpawnInterval then
+                        local _, remSec = TimeUtil.GetTimeUntilNextInterval(bossInfo.cfg.SpawnInterval)
+                        if type(remSec) == "number" and remSec > 5 then
+                            nextWait = math.min(remSec + 2.0, 600.0)
+                        end
+                    end
+                end)
+                RaidEngine.BossCooldownUntil[mode] = os.clock() + nextWait
+                return false, string.format("%s on Cooldown (%ds)", tostring(mode), math.ceil(nextWait))
+            end
+            return false, "Waiting at Party Spot..."
+        end
     end
     return pState.inParty, pState.inParty and ("Party Ready: " .. tostring(mode)) or "Waiting Party"
 end
 
--- Event hooks for Abyss & Raid lifecycle (Tier 2 raw RE, cleanup tracked automatically)
+-- Event hooks for Abyss & Raid lifecycle (Tier 2 raw RE + Tier 3 Workspace attribute, cleanup tracked automatically)
 do
+    -- Seed initial AbyssFloor if script executed mid-run and listen for live floor attribute transitions
+    local initAbyssFloor = tonumber(workspace:GetAttribute("AbyssFloor"))
+    if initAbyssFloor and initAbyssFloor > 0 then
+        RaidEngine.CurrentFloor = initAbyssFloor
+    end
+    trackConn(workspace:GetAttributeChangedSignal("AbyssFloor"):Connect(function()
+        local f = tonumber(workspace:GetAttribute("AbyssFloor"))
+        if f and f > 0 then
+            RaidEngine.CurrentFloor = f
+            RaidEngine.IsEnded = false
+            CombatEngine.ClearStanceLock()
+            CombatEngine.LastEngagedMob = nil
+            -- Release previous floor's sky anchor so server floor teleport never gets rubberbanded back to old room
+            if RaidEngine.SkyAnchorCF or RaidEngine.SafeRegenCF then
+                RaidEngine.SkyAnchorCF = nil
+                RaidEngine.SafeRegenCF = nil
+                if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
+                if State.Humanoid then State.Humanoid.AutoRotate = true end
+            end
+        elseif f == nil then
+            RaidEngine.CurrentFloor = 0
+            RaidEngine.PendingAbyssLeave = false
+            RaidEngine.LastMidFloorLeaveFloor = 0
+            RaidEngine.MidFloorLeaveWaitUntil = 0
+            if RaidEngine.RecoveringHP or RaidEngine.SkyAnchorCF then
+                RaidEngine.ClearHealAnchor(true)
+            end
+        end
+    end))
+
     if Remotes.AbyssCardOffer and Remotes.AbyssCardOffer:IsA("RemoteEvent") then
         trackConn(Remotes.AbyssCardOffer.OnClientEvent:Connect(function(offer)
-            if not ScriptRunning or not Config.AutoPickAbyssCards then return end
+            if not ScriptRunning then return end
+            local clearedFloor = (type(offer) == "table" and tonumber(offer.Floor)) or RaidEngine.GetCurrentAbyssFloor() or 0
+            if clearedFloor > 0 then
+                RaidEngine.CurrentFloor = math.max(RaidEngine.CurrentFloor or 0, clearedFloor)
+            end
+            -- Priority: Stop & Leave at Target Floor BEFORE Auto-Pick Cards can advance to the next floor
+            if RaidEngine.ShouldStopAbyss(clearedFloor, true) then
+                RaidEngine.PendingAbyssLeave = false
+                task.spawn(function()
+                    task.wait(0.28)
+                    if not ScriptRunning or not Config.AutoRaid or RaidEngine.IsEnded then return end
+                    local stopFloor = math.floor(tonumber(Config.AbyssStopFloor) or 0)
+                    RaidEngine.StatusText = string.format("Cleared Floor %d (Stop %d) -> Leaving Abyss!", clearedFloor, stopFloor)
+                    RaidEngine.Notify("Auto Abyss", string.format("Cleared Floor %d (Stop Floor %d) -> Leaving Abyss!", clearedFloor, stopFloor), 3.5)
+                    if (os.clock() - (RaidEngine.LastLeaveAttempt or 0)) >= 1.0 then
+                        RaidEngine.InvokeAbyssLeave(true)
+                    end
+                    -- Safety retry if server hasn't fired RaidEnded yet (e.g. transient busy state)
+                    task.wait(1.35)
+                    if ScriptRunning and Config.AutoRaid and not RaidEngine.IsEnded and RaidEngine.IsInAbyssRun() and RaidEngine.ShouldStopAbyss(clearedFloor, true) then
+                        RaidEngine.InvokeAbyssLeave(true)
+                    end
+                end)
+                return
+            end
+            if not Config.AutoPickAbyssCards then return end
             task.spawn(function()
                 task.wait(0.18)
-                if ScriptRunning and Config.AutoPickAbyssCards then
+                if ScriptRunning and Config.AutoPickAbyssCards and not RaidEngine.ShouldStopAbyss(clearedFloor, true) then
                     RaidEngine.HandleCardOffer(offer)
                 end
             end)
@@ -10914,27 +14004,44 @@ do
     end
     if Remotes.AbyssProgress and Remotes.AbyssProgress:IsA("RemoteEvent") then
         trackConn(Remotes.AbyssProgress.OnClientEvent:Connect(function(prog)
+            RaidEngine.IsEnded = false
             CombatEngine.ClearStanceLock()
             CombatEngine.LastEngagedMob = nil
-            if type(prog) == "table" and tonumber(prog.Floor) then
-                RaidEngine.CurrentFloor = tonumber(prog.Floor)
-            elseif tonumber(prog) then
-                RaidEngine.CurrentFloor = tonumber(prog)
+            if RaidEngine.SkyAnchorCF or RaidEngine.SafeRegenCF then
+                RaidEngine.SkyAnchorCF = nil
+                RaidEngine.SafeRegenCF = nil
+                if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
+                if State.Humanoid then State.Humanoid.AutoRotate = true end
             end
-            if ScriptRunning and Config.AutoRaid and (Config.AbyssStopFloor or 0) > 0 and (RaidEngine.CurrentFloor or 0) >= Config.AbyssStopFloor then
-                if (os.clock() - (RaidEngine.LastLeaveAttempt or 0)) >= 4.0 then
-                    RaidEngine.Notify("Auto Abyss", "Reached Target Floor " .. tostring(RaidEngine.CurrentFloor) .. " -> Leaving run!", 3.5)
-                    task.spawn(RaidEngine.LeaveRun)
-                end
+            local parsed = nil
+            if type(prog) == "table" then
+                parsed = tonumber(prog.Floor or prog.floor or prog.CurrentFloor)
+            else
+                parsed = tonumber(prog)
+            end
+            if parsed and parsed > 0 then
+                RaidEngine.CurrentFloor = parsed
             end
         end))
     end
     if Remotes.RaidCurrentWave and Remotes.RaidCurrentWave:IsA("RemoteEvent") then
         trackConn(Remotes.RaidCurrentWave.OnClientEvent:Connect(function(w)
-            if tonumber(w) then RaidEngine.CurrentWave = tonumber(w) end
+            local wn = tonumber(w)
+            if wn then
+                RaidEngine.CurrentWave = wn
+                if RaidEngine.IsInAbyssRun() then
+                    RaidEngine.CurrentFloor = wn
+                end
+            end
             RaidEngine.IsEnded = false
             CombatEngine.ClearStanceLock()
             CombatEngine.LastEngagedMob = nil
+            if RaidEngine.SkyAnchorCF or RaidEngine.SafeRegenCF then
+                RaidEngine.SkyAnchorCF = nil
+                RaidEngine.SafeRegenCF = nil
+                if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
+                if State.Humanoid then State.Humanoid.AutoRotate = true end
+            end
         end))
     end
     if Remotes.RaidEnemiesLeft and Remotes.RaidEnemiesLeft:IsA("RemoteEvent") then
@@ -10959,6 +14066,7 @@ do
     end
     if Remotes.BossArenaLoading and Remotes.BossArenaLoading:IsA("RemoteEvent") then
         trackConn(Remotes.BossArenaLoading.OnClientEvent:Connect(function()
+            RaidEngine.IsEnded = false
             RaidEngine.ArenaLoadingUntil = os.clock() + 15.0
             if State.IsBuyingHealthPotions and NavEngine then
                 NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
@@ -10968,9 +14076,23 @@ do
     if Remotes.RaidEnded and Remotes.RaidEnded:IsA("RemoteEvent") then
         trackConn(Remotes.RaidEnded.OnClientEvent:Connect(function(data)
             RaidEngine.IsEnded = true
+            RaidEngine.PendingAbyssLeave = false
+            RaidEngine.LastMidFloorLeaveFloor = 0
+            RaidEngine.MidFloorLeaveWaitUntil = 0
             RaidEngine.ArenaLoadingUntil = 0
-            if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
-            if State.Humanoid then State.Humanoid.AutoRotate = true end
+            RaidEngine.LastPartyActivateAt = nil
+            RaidEngine.AsuraState = "IDLE"
+            RaidEngine.ClearHealAnchor(true)
+            CombatEngine.ClearStanceLock()
+            local noRetry = type(data) == "table" and type(data.Summary) == "table" and data.Summary.NoRetry
+            if noRetry then
+                local endedMode = RaidEngine.LastActivatedMode or RaidEngine.NormalizeMode(Config.RaidMode)
+                local bInfo = RaidEngine.GetBossWindowInfo(endedMode)
+                if bInfo and bInfo.isBoss then
+                    local waitSec = (bInfo.open and tonumber(bInfo.remainingSec) and bInfo.remainingSec > 0) and (bInfo.remainingSec + 2.0) or 15.0
+                    RaidEngine.BossCooldownUntil[endedMode] = os.clock() + waitSec
+                end
+            end
             if Config.WebhookEnabled and Config.WebhookNotifyRaidRewards and WebhookEngine and type(WebhookEngine.SendRaidRewardsReport) == "function" then
                 task.spawn(function()
                     task.wait(0.65) -- Allow server chest/run rewards to replicate into PlayerData
@@ -10978,25 +14100,52 @@ do
                 end)
             end
             if not ScriptRunning or not Config.AutoRaid then return end
-            local noRetry = type(data) == "table" and type(data.Summary) == "table" and data.Summary.NoRetry
             local isLeader = type(data) ~= "table" or data.Leader == nil or data.Leader == LocalPlayer.UserId
             task.spawn(function()
                 task.wait(0.85)
                 if not ScriptRunning or not Config.AutoRaid then return end
+                local pe = State.PotionEngine
+                local inTowerPlace = RaidEngine.RaidPlaceSet and RaidEngine.RaidPlaceSet[game.PlaceId] == true
+                local hpCount = (pe and type(pe.GetTotalHealthPotionsOwned) == "function") and pe.GetTotalHealthPotionsOwned() or 1
+                local targetHpStock = math.clamp(math.floor(tonumber(Config.RaidHealthPotStock) or 5), 1, 10)
+                local pd = State.PlayerData or ResolvePlayerData()
+                local curGold = (pd and pd.Data and tonumber(pd.Data.Gold)) or 0
+                -- In Tower of Hell / Abyss sub-place (no shop inside), return to Island whenever below Target Health Potion Stock
+                local needIslandRestock = inTowerPlace and Config.RaidAutoBuyHealthPots and (hpCount < targetHpStock) and curGold >= 350
+
+                local function goToIslandWithQueue()
+                    if Config.AutoExecOnTeleport and MiscEngine and type(MiscEngine.QueueOnTeleportNow) == "function" then
+                        pcall(MiscEngine.QueueOnTeleportNow, false)
+                    end
+                    pcall(function() return Remotes.RaidGoToIsland:InvokeServer() end)
+                end
+
                 if Config.AutoAsuraToTower then
                     local tCount = RaidEngine.GetRaidTicketCount()
-                    if tCount >= 1 and Config.AutoRaidRetry and not noRetry and isLeader and Remotes.RaidRetry then
+                    if needIslandRestock and Config.AutoExecOnTeleport and Remotes.RaidGoToIsland then
+                        goToIslandWithQueue()
+                        RaidEngine.Notify("Auto Raid", string.format("Health Potions %d/%d -> Returning to Island to restock!", hpCount, targetHpStock), 3.5)
+                    elseif tCount >= 1 and Config.AutoRaidRetry and not noRetry and isLeader and Remotes.RaidRetry then
+                        if needIslandRestock then
+                            RaidEngine.Notify("Auto Raid", string.format("Health Potions %d/%d (enable Auto-Execute on Teleport to restock on Island)", hpCount, targetHpStock), 3.5)
+                        end
                         pcall(function() return Remotes.RaidRetry:InvokeServer() end)
                         RaidEngine.Notify("Auto Raid", string.format("Run ended (%d ticket%s left) -> Retrying Tower!", tCount, tCount == 1 and "" or "s"), 3.0)
                     elseif Remotes.RaidGoToIsland then
-                        pcall(function() return Remotes.RaidGoToIsland:InvokeServer() end)
+                        goToIslandWithQueue()
                         RaidEngine.Notify("Auto Raid", "Out of Raid Tickets -> Returning to Island to farm Asura!", 3.0)
                     end
+                elseif needIslandRestock and Config.AutoExecOnTeleport and Remotes.RaidGoToIsland then
+                    goToIslandWithQueue()
+                    RaidEngine.Notify("Auto Raid", string.format("Health Potions %d/%d -> Returning to Island to restock!", hpCount, targetHpStock), 3.5)
                 elseif Config.AutoRaidRetry and not noRetry and isLeader and Remotes.RaidRetry then
+                    if needIslandRestock then
+                        RaidEngine.Notify("Auto Raid", string.format("Health Potions %d/%d (enable Auto-Execute on Teleport to restock on Island)", hpCount, targetHpStock), 3.5)
+                    end
                     pcall(function() return Remotes.RaidRetry:InvokeServer() end)
                     RaidEngine.Notify("Auto Raid", "Run ended -> Retrying!", 3.0)
                 elseif not Config.AutoRaidRetry and Remotes.RaidGoToIsland then
-                    pcall(function() return Remotes.RaidGoToIsland:InvokeServer() end)
+                    goToIslandWithQueue()
                 end
             end)
         end))
@@ -11006,6 +14155,9 @@ do
             RaidEngine.IsEnded = false
             RaidEngine.CurrentWave = 0
             RaidEngine.CurrentFloor = 0
+            RaidEngine.PendingAbyssLeave = false
+            RaidEngine.LastMidFloorLeaveFloor = 0
+            RaidEngine.MidFloorLeaveWaitUntil = 0
             table.clear(RaidEngine.CrossedGates)
             table.clear(RaidEngine.OpenedChests)
             table.clear(RaidEngine.OwnedCards)
@@ -11018,6 +14170,370 @@ do
             end
         end))
     end
+    if Remotes.GuildBossChanged and Remotes.GuildBossChanged:IsA("RemoteEvent") then
+        trackConn(Remotes.GuildBossChanged.OnClientEvent:Connect(function()
+            task.delay(0.5, function()
+                if ScriptRunning and RaidEngine.IsInGuildIsland() then
+                    pcall(RaidEngine.RefreshGuildBossState, true)
+                end
+            end)
+        end))
+    end
+end
+
+-- Dedicated Heartbeat Sky-Anchor pin: while HEALING in the sky, keeps HRP strictly Anchored at SkyAnchorCF so gravity/knockback/game scripts can NEVER drop the player!
+trackConn(RunService.Heartbeat:Connect(function()
+    if not ScriptRunning then return end
+    if RaidEngine.SkyAnchorCF then
+        local validActive = Config.AutoRaid and RaidEngine.RecoveringHP and not RaidEngine.IsEnded
+            and State.HRP and State.Humanoid and State.Humanoid.Health > 0
+            and NavEngine.IsValidCF(RaidEngine.SkyAnchorCF)
+        if validActive then
+            if not State.HRP.Anchored then
+                State.HRP.Anchored = true
+            end
+            State.HRP.CFrame = RaidEngine.SkyAnchorCF
+            State.HRP.AssemblyLinearVelocity = Vector3.zero
+            State.HRP.AssemblyAngularVelocity = Vector3.zero
+            if State.Humanoid.AutoRotate then
+                State.Humanoid.AutoRotate = false
+            end
+        else
+            RaidEngine.SkyAnchorCF = nil
+            if State.HRP and State.HRP.Anchored and not State.TargetRock then
+                State.HRP.Anchored = false
+                State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+            end
+            if State.Humanoid then
+                State.Humanoid.AutoRotate = true
+            end
+        end
+    end
+end))
+
+-- Dedicated single-owner Asura / Boss Arena Finite State Machine (mutually exclusive states: DOWNED / HEALING / CUTSCENE / VOID_RECOVERY / EVADING / FIGHTING)
+-- Guarantees zero overlapping loops, zero attacking while healing, inward roof-safe Top Regen, and automatic void-glitched boss recovery.
+function RaidEngine.StepAsuraBossArena(activeArena)
+    if not activeArena then
+        RaidEngine.AsuraState = "IDLE"
+        return 0.10
+    end
+
+    -- Skip boss intro / Phase 2 morph cutscene cleanly whenever active
+    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+    local hasBossCutsceneUI = (pg and pg:FindFirstChild("BossCutscene") ~= nil) or false
+    local reSkip = activeArena:FindFirstChild("RE_SkipCutscene", true)
+    if not reSkip then
+        local baRoot = workspace:FindFirstChild("Assets") and workspace.Assets:FindFirstChild("BossArenas")
+        if baRoot then reSkip = baRoot:FindFirstChild("RE_SkipCutscene", true) end
+    end
+    local skipParent = (reSkip and reSkip.Parent) or activeArena
+    local skipVal = skipParent and skipParent:FindFirstChild("SkipCutscene")
+    if reSkip and reSkip:IsA("RemoteEvent") and (hasBossCutsceneUI or not skipVal or skipVal.Value == false) then
+        if (os.clock() - (RaidEngine.LastBossCutsceneSkip or 0)) >= 0.35 then
+            RaidEngine.LastBossCutsceneSkip = os.clock()
+            pcall(function() reSkip:FireServer() end)
+        end
+    end
+    if hasBossCutsceneUI then
+        RaidEngine.AsuraState = "CUTSCENE"
+        CombatEngine.ClearStanceLock()
+        RaidEngine.StatusText = "Asura [CUTSCENE] Skipping..."
+        return 0.12
+    end
+
+    -- 1. DOWNED state
+    if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then
+        RaidEngine.AsuraState = "DOWNED"
+        RaidEngine.RecoveringHP = false
+        RaidEngine.SafeRegenCF = nil
+        RaidEngine.SkyAnchorCF = nil
+        CombatEngine.ClearStanceLock()
+        CombatEngine.LastEngagedMob = nil
+        CombatEngine.ActiveSkillName = nil
+        CombatEngine.ResetKillWatchdog()
+        if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
+        if State.Humanoid then State.Humanoid.AutoRotate = true end
+        RaidEngine.StatusText = Config.AutoRaidRevive and "Asura [DOWNED] Waiting Revive..." or "Asura [DOWNED]"
+        return 0.25
+    end
+
+    -- 2. HEALING state (Strict hysteresis: once entered at <= enterHp, holds zero-combat sky anchor lock until >= resumeHp!)
+    local isCorrupted = select(1, RaidEngine.GetCorruptedHpInfo())
+    local curHp = State.Humanoid.Health
+    local maxHp = math.max(1, State.Humanoid.MaxHealth)
+    local hpPct = (curHp / maxHp) * 100
+    local enterHp = math.clamp(tonumber(Config.RaidFallbackEnterHP) or 35, 5, 90)
+    local resumeHp = math.max(enterHp + 10, math.clamp(tonumber(Config.RaidFallbackResumeHP) or 85, 20, 100))
+
+    if isCorrupted or not Config.RaidLowHpFallback then
+        if RaidEngine.RecoveringHP or RaidEngine.SkyAnchorCF then
+            RaidEngine.RecoveringHP = false
+            RaidEngine.SafeRegenCF = nil
+            RaidEngine.SkyAnchorCF = nil
+            if State.HRP.Anchored then
+                State.HRP.Anchored = false
+                State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+            end
+            State.Humanoid.AutoRotate = true
+            if not Config.Noclip and not NavEngine.IsGliding then
+                pcall(NavEngine.RestoreCharacterPhysics)
+            end
+            CombatEngine.ResetKillWatchdog()
+        end
+    else
+        if not RaidEngine.RecoveringHP and hpPct <= enterHp then
+            RaidEngine.RecoveringHP = true
+            RaidEngine.SkyAnchorCF = nil
+            RaidEngine.SafeRegenCF = select(1, RaidEngine.GetSafeRegenSpot())
+        elseif RaidEngine.RecoveringHP and hpPct >= resumeHp then
+            RaidEngine.RecoveringHP = false
+            RaidEngine.SafeRegenCF = nil
+            RaidEngine.SkyAnchorCF = nil
+            RaidEngine.AsuraState = "FIGHTING"
+            if State.HRP.Anchored then
+                State.HRP.Anchored = false
+                State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+            end
+            State.Humanoid.AutoRotate = true
+            if not Config.Noclip and not NavEngine.IsGliding then
+                pcall(NavEngine.RestoreCharacterPhysics)
+            end
+            pcall(NavEngine.TouchSolidGroundBriefly, 0.06)
+            CombatEngine.ResetKillWatchdog()
+            CombatEngine.EnsureWeaponEquipped()
+        end
+    end
+
+    if RaidEngine.RecoveringHP then
+        RaidEngine.AsuraState = "HEALING"
+        CombatEngine.ClearStanceLock()
+        CombatEngine.LastEngagedMob = nil
+        CombatEngine.ActiveSkillName = nil
+        CombatEngine.ResetKillWatchdog()
+
+        local safeCF = RaidEngine.SafeRegenCF
+        if not safeCF or (safeCF.Position - State.HRP.Position).Magnitude > 350 then
+            safeCF = select(1, RaidEngine.GetSafeRegenSpot())
+            RaidEngine.SafeRegenCF = safeCF
+        end
+        local PE = State.PotionEngine
+        local potStr = PE and (" | Pots: " .. tostring(PE.GetTotalHealthPotionsOwned())) or ""
+        RaidEngine.StatusText = string.format("Asura [HEALING] %.0f%% -> %.0f%%%s", hpPct, resumeHp, potStr)
+
+        if safeCF and State.HRP then
+            -- Once anchored in the sky, STAY strictly anchored (never unanchor/re-rise every tick!) until HP >= resumeHp
+            if not RaidEngine.SkyAnchorCF then
+                local riseDist = (safeCF.Position - State.HRP.Position).Magnitude
+                if riseDist > 4.0 then
+                    State.Humanoid.AutoRotate = true
+                    if State.HRP.Anchored then State.HRP.Anchored = false end
+                    local riseSpeed = math.clamp(tonumber(Config.GlideSpeed) or 50, 20, 52)
+                    local riseStart = os.clock()
+                    local curP = State.HRP.Position
+                    local prevRisePos = curP
+                    local reachedSafe = false
+                    while ScriptRunning and State.HRP and (os.clock() - riseStart) < 4.5 do
+                        local dt = RunService.Heartbeat:Wait()
+                        if not State.HRP or not Config.AutoRaid or not Config.RaidLowHpFallback or not RaidEngine.RecoveringHP or RaidEngine.IsEnded then break end
+                        if State.Character then
+                            for _, pt in ipairs(State.Character:GetDescendants()) do
+                                if pt:IsA("BasePart") and pt.CanCollide then pt.CanCollide = false end
+                            end
+                        end
+                        local actualP = State.HRP.Position
+                        if (actualP - prevRisePos).Magnitude > 9.0 then
+                            CombatEngine.RubberbandPauseUntil = os.clock() + 0.65
+                            break
+                        end
+                        curP = actualP
+                        local delta = safeCF.Position - curP
+                        local dMag = delta.Magnitude
+                        if dMag <= 2.6 then
+                            State.HRP.CFrame = safeCF
+                            State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+                            reachedSafe = true
+                            break
+                        end
+                        local step = math.min(dMag, riseSpeed * dt, 2.5)
+                        local vel = delta.Unit * math.min(riseSpeed, math.max(20, dMag * 6))
+                        curP = curP + delta.Unit * step
+                        prevRisePos = curP
+                        State.HRP.CFrame = CFrame.new(curP) * safeCF.Rotation
+                        State.HRP.AssemblyLinearVelocity = vel
+                        State.HRP.AssemblyAngularVelocity = Vector3.zero
+                    end
+                    if State.HRP and reachedSafe then
+                        State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+                        task.wait(0.06)
+                    end
+                end
+                if not Config.AutoRaid or not Config.RaidLowHpFallback or not RaidEngine.RecoveringHP or RaidEngine.IsEnded then
+                    RaidEngine.ClearHealAnchor(true)
+                    return 0.15
+                end
+                if State.HRP then
+                    local remToSafe = (safeCF.Position - State.HRP.Position).Magnitude
+                    local anchorCF = (remToSafe <= 3.5) and safeCF or (CFrame.new(State.HRP.Position) * safeCF.Rotation)
+                    -- Lock SkyAnchorCF once we're safely elevated in the sky (within 14 studs of target height)
+                    if remToSafe <= 14.0 or State.HRP.Position.Y >= (safeCF.Position.Y - 14.0) then
+                        RaidEngine.SkyAnchorCF = anchorCF
+                    end
+                    State.Humanoid.AutoRotate = false
+                    State.HRP.CFrame = anchorCF
+                    State.HRP.Anchored = true
+                    State.HRP.AssemblyLinearVelocity = Vector3.zero
+                    State.HRP.AssemblyAngularVelocity = Vector3.zero
+                end
+            else
+                if not Config.AutoRaid or not Config.RaidLowHpFallback or not RaidEngine.RecoveringHP or RaidEngine.IsEnded then
+                    RaidEngine.ClearHealAnchor(true)
+                    return 0.15
+                end
+                State.Humanoid.AutoRotate = false
+                State.HRP.CFrame = RaidEngine.SkyAnchorCF
+                State.HRP.Anchored = true
+                State.HRP.AssemblyLinearVelocity = Vector3.zero
+                State.HRP.AssemblyAngularVelocity = Vector3.zero
+            end
+        end
+
+        -- Drink Health Potion WITHOUT re-equipping Weapon while still in HEALING state!
+        if PE and type(PE.UseBestHealthPotion) == "function" then
+            PE.UseBestHealthPotion(true)
+        end
+        local nowVisHeal = os.clock()
+        if (nowVisHeal - (RaidEngine.LastVisCheckAt or 0)) >= 1.0 then
+            RaidEngine.LastVisCheckAt = nowVisHeal
+            pcall(NavEngine.RestoreCharacterVisibility, false)
+        end
+        return 0.25
+    end
+
+    -- Not healing: guard floor boundary & locate Boss
+    pcall(NavEngine.PreventBossArenaVoidFall)
+    local boss = RaidEngine.FindClosestRaidEnemy(false)
+    if not boss and (Config.RaidBackupKillSwitch ~= false) then
+        RaidEngine.NoEnemySince = RaidEngine.NoEnemySince or os.clock()
+        local stuckTimeout = math.clamp(tonumber(Config.RaidBackupKillTimeout) or 10, 4, 45)
+        if (os.clock() - RaidEngine.NoEnemySince) >= stuckTimeout then
+            table.clear(RaidEngine.BlacklistedMobs)
+            table.clear(CombatEngine.Blacklist)
+            boss = RaidEngine.FindClosestRaidEnemy(true)
+        end
+    else
+        RaidEngine.NoEnemySince = nil
+    end
+
+    -- 3. CUTSCENE / VOID_RECOVERY (no targetable boss with BaseParts)
+    if not boss then
+        CombatEngine.ClearStanceLock()
+        CombatEngine.LastEngagedMob = nil
+        CombatEngine.ActiveSkillName = nil
+        CombatEngine.ResetKillWatchdog()
+        if State.HRP.Anchored then State.HRP.Anchored = false end
+        State.Humanoid.AutoRotate = true
+
+        -- Check for 0-part void-glitched ghost Boss
+        local ghostBoss = nil
+        local living = workspace:FindFirstChild("Living")
+        if living then
+            for _, m in ipairs(living:GetChildren()) do
+                if m:IsA("Model") and m ~= State.Character then
+                    local mh = m:FindFirstChildOfClass("Humanoid")
+                    local ln = string.lower(m.Name)
+                    if mh and mh.Health > 0 and (m:GetAttribute("IsBoss") == true or ln:find("asura", 1, true) or ln:find("incarnate", 1, true) or ln:find("behemoth", 1, true) or ln:find("boss", 1, true)) then
+                        if not m:FindFirstChildWhichIsA("BasePart", true) then
+                            ghostBoss = m
+                            break
+                        end
+                    end
+                end
+            end
+        end
+        if ghostBoss then
+            RaidEngine.AsuraState = "VOID_RECOVERY"
+            RaidEngine.GhostBossSince = RaidEngine.GhostBossSince or os.clock()
+            local ghostAge = os.clock() - RaidEngine.GhostBossSince
+            RaidEngine.StatusText = string.format("Asura [VOID GLITCH %.0fs] Recovering...", ghostAge)
+            if ghostAge >= 8.0 and (os.clock() - (RaidEngine.LastGhostRecoverAt or 0)) >= 12.0 then
+                RaidEngine.LastGhostRecoverAt = os.clock()
+                RaidEngine.GhostBossSince = nil
+                RaidEngine.Notify("Boss Arena Recovery", tostring(ghostBoss.Name) .. " fell into the void (0 parts) -> Exiting arena!", 4.0)
+                if Remotes.RaidGoToIsland then pcall(function() Remotes.RaidGoToIsland:InvokeServer() end) end
+                if Remotes.PartyLeave then pcall(function() Remotes.PartyLeave:InvokeServer() end) end
+                task.delay(2.5, function()
+                    if ScriptRunning and RaidEngine.GetActiveBossArena() ~= nil then
+                        pcall(function() CombatEngine.ResetCharacterNow("Boss void-glitched (0 parts)") end)
+                    end
+                end)
+            end
+        else
+            RaidEngine.GhostBossSince = nil
+            RaidEngine.AsuraState = "CUTSCENE"
+            RaidEngine.StatusText = string.format("Asura [WAITING] (%s)", tostring(activeArena.Name))
+        end
+        return 0.15
+    end
+
+    RaidEngine.GhostBossSince = nil
+    local bHum = boss:FindFirstChildOfClass("Humanoid")
+    local bHRP = boss:FindFirstChild("HumanoidRootPart") or boss:FindFirstChildWhichIsA("BasePart")
+    local bossHpPct = (bHum and bHum.MaxHealth > 0) and ((bHum.Health / bHum.MaxHealth) * 100) or 0
+
+    -- Check if Boss fell beneath arena floor
+    local a, aCF, aSz = RaidEngine.GetActiveBossArena()
+    local bounds = a and NavEngine.GetBossPlayableBounds(a, aCF, aSz)
+    if bHRP and bounds and bHRP.Position.Y < (bounds.minY - 15.0) then
+        RaidEngine.AsuraState = "VOID_RECOVERY"
+        CombatEngine.ClearStanceLock()
+        CombatEngine.ResetKillWatchdog()
+        if State.HRP.Anchored then State.HRP.Anchored = false end
+        pcall(NavEngine.PreventBossArenaVoidFall)
+        RaidEngine.StatusText = string.format("Asura [VOID FALL] Boss HP: %.0f%%", bossHpPct)
+        return 0.12
+    end
+
+    -- Yield cleanly if AutoUsePotions is actively mid-drink
+    if State.IsUsingPotion or State.UsingPotionCycle then
+        RaidEngine.AsuraState = "HEALING"
+        RaidEngine.StatusText = string.format("Asura [DRINKING POTION] | Boss HP: %.0f%%", bossHpPct)
+        return 0.10
+    end
+
+    -- 4. EVADING vs FIGHTING
+    local activeSkill = (Config.EvadeBossSkills ~= false) and CombatEngine.GetActiveBossSkill(boss) or nil
+    if activeSkill then
+        RaidEngine.AsuraState = "EVADING"
+        CombatEngine.ResetKillWatchdog()
+        RaidEngine.StatusText = string.format("Asura [EVADING: %s] | Boss HP: %.0f%%", tostring(activeSkill.skill), bossHpPct)
+    else
+        RaidEngine.AsuraState = "FIGHTING"
+        if CombatEngine.KillWatchdog and CombatEngine.KillWatchdog.overrideActive then
+            RaidEngine.StatusText = string.format("Asura [BACKUP CLOSE %.1fs] | Boss HP: %.0f%%",
+                os.clock() - (CombatEngine.KillWatchdog.overrideStartedAt or os.clock()),
+                bossHpPct)
+        else
+            RaidEngine.StatusText = string.format("Asura [FIGHTING] | Boss HP: %.0f%%", bossHpPct)
+        end
+    end
+
+    -- Self-heal character limbs if stuck at Transparency = 1 after cutscene/phase transition
+    local nowVis = os.clock()
+    if (nowVis - (RaidEngine.LastVisCheckAt or 0)) >= 1.0 then
+        RaidEngine.LastVisCheckAt = nowVis
+        pcall(NavEngine.RestoreCharacterVisibility, false)
+    end
+
+    if CombatEngine.IsBossShielded(boss) and RaidEngine.BreakBossShieldPumpkin() then
+        return 0.08
+    end
+    local okEng, atkDelay = CombatEngine.EngageTargetMob(boss, { blacklistOnFail = false, isRaid = true })
+    if not okEng then
+        RaidEngine.BlacklistedMobs[boss] = os.clock() + 3.0
+        return 0.10
+    end
+    return atkDelay or 0.08
 end
 
 -- Main Raid / Abyss Automation Loop
@@ -11033,6 +14549,13 @@ task.spawn(function()
             if inRun then
                 loopDelay = 0.10
                 local activeArena = RaidEngine.GetActiveBossArena()
+                -- Dedicated single-owner Boss Arena FSM (Asura / Island Boss Arenas) — completely isolated from Abyss/Tower loop!
+                if activeArena and not RaidEngine.IsInAbyssRun() then
+                    loopDelay = RaidEngine.StepAsuraBossArena(activeArena)
+                    task.wait(loopDelay)
+                    continue
+                end
+                RaidEngine.AsuraState = "IDLE"
                 local skipRoot = activeArena or (workspace:FindFirstChild("Assets") and workspace.Assets:FindFirstChild("BossArenas"))
                 if skipRoot then
                     local reSkip = skipRoot:FindFirstChild("RE_SkipCutscene", true)
@@ -11045,9 +14568,11 @@ task.spawn(function()
                         end
                     end
                 end
-                if activeArena then
+                if activeArena and not RaidEngine.RecoveringHP then
                     pcall(NavEngine.PreventBossArenaVoidFall)
                 end
+                local inAbyssRun = RaidEngine.IsInAbyssRun()
+                local liveFloor = inAbyssRun and RaidEngine.GetCurrentAbyssFloor() or (RaidEngine.CurrentFloor or 0)
                 if (os.clock() - lastStatusTick) >= 0.6 then
                     lastStatusTick = os.clock()
                     if activeArena then
@@ -11060,21 +14585,46 @@ task.spawn(function()
                             and (" | EVADING: " .. tostring(CombatEngine.ActiveSkillName))
                             or ""
                         RaidEngine.StatusText = string.format("Boss Arena (%s)%s%s", tostring(activeArena.Name), hpTxt, skillTxt)
+                    elseif inAbyssRun and RaidEngine.PendingAbyssLeave and not RaidEngine.IsEnded then
+                        RaidEngine.StatusText = string.format("In Abyss | Floor %d (Finishing -> Auto Leave)%s",
+                            liveFloor,
+                            RaidEngine.EnemiesLeft and (" | Enemies: " .. tostring(RaidEngine.EnemiesLeft)) or "")
                     else
                         RaidEngine.StatusText = string.format("In Run | Floor %d | Wave %d%s",
-                            RaidEngine.CurrentFloor or 0,
+                            liveFloor,
                             RaidEngine.CurrentWave or 0,
                             RaidEngine.EnemiesLeft and (" | Enemies: " .. tostring(RaidEngine.EnemiesLeft)) or "")
                     end
                 end
 
-                if (Config.AbyssStopFloor or 0) > 0 and (RaidEngine.CurrentFloor or 0) >= Config.AbyssStopFloor then
-                    if (os.clock() - (RaidEngine.LastLeaveAttempt or 0)) >= 4.0 then
-                        RaidEngine.StatusText = "Leaving at Floor " .. tostring(RaidEngine.CurrentFloor) .. "..."
-                        RaidEngine.LeaveRun()
+                local stopFloor = math.floor(tonumber(Config.AbyssStopFloor) or 0)
+                if inAbyssRun and not RaidEngine.IsEnded and stopFloor > 0 and liveFloor >= stopFloor then
+                    if RaidEngine.IsAbyssCardOfferOpen() then
+                        if (os.clock() - (RaidEngine.LastLeaveAttempt or 0)) >= 2.0 then
+                            RaidEngine.StatusText = "Leaving Abyss at Floor " .. tostring(liveFloor) .. "..."
+                            RaidEngine.InvokeAbyssLeave(true)
+                        end
+                        task.wait(0.35)
+                        continue
+                    elseif RaidEngine.LastMidFloorLeaveFloor ~= liveFloor then
+                        -- Attempt immediate leave once for this floor; if server only allows Leave on the Card screen,
+                        -- flag PendingAbyssLeave and keep fighting so we leave the instant CardOffer opens.
+                        RaidEngine.LastMidFloorLeaveFloor = liveFloor
+                        RaidEngine.PendingAbyssLeave = true
+                        RaidEngine.MidFloorLeaveWaitUntil = os.clock() + 1.5
+                        RaidEngine.StatusText = "Leaving Abyss at Floor " .. tostring(liveFloor) .. "..."
+                        RaidEngine.Notify("Auto Abyss", "Reached Stop Floor " .. tostring(liveFloor) .. " -> Leaving Abyss!", 3.5)
+                        local okLeave, leaveRes = RaidEngine.InvokeAbyssLeave(false)
+                        if okLeave and leaveRes ~= false then
+                            task.wait(0.4)
+                            continue
+                        else
+                            RaidEngine.MidFloorLeaveWaitUntil = 0
+                        end
+                    elseif os.clock() < (RaidEngine.MidFloorLeaveWaitUntil or 0) then
+                        task.wait(0.25)
+                        continue
                     end
-                    task.wait(0.4)
-                    continue
                 end
 
                 if State.HRP and State.Humanoid and State.Humanoid.Health > 0 and not State.IsAutoForging and not State.IsCrafting and not State.IsBuyingPotions then
@@ -11090,26 +14640,27 @@ task.spawn(function()
                     if Config.AbyssCollectHealOrbs and needsOrbHeal then
                         local orb = RaidEngine.FindBestHealOrb(280)
                         if orb then
-                            RaidEngine.RecoveringHP = false
+                            local wasRecovering = RaidEngine.RecoveringHP
+                            RaidEngine.SkyAnchorCF = nil
                             RaidEngine.SafeRegenCF = nil
+                            if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
                             RaidEngine.StatusText = string.format("Collecting HealOrb (HP %.0f%%)", effHpPct)
                             collectedOrb = RaidEngine.CollectHealOrb(orb)
                             curHp = State.Humanoid.Health
                             hpPct = (curHp / maxHp) * 100
                             effHpPct = (curHp / effectiveMaxHp) * 100
+                            if wasRecovering then
+                                local enterHpCheck = math.clamp(tonumber(Config.RaidFallbackEnterHP) or 35, 5, 90)
+                                local resumeHpCheck = math.max(enterHpCheck + 10, math.clamp(tonumber(Config.RaidFallbackResumeHP) or 85, 20, 100))
+                                RaidEngine.RecoveringHP = (hpPct < resumeHpCheck)
+                            end
                         end
                     end
 
                     -- 2. If Boss applied purple/frozen HP corruption (e.g. Galaxite Behemoth), skip sky regen and fight the boss directly!
                     if isCorrupted then
-                        if RaidEngine.RecoveringHP then
-                            RaidEngine.RecoveringHP = false
-                            RaidEngine.SafeRegenCF = nil
-                            if State.HRP and State.HRP.Anchored then
-                                State.HRP.Anchored = false
-                                State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
-                            end
-                            if State.Humanoid then State.Humanoid.AutoRotate = true end
+                        if RaidEngine.RecoveringHP or RaidEngine.SkyAnchorCF then
+                            RaidEngine.ClearHealAnchor(true)
                             if not Config.Noclip and not NavEngine.IsGliding then
                                 NavEngine.RestoreCharacterPhysics()
                             end
@@ -11122,10 +14673,12 @@ task.spawn(function()
 
                         if not RaidEngine.RecoveringHP and hpPct <= enterHp then
                             RaidEngine.RecoveringHP = true
+                            RaidEngine.SkyAnchorCF = nil
                             RaidEngine.SafeRegenCF = select(1, RaidEngine.GetSafeRegenSpot())
                         elseif RaidEngine.RecoveringHP and hpPct >= resumeHp then
                             RaidEngine.RecoveringHP = false
                             RaidEngine.SafeRegenCF = nil
+                            RaidEngine.SkyAnchorCF = nil
                             if State.HRP and State.HRP.Anchored then
                                 State.HRP.Anchored = false
                                 State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
@@ -11134,66 +14687,101 @@ task.spawn(function()
                             if not Config.Noclip and not NavEngine.IsGliding then
                                 NavEngine.RestoreCharacterPhysics()
                             end
+                            pcall(NavEngine.TouchSolidGroundBriefly, 0.06)
+                            CombatEngine.ResetKillWatchdog()
                             CombatEngine.EnsureWeaponEquipped()
                         end
 
                         if RaidEngine.RecoveringHP then
                             CombatEngine.ClearStanceLock()
                             CombatEngine.LastEngagedMob = nil
+                            CombatEngine.ResetKillWatchdog()
                             local safeCF = RaidEngine.SafeRegenCF
                             if not safeCF or (safeCF.Position - State.HRP.Position).Magnitude > 350 then
                                 safeCF = select(1, RaidEngine.GetSafeRegenSpot())
                                 RaidEngine.SafeRegenCF = safeCF
+                                RaidEngine.SkyAnchorCF = nil
                             end
                             local PE = State.PotionEngine
                             local potStr = PE and (" | Pots: " .. tostring(PE.GetTotalHealthPotionsOwned())) or ""
                             RaidEngine.StatusText = string.format("Top Regen (HP %.0f%% -> %.0f%%%s)", hpPct, resumeHp, potStr)
 
                             if safeCF and State.HRP then
-                                local riseDist = (safeCF.Position - State.HRP.Position).Magnitude
-                                if riseDist > 4.0 then
-                                    -- Fly unanchored with live physics velocity so Roblox replicates our new high/far position to the server
-                                    State.Humanoid.AutoRotate = true
-                                    if State.HRP.Anchored then
-                                        State.HRP.Anchored = false
-                                    end
-                                    local riseSpeed = math.max(Config.GlideSpeed or 55, 75)
-                                    local riseStart = os.clock()
-                                    local curP = State.HRP.Position
-                                    while ScriptRunning and State.HRP and (os.clock() - riseStart) < 4.5 do
-                                        local dt = RunService.Heartbeat:Wait()
-                                        if not State.HRP or not Config.AutoRaid or not Config.RaidLowHpFallback then break end
-                                        if State.Character then
-                                            for _, pt in ipairs(State.Character:GetDescendants()) do
-                                                if pt:IsA("BasePart") and pt.CanCollide then pt.CanCollide = false end
+                                if not RaidEngine.SkyAnchorCF then
+                                    local riseDist = (safeCF.Position - State.HRP.Position).Magnitude
+                                    if riseDist > 4.0 then
+                                        -- Fly unanchored with live physics velocity so Roblox replicates our new high/far position to the server
+                                        State.Humanoid.AutoRotate = true
+                                        if State.HRP.Anchored then
+                                            State.HRP.Anchored = false
+                                        end
+                                        local riseSpeed = math.clamp(tonumber(Config.GlideSpeed) or 50, 20, 54)
+                                        local riseStart = os.clock()
+                                        local curP = State.HRP.Position
+                                        local prevRisePos = curP
+                                        local reachedSafe = false
+                                        while ScriptRunning and State.HRP and (os.clock() - riseStart) < 4.5 do
+                                            local dt = RunService.Heartbeat:Wait()
+                                            if not State.HRP or not Config.AutoRaid or not Config.RaidLowHpFallback or not RaidEngine.RecoveringHP or RaidEngine.IsEnded then break end
+                                            if State.Character then
+                                                for _, pt in ipairs(State.Character:GetDescendants()) do
+                                                    if pt:IsA("BasePart") and pt.CanCollide then pt.CanCollide = false end
+                                                end
                                             end
+                                            local actualP = State.HRP.Position
+                                            if (actualP - prevRisePos).Magnitude > 9.0 then
+                                                -- Server rubberband during rise: abort cleanly instead of fighting anti-TP
+                                                CombatEngine.RubberbandPauseUntil = os.clock() + 0.65
+                                                break
+                                            end
+                                            curP = actualP
+                                            local delta = safeCF.Position - curP
+                                            local dMag = delta.Magnitude
+                                            if dMag <= 2.6 then
+                                                curP = safeCF.Position
+                                                State.HRP.CFrame = safeCF
+                                                State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+                                                reachedSafe = true
+                                                break
+                                            end
+                                            local step = math.min(dMag, riseSpeed * dt, 2.5)
+                                            local vel = delta.Unit * math.min(riseSpeed, math.max(20, dMag * 6))
+                                            curP = curP + delta.Unit * step
+                                            prevRisePos = curP
+                                            State.HRP.CFrame = CFrame.new(curP) * safeCF.Rotation
+                                            State.HRP.AssemblyLinearVelocity = vel
+                                            State.HRP.AssemblyAngularVelocity = Vector3.zero
                                         end
-                                        if (State.HRP.Position - curP).Magnitude > 18 then
-                                            curP = State.HRP.Position
-                                        end
-                                        local delta = safeCF.Position - curP
-                                        local dMag = delta.Magnitude
-                                        if dMag <= 3.0 then
-                                            curP = safeCF.Position
-                                            State.HRP.CFrame = safeCF
+                                        if State.HRP and reachedSafe then
                                             State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
-                                            break
+                                            task.wait(0.06) -- Broadphase/network sync before anchoring
                                         end
-                                        local vel = delta.Unit * math.min(riseSpeed, math.max(25, dMag * 8))
-                                        curP = curP + delta.Unit * math.min(dMag, riseSpeed * dt)
-                                        State.HRP.CFrame = CFrame.new(curP) * safeCF.Rotation
-                                        State.HRP.AssemblyLinearVelocity = vel
-                                        State.HRP.AssemblyAngularVelocity = Vector3.zero
+                                    end
+                                    if not Config.AutoRaid or not Config.RaidLowHpFallback or not RaidEngine.RecoveringHP or RaidEngine.IsEnded then
+                                        RaidEngine.ClearHealAnchor(true)
+                                        task.wait(0.15)
+                                        continue
                                     end
                                     if State.HRP then
-                                        State.HRP.CFrame = safeCF
-                                        State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
-                                        task.wait(0.06) -- Broadphase/network sync before anchoring
+                                        local remToSafe = (safeCF.Position - State.HRP.Position).Magnitude
+                                        local anchorCF = (remToSafe <= 3.5) and safeCF or (CFrame.new(State.HRP.Position) * safeCF.Rotation)
+                                        if remToSafe <= 14.0 or State.HRP.Position.Y >= (safeCF.Position.Y - 14.0) then
+                                            RaidEngine.SkyAnchorCF = anchorCF
+                                        end
+                                        State.Humanoid.AutoRotate = false
+                                        State.HRP.CFrame = anchorCF
+                                        State.HRP.Anchored = true
+                                        State.HRP.AssemblyLinearVelocity = Vector3.zero
+                                        State.HRP.AssemblyAngularVelocity = Vector3.zero
                                     end
-                                end
-                                if State.HRP then
+                                else
+                                    if not Config.AutoRaid or not Config.RaidLowHpFallback or not RaidEngine.RecoveringHP or RaidEngine.IsEnded then
+                                        RaidEngine.ClearHealAnchor(true)
+                                        task.wait(0.15)
+                                        continue
+                                    end
                                     State.Humanoid.AutoRotate = false
-                                    State.HRP.CFrame = safeCF
+                                    State.HRP.CFrame = RaidEngine.SkyAnchorCF
                                     State.HRP.Anchored = true
                                     State.HRP.AssemblyLinearVelocity = Vector3.zero
                                     State.HRP.AssemblyAngularVelocity = Vector3.zero
@@ -11201,29 +14789,92 @@ task.spawn(function()
                             end
 
                             if PE and type(PE.UseBestHealthPotion) == "function" then
-                                PE.UseBestHealthPotion()
+                                PE.UseBestHealthPotion(true)
                             end
                             task.wait(0.25)
                             continue
                         end
                     else
-                        RaidEngine.RecoveringHP = false
-                        RaidEngine.SafeRegenCF = nil
+                        if RaidEngine.RecoveringHP or RaidEngine.SkyAnchorCF then
+                            RaidEngine.ClearHealAnchor(true)
+                        end
                     end
 
-                    -- 4. Fight nearest Raid / Abyss enemy (prioritizing minions whenever Boss is shielded/immune!)
+                    -- 4. Fight nearest Raid / Abyss / Guild Boss enemy (with AFK Backup Kill Switch & Expanded Detection)
                     if not collectedOrb then
-                        local enemy = RaidEngine.FindClosestRaidEnemy()
+                        local enemy = RaidEngine.FindClosestRaidEnemy(false)
+                        if not enemy and (Config.RaidBackupKillSwitch ~= false) and ((RaidEngine.EnemiesLeft or 0) > 0 or activeArena ~= nil or RaidEngine.IsInGuildIsland()) then
+                            RaidEngine.NoEnemySince = RaidEngine.NoEnemySince or os.clock()
+                            local stuckTimeout = math.clamp(tonumber(Config.RaidBackupKillTimeout) or 10, 4, 45)
+                            if (os.clock() - RaidEngine.NoEnemySince) >= stuckTimeout then
+                                table.clear(RaidEngine.BlacklistedMobs)
+                                table.clear(CombatEngine.Blacklist)
+                                enemy = RaidEngine.FindClosestRaidEnemy(true)
+                                if enemy then
+                                    RaidEngine.StatusText = "Backup Kill Switch -> Force-Locking Stray NPC!"
+                                end
+                            end
+                        else
+                            RaidEngine.NoEnemySince = nil
+                        end
+
+                        -- Detect void-glitched Boss (e.g. Asura flung below FallenPartsDestroyHeight: alive Humanoid with 0 BaseParts)
+                        if not enemy and activeArena ~= nil then
+                            local ghostBoss = nil
+                            local living = workspace:FindFirstChild("Living")
+                            if living then
+                                for _, m in ipairs(living:GetChildren()) do
+                                    if m:IsA("Model") and m ~= State.Character then
+                                        local mh = m:FindFirstChildOfClass("Humanoid")
+                                        local ln = string.lower(m.Name)
+                                        if mh and mh.Health > 0 and (m:GetAttribute("IsBoss") == true or ln:find("asura", 1, true) or ln:find("incarnate", 1, true) or ln:find("behemoth", 1, true) or ln:find("boss", 1, true)) then
+                                            if not m:FindFirstChildWhichIsA("BasePart", true) then
+                                                ghostBoss = m
+                                                break
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                            if ghostBoss then
+                                RaidEngine.GhostBossSince = RaidEngine.GhostBossSince or os.clock()
+                                local ghostAge = os.clock() - RaidEngine.GhostBossSince
+                                RaidEngine.StatusText = string.format("Boss Void-Glitched (0 parts, %.0fs)...", ghostAge)
+                                if ghostAge >= 8.0 and (os.clock() - (RaidEngine.LastGhostRecoverAt or 0)) >= 12.0 then
+                                    RaidEngine.LastGhostRecoverAt = os.clock()
+                                    RaidEngine.GhostBossSince = nil
+                                    RaidEngine.Notify("Boss Arena Recovery", tostring(ghostBoss.Name) .. " fell into the void (0 parts) -> Exiting arena!", 4.0)
+                                    if Remotes.RaidGoToIsland then pcall(function() Remotes.RaidGoToIsland:InvokeServer() end) end
+                                    if Remotes.PartyLeave then pcall(function() Remotes.PartyLeave:InvokeServer() end) end
+                                    task.delay(2.5, function()
+                                        if ScriptRunning and RaidEngine.GetActiveBossArena() ~= nil then
+                                            pcall(function() CombatEngine.ResetCharacterNow("Boss void-glitched (0 parts)") end)
+                                        end
+                                    end)
+                                end
+                            else
+                                RaidEngine.GhostBossSince = nil
+                            end
+                        else
+                            RaidEngine.GhostBossSince = nil
+                        end
+
                         if enemy and CombatEngine.IsBossShielded(enemy) and RaidEngine.BreakBossShieldPumpkin() then
                             loopDelay = 0.08
                         elseif enemy then
-                            local ok, atkDelay = CombatEngine.EngageTargetMob(enemy, { blacklistOnFail = false })
+                            local ok, atkDelay = CombatEngine.EngageTargetMob(enemy, { blacklistOnFail = false, isRaid = true })
+                            if CombatEngine.KillWatchdog and CombatEngine.KillWatchdog.overrideActive then
+                                RaidEngine.StatusText = string.format("Backup Kill Switch (Close %.1fs) -> %s",
+                                    os.clock() - (CombatEngine.KillWatchdog.overrideStartedAt or os.clock()),
+                                    tostring(enemy.Name))
+                            end
                             if not ok then
                                 RaidEngine.BlacklistedMobs[enemy] = os.clock() + 4.0
                             else
                                 loopDelay = atkDelay or 0.08
                             end
                         elseif not RaidEngine.BreakBossShieldPumpkin() then
+                            CombatEngine.ResetKillWatchdog()
                             -- 5. Wave transition: release hover lock so server wave/floor teleports are never rubberbanded back to Wave 1
                             CombatEngine.ClearStanceLock()
                             CombatEngine.LastEngagedMob = nil
@@ -11248,16 +14899,19 @@ task.spawn(function()
                         end
                     end
                 elseif State.Humanoid and State.Humanoid.Health <= 0 then
-                    RaidEngine.RecoveringHP = false
+                    RaidEngine.AsuraState = "DOWNED"
+                    RaidEngine.ClearHealAnchor(true)
                     CombatEngine.LastEngagedMob = nil
-                    if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
                     RaidEngine.StatusText = Config.AutoRaidRevive and "Downed - Waiting Revive..." or "Downed"
                 end
             else
-                RaidEngine.RecoveringHP = false
+                RaidEngine.AsuraState = "IDLE"
+                if RaidEngine.RecoveringHP or RaidEngine.SkyAnchorCF then
+                    RaidEngine.ClearHealAnchor(true)
+                end
                 CombatEngine.LastEngagedMob = nil
                 if State.IsInRaid then State.IsInRaid = false end
-                if Config.RaidAutoCreateStart and not State.IsAutoForging and not State.IsCrafting and not State.IsBuyingPotions then
+                if Config.RaidAutoCreateStart and not State.IsAutoForging and not State.IsCrafting and not State.IsBuyingPotions and not State.IsEnhancing then
                     local effMode, curTickets, targetTickets = RaidEngine.ResolveEffectiveMode()
                     if RaidEngine.NormalizeMode(Config.RaidMode) ~= effMode then
                         Config.RaidMode = effMode
@@ -11266,6 +14920,7 @@ task.spawn(function()
                         end
                     end
                     local _, msg = RaidEngine.CreateAndStartParty(effMode, Config.RaidTier, true, true)
+                    RaidEngine.LastPartyMsg = msg or RaidEngine.LastPartyMsg
                     if Config.AutoAsuraToTower then
                         local prefix = (effMode == "Tower Of Hell")
                             and string.format("Tickets %d/%d -> Tower", curTickets or 0, targetTickets or 5)
@@ -11283,6 +14938,10 @@ task.spawn(function()
         else
             if State.IsInRaid or not Config.AutoMobFarm then
                 CombatEngine.ActiveStanceCF = nil
+            end
+            RaidEngine.AsuraState = "IDLE"
+            if RaidEngine.RecoveringHP or RaidEngine.SkyAnchorCF then
+                RaidEngine.ClearHealAnchor(true)
             end
             State.IsInRaid = false
             State.IsBuyingHealthPotions = false
@@ -11305,12 +14964,18 @@ do
         if mfMod and mfMod:IsA("ModuleScript") then
             local mf = require(mfMod)
             if type(mf) == "table" and type(mf.ApplySpeed) == "function" then
-                safeHook(mf, "ApplySpeed", "MovementFeelApplySpeed", function(speed, dt, dashing)
+                local origApplySpeed = nil
+                origApplySpeed = safeHook(mf, "ApplySpeed", "MovementFeelApplySpeed", function(speed, dt, dashing)
                     local adjusted = speed
                     if ScriptRunning and Config.CustomWalkSpeed and type(speed) == "number" and speed > 0 then
                         adjusted = math.max(speed, Config.WalkSpeedValue or 28)
                     end
-                    return OrigHooks["MovementFeelApplySpeed"].orig(adjusted, dt, dashing)
+                    local hk = OrigHooks["MovementFeelApplySpeed"]
+                    local fn = (hk and hk.orig) or origApplySpeed
+                    if type(fn) == "function" then
+                        return fn(adjusted, dt, dashing)
+                    end
+                    return adjusted
                 end)
             end
         end
@@ -11400,11 +15065,15 @@ do
     local wasNoclip = false
     trackConn(RunService.Stepped:Connect(function()
         local underMapActive = (Config.MobFarmPositionMode == "Under Map")
-            and (Config.AutoMobFarm or Config.AutoRaid)
+            and (Config.AutoMobFarm or Config.AutoRaid or State.InAutoDefense)
             and CombatEngine.ActiveStanceCF ~= nil
         local hoverActive = (CombatEngine and CombatEngine.HoverLockActive == true)
-            and (Config.AutoMobFarm or Config.AutoRaid)
-        local shouldNoclip = Config.Noclip or (NavEngine and NavEngine.IsGliding) or underMapActive or hoverActive
+            and (Config.AutoMobFarm or Config.AutoRaid or State.InAutoDefense)
+        local sunkenMining = Config.AutoMine and MiningEngine and MiningEngine.ActiveSunkenCF ~= nil
+        local defenseSkyRegen = State.InDefenseRegen and MiningEngine and MiningEngine.DefenseSkyAnchorCF ~= nil
+        local airPotionDrink = State.InAirPotionDrink and State.PotionEngine and State.PotionEngine.DrinkSkyAnchorCF ~= nil
+        local isAlive = State.Humanoid and State.Humanoid.Health > 0
+        local shouldNoclip = isAlive and (Config.Noclip or (NavEngine and NavEngine.IsGliding) or underMapActive or hoverActive or sunkenMining or defenseSkyRegen or airPotionDrink)
         if shouldNoclip and State.Character then
             wasNoclip = true
             for _, part in ipairs(State.Character:GetDescendants()) do
@@ -11439,7 +15108,7 @@ local function ApplyFullbright(enable)
     end
 end
 
-local MiscEngine = {
+MiscEngine = {
     SavedFogProps = {},
     SavedGfxProps = {},
     ClaimStatusLabel = nil,
@@ -11529,77 +15198,21 @@ end
 MiscEngine.DefaultLoaderCode = 'loadstring(game:HttpGet("https://getaether.cc/loader.lua"))()'
 
 function MiscEngine.ResolveAutoExecPayload()
-    local genv = (typeof(getgenv) == "function" and getgenv()) or nil
-    local raw = tostring(Config.AutoExecLoader or ""):match("^%s*(.-)%s*$")
-    local sourceLabel = "Custom Loader"
-
-    if raw == "" then
-        local globalCandidate = (genv and (genv.__AetherAutoExec or genv.__AetherLoaderCode or genv.__AetherLoaderUrl))
-            or (_G and (_G.__AetherAutoExec or _G.__AetherLoaderCode or _G.__AetherLoaderUrl))
-            or (shared and (shared.__AetherAutoExec or shared.__AetherLoaderCode or shared.__AetherLoaderUrl))
-        if type(globalCandidate) == "string" and globalCandidate ~= "" then
-            raw = globalCandidate:match("^%s*(.-)%s*$")
-            sourceLabel = "Loader Global"
-        end
-    end
-
-    if raw == "" and typeof(readfile) == "function" then
-        local hasLocal = false
-        pcall(function()
-            hasLocal = (typeof(isfile) == "function" and isfile("TheForge.lua")) or false
-        end)
-        if hasLocal then
-            local wrapped = table.concat({
-                "task.spawn(function()",
-                "    if typeof(getgenv) == 'function' and getgenv().__AetherAutoExecEnabled == false then return end",
-                "    if not game:IsLoaded() then pcall(function() game.Loaded:Wait() end) end",
-                "    local Players = game:GetService('Players')",
-                "    while not Players.LocalPlayer do task.wait(0.1) end",
-                "    task.wait(0.8)",
-                "    if typeof(readfile) == 'function' then",
-                "        local okU, uCode = pcall(readfile, 'UI.lua')",
-                "        if okU and type(uCode) == 'string' and #uCode > 0 then",
-                "            local okUF, uFn = pcall(loadstring, uCode)",
-                "            if okUF and type(uFn) == 'function' then pcall(uFn) end",
-                "        end",
-                "        local okS, sCode = pcall(readfile, 'TheForge.lua')",
-                "        if okS and type(sCode) == 'string' and #sCode > 0 then",
-                "            local okSF, sFn = pcall(loadstring, sCode)",
-                "            if okSF and type(sFn) == 'function' then pcall(sFn) end",
-                "        end",
-                "    end",
-                "end)"
-            }, "\n")
-            return wrapped, "Local Disk (TheForge.lua)"
-        end
-    end
-
-    if raw == "" then
-        raw = MiscEngine.DefaultLoaderCode
-        sourceLabel = "Aether Loader"
-    end
-
-    if raw ~= "" then
-        local innerCode = raw
-        if raw:match("^https?://") then
-            innerCode = string.format('loadstring(game:HttpGet(%q))()', raw)
-        end
-        local wrapped = table.concat({
-            "task.spawn(function()",
-            "    if typeof(getgenv) == 'function' and getgenv().__AetherAutoExecEnabled == false then return end",
-            "    if not game:IsLoaded() then pcall(function() game.Loaded:Wait() end) end",
-            "    local Players = game:GetService('Players')",
-            "    while not Players.LocalPlayer do task.wait(0.1) end",
-            "    task.wait(0.8)",
-            string.format("    if typeof(getgenv) == 'function' then getgenv().__AetherAutoExec = %q end", raw),
-            "    local ok, fn = pcall(loadstring, " .. string.format("%q", innerCode) .. ")",
-            "    if ok and type(fn) == 'function' then pcall(fn) end",
-            "end)"
-        }, "\n")
-        return wrapped, sourceLabel
-    end
-
-    return nil, "None"
+    local innerCode = MiscEngine.DefaultLoaderCode
+    local wrapped = table.concat({
+        "if not game:IsLoaded() then",
+        "    pcall(function() game.Loaded:Wait() end)",
+        "end",
+        "task.spawn(function()",
+        "    if typeof(getgenv) == 'function' and getgenv().__AetherAutoExecEnabled == false then return end",
+        "    local Players = game:GetService('Players')",
+        "    while not Players.LocalPlayer do task.wait(0.1) end",
+        "    task.wait(0.8)",
+        "    local ok, fn = pcall(loadstring, " .. string.format("%q", innerCode) .. ")",
+        "    if ok and type(fn) == 'function' then pcall(fn) end",
+        "end)"
+    }, "\n")
+    return wrapped, "Aether Loader"
 end
 
 function MiscEngine.QueueOnTeleportNow(showNotify)
@@ -12199,21 +15812,57 @@ function WebhookEngine.SendRaidRewardsReport(raidData, isTest)
         return a.name < b.name
     end)
 
+    local statsObj = (type(raidData) == "table" and type(raidData.Stats) == "table") and raidData.Stats or nil
+    local rawMode = (statsObj and type(statsObj.Name) == "string" and statsObj.Name ~= "" and statsObj.Name)
+        or (snap and snap.mode)
+        or (RaidEngine and RaidEngine.FormatModeLabel and RaidEngine.FormatModeLabel(Config.RaidMode))
+        or tostring(Config.RaidMode or "Abyss / Tower")
+    local modeStr = tostring(rawMode)
+    local isTowerOfHell = (string.lower(modeStr):find("tower of hell", 1, true) ~= nil)
+        or (RaidEngine and RaidEngine.RaidPlaceSet and RaidEngine.RaidPlaceSet[game.PlaceId] == true and workspace:GetAttribute("AbyssRun") ~= true and not (statsObj and statsObj.Floor))
+
+    local hasWinFlag = type(raidData) == "table" and (
+        raidData.RaidWon ~= nil
+        or raidData.Victory ~= nil
+        or raidData.Won ~= nil
+        or (type(raidData.Summary) == "table" and (raidData.Summary.Victory ~= nil or raidData.Summary.Cleared ~= nil))
+    )
+    local won = type(raidData) == "table" and (
+        raidData.RaidWon == true
+        or raidData.Victory == true
+        or raidData.Won == true
+        or (type(raidData.Summary) == "table" and (raidData.Summary.Victory == true or raidData.Summary.Cleared == true))
+    )
+
     local hasAnyDrops = (#gainedItems > 0 or #gainedRunes > 0 or #gainedEquips > 0 or goldDelta > 0)
-    if not isTest and not hasAnyDrops and not Config.WebhookRaidSendEmpty then
+    -- Always send Tower of Hell win/lose reports even on 0-drop defeats so players see the result
+    if not isTest and not hasAnyDrops and not Config.WebhookRaidSendEmpty and not (isTowerOfHell and hasWinFlag) then
         WebhookEngine.ActiveRaidSnapshot = nil
         return false
     end
 
-    local durSec = snap and math.max(0, math.floor(os.clock() - snap.startedAt)) or 0
+    local durSec = (statsObj and tonumber(statsObj.Time) and math.max(0, math.floor(tonumber(statsObj.Time))))
+        or (snap and math.max(0, math.floor(os.clock() - snap.startedAt)))
+        or 0
     local durStr = string.format("%dm %02ds", math.floor(durSec / 60), durSec % 60)
-    local modeStr = (snap and snap.mode) or (RaidEngine and RaidEngine.FormatModeLabel and RaidEngine.FormatModeLabel(Config.RaidMode)) or tostring(Config.RaidMode or "Abyss / Tower")
-    local tierNum = (snap and snap.tier) or tonumber(Config.RaidTier) or 1
-    local waveNum = (type(raidData) == "table" and (raidData.Wave or raidData.Floor or (type(raidData.Summary) == "table" and (raidData.Summary.Wave or raidData.Summary.Floor))))
+    local tierNum = (statsObj and tonumber(statsObj.Tier)) or (snap and snap.tier) or tonumber(Config.RaidTier) or 1
+    local waveNum = (statsObj and (statsObj.Wave or statsObj.Waves or statsObj.Floor))
+        or (type(raidData) == "table" and (raidData.Wave or raidData.Floor or (type(raidData.Summary) == "table" and (raidData.Summary.Wave or raidData.Summary.Floor))))
         or (RaidEngine and ((RaidEngine.CurrentFloor and RaidEngine.CurrentFloor > 0 and RaidEngine.CurrentFloor) or RaidEngine.CurrentWave))
         or 0
-    local won = (type(raidData) == "table" and (raidData.Victory == true or raidData.Won == true or (type(raidData.Summary) == "table" and (raidData.Summary.Victory == true or raidData.Summary.Cleared == true))))
-    local outcomeStr = isTest and "Test Preview" or (won and "Victory / Cleared" or "Run Ended")
+
+    local outcomeStr
+    if isTest then
+        outcomeStr = "Test Preview"
+    elseif isTowerOfHell then
+        if hasWinFlag then
+            outcomeStr = won and "WIN (Victory)" or "LOSE (Defeat)"
+        else
+            outcomeStr = "Run Ended"
+        end
+    else
+        outcomeStr = won and "Victory / Cleared" or "Run Ended"
+    end
 
     local itemLines = {}
     local itemCharLen = 0
@@ -12237,6 +15886,13 @@ function WebhookEngine.SendRaidRewardsReport(raidData, isTest)
 
     if not isTest then
         WebhookEngine.RaidRunsSession = (WebhookEngine.RaidRunsSession or 0) + 1
+        if isTowerOfHell and hasWinFlag then
+            if won then
+                WebhookEngine.TowerWinsSession = (WebhookEngine.TowerWinsSession or 0) + 1
+            else
+                WebhookEngine.TowerLossesSession = (WebhookEngine.TowerLossesSession or 0) + 1
+            end
+        end
         if goldDelta > 0 then
             WebhookEngine.RaidGoldSession = (WebhookEngine.RaidGoldSession or 0) + goldDelta
         end
@@ -12245,7 +15901,7 @@ function WebhookEngine.SendRaidRewardsReport(raidData, isTest)
 
     local goldSign = goldDelta >= 0 and "+" or "-"
     local fields = {
-        { name = "Mode & Outcome", value = string.format("%s (Tier %d)\n**%s**", modeStr, tierNum, outcomeStr), inline = true },
+        { name = isTowerOfHell and "Mode & Result" or "Mode & Outcome", value = string.format("%s (Tier %d)\n**%s**", modeStr, tierNum, outcomeStr), inline = true },
         { name = "Wave / Duration", value = string.format("Wave/Floor: **%d**\nTime: **%s**", tonumber(waveNum) or 0, durStr), inline = true },
         { name = "Gold & Level", value = string.format("%s$%s Gold (Now: $%s)\nLv. %d -> Lv. %d", goldSign, WebhookEngine.FormatNumber(math.abs(goldDelta)), WebhookEngine.FormatNumber(postGold), preLevel, postLevel), inline = true },
         { name = "Items & Ores Gained", value = (#itemLines > 0) and table.concat(itemLines, "\n") or "_None_", inline = false },
@@ -12253,17 +15909,28 @@ function WebhookEngine.SendRaidRewardsReport(raidData, isTest)
     if #gearLines > 0 then
         table.insert(fields, { name = "Runes & Equipment Gained", value = table.concat(gearLines, "\n"), inline = false })
     end
-    table.insert(fields, { name = "Session Raid Totals", value = string.format("Runs: %d | Gold Gained: +$%s", WebhookEngine.RaidRunsSession or 0, WebhookEngine.FormatNumber(WebhookEngine.RaidGoldSession or 0)), inline = false })
+    local sessionLine = isTowerOfHell
+        and string.format("Runs: %d (%dW / %dL) | Gold Gained: +$%s", WebhookEngine.RaidRunsSession or 0, WebhookEngine.TowerWinsSession or 0, WebhookEngine.TowerLossesSession or 0, WebhookEngine.FormatNumber(WebhookEngine.RaidGoldSession or 0))
+        or string.format("Runs: %d | Gold Gained: +$%s", WebhookEngine.RaidRunsSession or 0, WebhookEngine.FormatNumber(WebhookEngine.RaidGoldSession or 0))
+    table.insert(fields, { name = "Session Raid Totals", value = sessionLine, inline = false })
+
+    local embedTitle = (isTest and "[TEST] " or "") .. modeStr .. " Rewards"
+    local embedColor = won and 0x22C55E or 0xA855F7
+    if isTowerOfHell and (hasWinFlag or isTest) then
+        local wlTag = isTest and "WIN" or (won and "WIN" or "LOSE")
+        embedTitle = (isTest and "[TEST] " or "") .. modeStr .. " — " .. wlTag
+        embedColor = (isTest or won) and 0x22C55E or 0xEF4444
+    end
 
     local payload = {
         content = (not isTest and Config.WebhookRaidPing) and WebhookEngine.BuildPingContent() or nil,
         username = "The Forge • Raid Rewards",
         embeds = {
             {
-                title = (isTest and "[TEST] " or "") .. modeStr .. " Rewards",
-                color = won and 0x22C55E or 0xA855F7,
+                title = embedTitle,
+                color = embedColor,
                 fields = fields,
-                footer = { text = string.format("Player: %s | The Forge", stats.Player) },
+                footer = { text = string.format("Player: %s | The Forge", tostring(stats.PlayerName or (LocalPlayer and LocalPlayer.Name) or "Player")) },
                 timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ"),
             }
         },
@@ -12272,8 +15939,9 @@ function WebhookEngine.SendRaidRewardsReport(raidData, isTest)
     if not isTest then
         WebhookEngine.LastRaidRewardPayload = payload
         WebhookEngine.ActiveRaidSnapshot = nil
+        local statusPrefix = (isTowerOfHell and hasWinFlag) and (modeStr .. " (" .. (won and "WIN" or "LOSE") .. ")") or modeStr
         WebhookEngine.SetRaidStatus(
-            "Last Sent: " .. modeStr,
+            "Last Sent: " .. statusPrefix,
             string.format("%s$%s Gold | %d item type(s), %d rune(s), %d equip(s)", goldSign, WebhookEngine.FormatNumber(math.abs(goldDelta)), #gainedItems, #gainedRunes, #gainedEquips)
         )
     end
@@ -12600,38 +16268,113 @@ function PotionEngine.GetActiveRemaining(potionId)
     return 0
 end
 
-function PotionEngine.FindShopStand(potionId)
-    local prox = workspace:FindFirstChild("Proximity")
-    if not prox or not State.HRP then return nil, nil end
-    local hrpPos = State.HRP.Position
-    local inAbyss = (hrpPos.X < -5000 or hrpPos.Z < -5000)
+function PotionEngine.GetSafeStandCFrame(standPos)
+    local standOff = (NavEngine and NavEngine.GetCharacterStandOffset and NavEngine.GetCharacterStandOffset()) or 3.35
+    local hrpPos = State.HRP and State.HRP.Position or nil
 
-    -- Iterate all children in Proximity so duplicate Main-Island vs AbyssLobby stands never shadow each other
-    local bestStand, bestPos, bestDist = nil, nil, math.huge
-    for _, stand in ipairs(prox:GetChildren()) do
-        if stand.Name == potionId then
-            local pos = stand:IsA("Model") and stand:GetPivot().Position or (stand:IsA("BasePart") and stand.Position)
-            if pos then
-                local standAbyss = (pos.X < -5000 or pos.Z < -5000)
-                if standAbyss == inAbyss then
-                    local d = (pos - hrpPos).Magnitude
-                    if d < bestDist then
-                        bestDist = d
-                        bestStand = stand
-                        bestPos = pos
-                    end
+    -- Probe 8 sides around the potion stand starting BELOW any stall roof/canopy (standPos.Y + 1.5)
+    -- so covered stalls like AbyssLobby WagonShop never resolve their target CFrame on top of the roof!
+    local bestPos, bestScore = nil, -math.huge
+    if NavEngine and type(NavEngine.RaycastSolidFloor) == "function" then
+        local dirs = {
+            { 0, -1 }, { 1, 0 }, { 0, 1 }, { -1, 0 },
+            { 0.707, -0.707 }, { 0.707, 0.707 }, { -0.707, -0.707 }, { -0.707, 0.707 },
+        }
+        -- Stay within strict server ProximityPrompt radius (AbyssLobby HealthPotion3 prompt is 4.5 studs!)
+        local inAbyssStand = (standPos.X < -5000 or standPos.Z < -5000)
+        local radius = inAbyssStand and 3.4 or 4.2
+        for _, d in ipairs(dirs) do
+            local cx = standPos.X + d[1] * radius
+            local cz = standPos.Z + d[2] * radius
+            local lowHit = NavEngine.RaycastSolidFloor(Vector3.new(cx, standPos.Y + 1.5, cz), Vector3.new(0, -16, 0))
+            if lowHit and lowHit.Position then
+                local floorY = lowHit.Position.Y
+                local highHit = NavEngine.RaycastSolidFloor(Vector3.new(cx, standPos.Y + 14, cz), Vector3.new(0, -30, 0))
+                local openSky = (not highHit) or (highHit.Position.Y <= floorY + 1.5)
+                local headHit = NavEngine.RaycastSolidFloor(Vector3.new(cx, floorY + 1.0, cz), Vector3.new(0, 6.5, 0))
+                local clearHead = (headHit == nil)
+                local isTrueGround = (floorY <= standPos.Y - 1.0) and (floorY >= standPos.Y - 10.0)
+
+                local score = (openSky and 1000 or 0)
+                    + (clearHead and 600 or -800)
+                    + (isTrueGround and 450 or -300)
+                if hrpPos then
+                    score = score - (Vector3.new(cx, floorY, cz) - hrpPos).Magnitude * 1.5
+                end
+                if score > bestScore then
+                    bestScore = score
+                    bestPos = Vector3.new(cx, floorY + standOff + 0.15, cz)
                 end
             end
         end
     end
+
+    local finalPos = bestPos or Vector3.new(standPos.X + 4.5, standPos.Y + 0.5, standPos.Z - 4.5)
+    return NavEngine.SafeLookAt(finalPos, Vector3.new(standPos.X, finalPos.Y, standPos.Z))
+end
+
+function PotionEngine.FindShopStand(potionId)
+    local prox = workspace:FindFirstChild("Proximity")
+    if not State.HRP then return nil, nil end
+    local hrpPos = State.HRP.Position
+    local inAbyss = (RaidEngine and type(RaidEngine.IsInAbyssLobby) == "function" and RaidEngine.IsInAbyssLobby())
+        or (hrpPos.X < -5000 or hrpPos.Z < -5000 or hrpPos.Y > 750)
+
+    local lobby = workspace:FindFirstChild("AbyssLobby")
+    local lobbyReg = lobby and lobby:FindFirstChild("RegionPart", true)
+    local function isStandInAbyssLobby(pos)
+        if lobbyReg and lobbyReg:IsA("BasePart") then
+            local rel = lobbyReg.CFrame:PointToObjectSpace(pos)
+            local hs = lobbyReg.Size * 0.5
+            if math.abs(rel.X) <= hs.X + 80 and math.abs(rel.Y) <= hs.Y + 140 and math.abs(rel.Z) <= hs.Z + 80 then
+                return true
+            end
+        end
+        return (pos.X < -5000 or pos.Z < -5000 or pos.Y > 750)
+    end
+
+    -- Strictly match stands inside the player's current zone (Abyss Lobby vs Main Island) so we NEVER cross-zone glide
+    local bestStand, bestPos, bestDist = nil, nil, math.huge
+    local function consider(stand)
+        if not stand or stand.Name ~= potionId then return end
+        local pos = stand:IsA("Model") and stand:GetPivot().Position or (stand:IsA("BasePart") and stand.Position)
+        if not pos then return end
+        local standAbyss = isStandInAbyssLobby(pos)
+        if standAbyss ~= inAbyss then return end
+        local d = (pos - hrpPos).Magnitude
+        if inAbyss and d > 800 then return end
+        if d < bestDist then
+            bestDist = d
+            bestStand = stand
+            bestPos = pos
+        end
+    end
+
+    if prox then
+        for _, stand in ipairs(prox:GetChildren()) do
+            consider(stand)
+        end
+    end
+    -- Fallback: scan AbyssLobby container directly if an island places its lobby stand under workspace.AbyssLobby
+    if not bestStand and inAbyss and lobby then
+        for _, d in ipairs(lobby:GetDescendants()) do
+            if d.Name == potionId and (d:IsA("Model") or d:IsA("BasePart")) then
+                consider(d)
+            end
+        end
+    end
+
     if not bestStand or not bestPos then return nil, nil end
-    return bestStand, CFrame.new(bestPos + Vector3.new(0, 0.8, 3.0), bestPos)
+    return bestStand, PotionEngine.GetSafeStandCFrame(bestPos)
 end
 
 function PotionEngine.RestoreFarmingTool()
     if not State.Character or not State.Humanoid or State.Humanoid.Health <= 0 then return end
+    if State.InDefenseRegen or (RaidEngine and RaidEngine.RecoveringHP) then return end
     local restoreName = nil
-    if Config.AutoMine then
+    if State.IsInRaid or State.InAutoDefense or (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.MineYieldActive)) then
+        restoreName = "Weapon"
+    elseif Config.AutoMine then
         restoreName = "Pickaxe"
     elseif Config.AutoMobFarm or Config.AutoRaid then
         restoreName = "Weapon"
@@ -12704,6 +16447,8 @@ function PotionEngine.BuyNeededAtShop(forceNow, stayAtStand)
 
     for _, order in ipairs(shoppingList) do
         if not ScriptRunning or (not Config.AutoBuyPotions and not forceNow) then break end
+        if State.IsBuyingHealthPotions or State.IsMovingToRaidPad then break end
+        if not forceNow and RaidEngine and (RaidEngine.IsInActiveRun() or (RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid())) then break end
         if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then break end
         local stand, approachCF = PotionEngine.FindShopStand(order.id)
         if stand and approachCF then
@@ -12711,20 +16456,67 @@ function PotionEngine.BuyNeededAtShop(forceNow, stayAtStand)
             if (State.HRP.Position - standPos).Magnitude > 11 then
                 PotionEngine.SetStatus("Buying " .. order.info.name .. " x" .. order.qty, "Gliding to potion stand...")
                 NavEngine.GlideTo(approachCF, Config.GlideSpeed or 55, true)
+                if NavEngine and not Config.Noclip then
+                    pcall(NavEngine.RestoreCharacterPhysics)
+                end
+                if State.HRP then
+                    State.HRP.AssemblyLinearVelocity = Vector3.zero
+                    State.HRP.AssemblyAngularVelocity = Vector3.zero
+                end
                 task.wait(0.1)
             end
-            -- If a shop roof or wall blocked final descent (e.g., Maria's Potion Shop roof at Y~34), settle cleanly at counter level
-            if State.HRP and (State.HRP.Position - standPos).Magnitude > 11 then
-                NavEngine.SafeTeleport(approachCF)
+            -- If a shop roof or wall blocked final descent (e.g., Maria's Potion Shop roof at Y~34), settle cleanly above floor at counter level
+            if State.HRP then
+                local remStandDist = (State.HRP.Position - standPos).Magnitude
+                if remStandDist > 11 and remStandDist <= 35 then
+                    if NavEngine and not Config.Noclip then
+                        pcall(NavEngine.RestoreCharacterPhysics)
+                    end
+                    NavEngine.SafeTeleport(approachCF)
+                end
             end
-            if State.HRP and (State.HRP.Position - standPos).Magnitude <= 18 then
+            if State.HRP and (State.HRP.Position - standPos).Magnitude <= 14 then
+                local beforeCnt = PotionEngine.GetOwnedCount(order.id)
+                local wantCnt = beforeCnt + order.qty
                 local okBuy, res = pcall(function()
                     return Remotes.Purchase:InvokeServer(order.id, order.qty)
                 end)
-                if okBuy and type(res) == "table" and res.Success then
-                    boughtTotal = boughtTotal + order.qty
+                local tWait = os.clock()
+                while (os.clock() - tWait) < 0.45 and PotionEngine.GetOwnedCount(order.id) <= beforeCnt do
+                    task.wait(0.05)
+                end
+                local curCnt = PotionEngine.GetOwnedCount(order.id)
+                local remNeed = math.max(0, wantCnt - curCnt)
+                if remNeed > 0 then
+                    -- Server either rejected batch or only credited 1 per call: top up remaining with cooldown-safe pacing
+                    local consecFail = 0
+                    for _ = 1, remNeed + 3 do
+                        if not ScriptRunning or (not Config.AutoBuyPotions and not forceNow) then break end
+                        curCnt = PotionEngine.GetOwnedCount(order.id)
+                        remNeed = math.max(0, wantCnt - curCnt)
+                        if remNeed <= 0 then break end
+                        task.wait(consecFail > 0 and 0.45 or 0.30)
+                        local preOne = curCnt
+                        local okOne, resOne = pcall(function() return Remotes.Purchase:InvokeServer(order.id, 1) end)
+                        local tOne = os.clock()
+                        while (os.clock() - tOne) < 0.40 and PotionEngine.GetOwnedCount(order.id) <= preOne do
+                            task.wait(0.05)
+                        end
+                        if PotionEngine.GetOwnedCount(order.id) > preOne or (okOne and (resOne == true or (type(resOne) == "table" and resOne.Success))) then
+                            consecFail = 0
+                        else
+                            res = resOne
+                            consecFail = consecFail + 1
+                            if consecFail >= 3 then break end
+                        end
+                    end
+                end
+                local actualAdded = math.max(0, PotionEngine.GetOwnedCount(order.id) - beforeCnt)
+                if actualAdded > 0 or (okBuy and (res == true or (type(res) == "table" and res.Success))) then
+                    local credited = actualAdded > 0 and actualAdded or order.qty
+                    boughtTotal = boughtTotal + credited
                     PotionEngine.SetStatus(
-                        "Bought " .. order.info.name .. " x" .. order.qty,
+                        "Bought " .. order.info.name .. " x" .. credited,
                         "Owned: " .. tostring(PotionEngine.GetOwnedCount(order.id))
                     )
                 else
@@ -12739,7 +16531,7 @@ function PotionEngine.BuyNeededAtShop(forceNow, stayAtStand)
         end
     end
 
-    if not stayAtStand and Config.AutoMine and Config.StayAtSavedPos and MiningEngine then
+    if not stayAtStand and Config.AutoMine and Config.StayAtSavedPos and MiningEngine and not (RaidEngine and RaidEngine.IsInAbyssLobby()) then
         local savedCF = MiningEngine.GetSavedSpotCFrame()
         if savedCF and State.HRP and (State.HRP.Position - savedCF.Position).Magnitude > 4 then
             NavEngine.GlideTo(savedCF, Config.GlideSpeed or 55, true)
@@ -12750,12 +16542,34 @@ end
 
 -- Full potion stand routine: Buy -> Drink to Max right at the stand -> Buy another spare set -> Resume mining
 function PotionEngine.RunAutoBuyCycle(forceNow)
-    if State.IsBuyingPotions or State.IsAutoForging or State.DrainingFullBag or State.SellingMobLoot then return 0 end
+    if State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsAutoForging or State.DrainingFullBag or State.SellingMobLoot then return 0 end
+    if not forceNow and RaidEngine and (RaidEngine.IsInActiveRun() or (RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid())) then return 0 end
     if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return 0 end
     if not Remotes.Purchase then return 0 end
 
     State.IsBuyingPotions = true
-    local preTripCF = (not Config.StayAtSavedPos and (Config.AutoMine or Config.AutoMobFarm) and State.HRP) and State.HRP.CFrame or nil
+    -- Cleanly release any AutoMobFarm hover/stance lock, parry state, underground anchor, or active glide before gliding to shop
+    if CombatEngine then
+        CombatEngine.ClearStanceLock()
+        CombatEngine.LastEngagedMob = nil
+        CombatEngine.DodgeUntil = 0
+        CombatEngine.ReleaseBlockIfStuck()
+    end
+    if NavEngine then
+        NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
+        pcall(NavEngine.SurfaceIfUnderground)
+    end
+    if State.HRP and State.HRP.Anchored then
+        if MiningEngine and MiningEngine.SafeUnanchor then
+            MiningEngine.SafeUnanchor()
+        else
+            State.HRP.Anchored = false
+        end
+    end
+    if State.Humanoid then State.Humanoid.AutoRotate = true end
+
+    -- Only save preTripCF for AutoMine (AutoMobFarm will cleanly re-acquire and glide directly to live mobs instead of stale mid-air spots)
+    local preTripCF = (not Config.StayAtSavedPos and Config.AutoMine and State.HRP) and State.HRP.CFrame or nil
     local boughtTotal = 0
     local okRun, errRun = pcall(function()
         -- 1. If we already have some in inventory, drink first if AutoUsePotions is on
@@ -12785,10 +16599,17 @@ function PotionEngine.RunAutoBuyCycle(forceNow)
             if savedCF and State.HRP and (State.HRP.Position - savedCF.Position).Magnitude > 4 then
                 NavEngine.GlideTo(savedCF, Config.GlideSpeed or 55, true)
             end
-        elseif preTripCF and (Config.AutoMine or Config.AutoMobFarm) and State.HRP and (State.HRP.Position - preTripCF.Position).Magnitude > 14 then
+        elseif preTripCF and Config.AutoMine and State.HRP and (State.HRP.Position - preTripCF.Position).Magnitude > 14 then
             NavEngine.GlideTo(preTripCF, Config.GlideSpeed or 55, true)
         end
     end)
+    if CombatEngine then
+        CombatEngine.ClearStanceLock()
+        CombatEngine.LastEngagedMob = nil
+    end
+    if NavEngine and not Config.Noclip then
+        pcall(NavEngine.RestoreCharacterPhysics)
+    end
     State.IsBuyingPotions = false
     if not okRun then
         warn("[The Forge Potions]:", errRun)
@@ -12869,10 +16690,12 @@ function PotionEngine.UsePotion(potionId, allowDuringShop, skipRestoreTool)
             task.wait(0.15)
         end
 
-        -- Re-equip farming tool only after finishing drinking (or once at end of RunAutoUseCycle)
-        if not skipRestoreTool and State.Character and State.Humanoid and State.Humanoid.Health > 0 then
+        -- Re-equip farming tool only after finishing drinking (never mid-air-regen or mid-cycle)
+        if not skipRestoreTool and not State.InDefenseRegen and not (RaidEngine and RaidEngine.RecoveringHP) and State.Character and State.Humanoid and State.Humanoid.Health > 0 then
             local restoreName = nil
-            if Config.AutoMine then
+            if State.IsInRaid or State.InAutoDefense or (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.MineYieldActive)) then
+                restoreName = "Weapon"
+            elseif Config.AutoMine then
                 restoreName = "Pickaxe"
             elseif Config.AutoMobFarm or Config.AutoRaid then
                 restoreName = "Weapon"
@@ -12899,6 +16722,155 @@ function PotionEngine.UsePotion(potionId, allowDuringShop, skipRestoreTool)
     return confirmedUsed
 end
 
+function PotionEngine.ReleaseAirDrink(unanchor)
+    local wasActive = State.InAirPotionDrink or (PotionEngine.DrinkSkyAnchorCF ~= nil)
+    State.InAirPotionDrink = false
+    PotionEngine.DrinkSkyAnchorCF = nil
+    if unanchor and wasActive then
+        local otherAirActive = (RaidEngine and RaidEngine.SkyAnchorCF ~= nil)
+            or (MiningEngine and (MiningEngine.DefenseSkyAnchorCF ~= nil or MiningEngine.ActiveSunkenCF ~= nil))
+        if not otherAirActive then
+            if State.HRP and State.HRP.Anchored then
+                State.HRP.Anchored = false
+                State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+            end
+            if State.Humanoid then
+                State.Humanoid.AutoRotate = true
+            end
+            if not Config.Noclip and not (NavEngine and NavEngine.IsGliding) then
+                pcall(NavEngine.RestoreCharacterPhysics)
+            end
+        end
+    end
+end
+
+-- Dedicated Heartbeat pin for safe mid-air potion drinking so gravity/mobs/bosses can never knock the player down while drinking
+trackConn(RunService.Heartbeat:Connect(function()
+    if not ScriptRunning then return end
+    local pcf = PotionEngine.DrinkSkyAnchorCF
+    if not pcf then return end
+    local keepPin = State.InAirPotionDrink and State.HRP and State.Humanoid and State.Humanoid.Health > 0 and NavEngine.IsValidCF(pcf)
+    if keepPin then
+        if not State.HRP.Anchored then
+            State.HRP.Anchored = true
+        end
+        State.HRP.CFrame = pcf
+        State.HRP.AssemblyLinearVelocity = Vector3.zero
+        State.HRP.AssemblyAngularVelocity = Vector3.zero
+        if State.Humanoid.AutoRotate then
+            State.Humanoid.AutoRotate = false
+        end
+    else
+        PotionEngine.ReleaseAirDrink(true)
+    end
+end))
+
+function PotionEngine.HasPendingAutoUseDrink(selectedIds)
+    if not State.Humanoid or State.Humanoid.Health <= 0 then return false end
+    local hpPct = (State.Humanoid.Health / math.max(1, State.Humanoid.MaxHealth)) * 100
+    local hpThreshold = tonumber(Config.AutoUseHealthPct) or 55
+    local now = os.clock()
+    for _, id in ipairs(selectedIds or {}) do
+        local info = PotionEngine.IdToData[id]
+        if info and PotionEngine.GetOwnedCount(id) > 0 and (now - (PotionEngine.LastUseAttempt[id] or 0)) >= 8.0 then
+            if info.isHealth then
+                if (hpPct <= hpThreshold) and (PotionEngine.GetActiveRemaining(id) <= 0.5) then
+                    return true
+                end
+            else
+                local dur = math.max(1, tonumber(info.duration) or 300)
+                local maxDur = math.max(dur, tonumber(info.maxDuration) or dur)
+                local stackCutoff = math.max(5.0, (maxDur - dur) + 5.0)
+                if PotionEngine.GetActiveRemaining(id) <= stackCutoff then
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+function PotionEngine.RiseToSafeAirForDrink()
+    if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return false end
+    State.InAirPotionDrink = true
+    PotionEngine.DrinkSkyAnchorCF = nil
+
+    if CombatEngine then
+        CombatEngine.ClearStanceLock()
+        CombatEngine.ReleaseBlockIfStuck()
+        CombatEngine.LastEngagedMob = nil
+    end
+    if MiningEngine and MiningEngine.ActiveSunkenCF then
+        MiningEngine.SafeUnanchor()
+    end
+
+    local safeCF = nil
+    local inRaidArena = RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.GetActiveBossArena() ~= nil)
+    if inRaidArena and type(RaidEngine.GetSafeRegenSpot) == "function" then
+        safeCF = select(1, RaidEngine.GetSafeRegenSpot())
+    elseif MiningEngine and type(MiningEngine.GetDefenseSkyRegenCF) == "function" then
+        safeCF = MiningEngine.GetDefenseSkyRegenCF()
+    else
+        safeCF = CFrame.new(State.HRP.Position + Vector3.new(0, 38.0, 0))
+    end
+
+    if not safeCF or not NavEngine.IsValidCF(safeCF) then
+        State.InAirPotionDrink = false
+        return false
+    end
+
+    if State.HRP.Anchored then State.HRP.Anchored = false end
+    if State.Humanoid then State.Humanoid.AutoRotate = true end
+
+    local riseSpeed = math.clamp(tonumber(Config.GlideSpeed) or 50, 20, 52)
+    local riseStart = os.clock()
+    local curP = State.HRP.Position
+    local prevPos = curP
+
+    while ScriptRunning and State.HRP and State.Humanoid and State.Humanoid.Health > 0 and State.InAirPotionDrink and (os.clock() - riseStart) < 4.0 do
+        local dt = RunService.Heartbeat:Wait()
+        if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 or not State.InAirPotionDrink then break end
+        if State.Character then
+            for _, pt in ipairs(State.Character:GetDescendants()) do
+                if pt:IsA("BasePart") and pt.CanCollide then pt.CanCollide = false end
+            end
+        end
+        local actualP = State.HRP.Position
+        if (actualP - prevPos).Magnitude > 9.0 then
+            break
+        end
+        curP = actualP
+        local delta = safeCF.Position - curP
+        local dMag = delta.Magnitude
+        if dMag <= 2.6 then
+            State.HRP.CFrame = safeCF
+            State.HRP.AssemblyLinearVelocity = Vector3.zero
+            State.HRP.AssemblyAngularVelocity = Vector3.zero
+            break
+        end
+        local step = math.min(dMag, riseSpeed * dt, 2.5)
+        curP = curP + delta.Unit * step
+        prevPos = curP
+        State.HRP.CFrame = CFrame.new(curP) * safeCF.Rotation
+        State.HRP.AssemblyLinearVelocity = delta.Unit * math.min(riseSpeed, math.max(20, dMag * 6))
+        State.HRP.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    if State.HRP and State.Humanoid and State.Humanoid.Health > 0 and State.InAirPotionDrink then
+        local rem = (safeCF.Position - State.HRP.Position).Magnitude
+        local anchorCF = (rem <= 3.5) and safeCF or CFrame.new(State.HRP.Position)
+        PotionEngine.DrinkSkyAnchorCF = anchorCF
+        State.HRP.CFrame = anchorCF
+        State.HRP.Anchored = true
+        State.HRP.AssemblyLinearVelocity = Vector3.zero
+        State.HRP.AssemblyAngularVelocity = Vector3.zero
+        State.Humanoid.AutoRotate = false
+        return true
+    end
+    PotionEngine.ReleaseAirDrink(true)
+    return false
+end
+
 function PotionEngine.RunAutoUseCycle(forceNow, allowDuringShop, skipRestoreTool)
     if not State.Character or not State.Humanoid or State.Humanoid.Health <= 0 then return 0 end
     if State.IsAutoForging or (not allowDuringShop and State.IsBuyingPotions) or State.DrainingFullBag or State.UsingPotionCycle then return 0 end
@@ -12907,9 +16879,22 @@ function PotionEngine.RunAutoUseCycle(forceNow, allowDuringShop, skipRestoreTool
     local selectedIds = PotionEngine.ResolveSelectedIds(Config.AutoUsePotionTypes, false)
     if #selectedIds == 0 then return 0 end
 
+    -- Check BEFORE lifting into the air that at least one potion actually needs drinking right now
+    if not PotionEngine.HasPendingAutoUseDrink(selectedIds) then
+        return 0
+    end
+
     State.UsingPotionCycle = true
     local usedCount = 0
+    local liftedIntoAir = false
     pcall(function()
+        local alreadyInSky = (RaidEngine and RaidEngine.SkyAnchorCF ~= nil)
+            or (MiningEngine and MiningEngine.DefenseSkyAnchorCF ~= nil)
+        local inSafeLobby = RaidEngine and type(RaidEngine.IsInAbyssLobby) == "function" and RaidEngine.IsInAbyssLobby()
+        if not allowDuringShop and not State.IsBuyingPotions and not alreadyInSky and not inSafeLobby then
+            liftedIntoAir = PotionEngine.RiseToSafeAirForDrink()
+        end
+
         local hpPct = (State.Humanoid.Health / math.max(1, State.Humanoid.MaxHealth)) * 100
         local hpThreshold = tonumber(Config.AutoUseHealthPct) or 55
 
@@ -12939,10 +16924,19 @@ function PotionEngine.RunAutoUseCycle(forceNow, allowDuringShop, skipRestoreTool
             end
         end
 
-        if usedCount > 0 and not skipRestoreTool then
+        if liftedIntoAir then
+            PotionEngine.ReleaseAirDrink(true)
+            liftedIntoAir = false
+            pcall(NavEngine.TouchSolidGroundBriefly, 0.06)
+        end
+
+        if usedCount > 0 and not skipRestoreTool and not State.InDefenseRegen and not (RaidEngine and RaidEngine.RecoveringHP) then
             PotionEngine.RestoreFarmingTool()
         end
     end)
+    if liftedIntoAir or State.InAirPotionDrink then
+        PotionEngine.ReleaseAirDrink(true)
+    end
     State.UsingPotionCycle = false
     return usedCount
 end
@@ -12955,11 +16949,13 @@ function PotionEngine.GetTotalHealthPotionsOwned()
     return total
 end
 
-function PotionEngine.UseBestHealthPotion()
-    if not State.Character or not State.Humanoid or State.Humanoid.Health <= 0 then return false end
+function PotionEngine.UseBestHealthPotion(skipRestoreTool)
+    if not State.Character or not State.Humanoid or State.Humanoid.Health <= 0 then return false, nil end
+    if State.IsUsingPotion or State.UsingPotionCycle then return false, nil end
+    local keepWeaponAway = (skipRestoreTool == true) or (State.InDefenseRegen == true) or (RaidEngine and RaidEngine.RecoveringHP == true)
     for _, id in ipairs({ "HealthPotion3", "HealthPotion2", "HealthPotion1" }) do
         if PotionEngine.GetOwnedCount(id) > 0 and PotionEngine.GetActiveRemaining(id) <= 0.5 then
-            if PotionEngine.UsePotion(id, true, false) then
+            if PotionEngine.UsePotion(id, true, keepWeaponAway) then
                 return true, id
             end
         end
@@ -12967,88 +16963,286 @@ function PotionEngine.UseBestHealthPotion()
     return false, nil
 end
 
+function PotionEngine.GetEffectiveShopPrice(basePrice, pdData)
+    local p = tonumber(basePrice) or 0
+    if p <= 0 then return 0 end
+    if type(pdData) == "table" then
+        if pdData.Race == "Goblin" then
+            p = p * 0.88
+        end
+        pcall(function()
+            local AS = safeRequire(ReplicatedStorage.Shared.Data.ArmorSets)
+            if AS and type(AS.ShopMultiplier) == "function" and pdData.Equipped then
+                local mult = tonumber(AS.ShopMultiplier(pdData.Equipped))
+                if mult and mult > 0 then
+                    p = p * mult
+                end
+            end
+        end)
+    end
+    return p
+end
+
 function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
     targetStock = math.clamp(math.floor(tonumber(targetStock) or 5), 1, 10)
-    if State.IsBuyingHealthPotions then return 0 end
-    if State.IsInRaid then return 0 end
+    if State.IsBuyingHealthPotions then return 0, "busy" end
+    if State.IsInRaid then return 0, "settling" end
     if RaidEngine and (
         RaidEngine.IsInActiveRun()
         or RaidEngine.GetActiveBossArena() ~= nil
         or (RaidEngine.IsNearActiveBossMob and RaidEngine.IsNearActiveBossMob(450))
         or os.clock() < (RaidEngine.ArenaLoadingUntil or 0)
-        or (not isManual and RaidEngine.LastBossArenaAt and (os.clock() - RaidEngine.LastBossArenaAt) < 8.0)
-        or (not isManual and RaidEngine.LastPartyActivateAt and (os.clock() - RaidEngine.LastPartyActivateAt) < 15.0)
+        or (os.clock() < (RaidEngine.AbyssEnteringUntil or 0) and not RaidEngine.IsInAbyssLobby())
+        or (not isManual and RaidEngine.LastBossArenaAt and (os.clock() - RaidEngine.LastBossArenaAt) < 1.5)
     ) then
-        return 0
+        return 0, "settling"
     end
-    if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return 0 end
-    if not Remotes.Purchase then return 0 end
+    if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return 0, "settling" end
+    if not Remotes.Purchase then return 0, "failed" end
     local ownedTotal = PotionEngine.GetTotalHealthPotionsOwned()
     local needed = targetStock - ownedTotal
-    if needed <= 0 then return 0 end
+    if needed <= 0 then return 0, "ok" end
 
-    PotionEngine.RefreshWorldCatalog(false)
-    local bestId, bestStand, bestInfo = nil, nil, nil
-    for _, id in ipairs({ "HealthPotion3", "HealthPotion2", "HealthPotion1" }) do
-        local info = PotionEngine.IdToData[id]
-        local failUntil = PotionEngine.LastBuyFailAt[id] or 0
-        if info and os.clock() >= failUntil then
-            local stand = select(1, PotionEngine.FindShopStand(id))
-            if stand then
-                bestId, bestStand, bestInfo = id, stand, info
-                break
+    local function notifyHealthPotSkip(title, desc)
+        PotionEngine.SetStatus(title, desc)
+        local now = os.clock()
+        if isManual or (now - (PotionEngine.LastHealthPotSkipNotifyAt or 0)) >= 45.0 then
+            PotionEngine.LastHealthPotSkipNotifyAt = now
+            local uiLib = Library or (typeof(getgenv) == "function" and getgenv().Library) or _G.Library
+            if uiLib and type(uiLib.Notify) == "function" then
+                pcall(function()
+                    uiLib:Notify({ Title = title, Desc = desc, Duration = 4 })
+                end)
             end
         end
     end
-    if not bestId then return 0 end
 
-    local bestStandPos = bestStand:IsA("Model") and bestStand:GetPivot().Position or bestStand.Position
-    if (State.HRP.Position - bestStandPos).Magnitude > 2600 then
-        -- Player is in a remote boss arena / out-of-island zone; never glide out of bounds to buy potions
-        return 0
+    -- Check Stash capacity so we clamp purchase quantity instead of getting rejected by the server
+    local remainingStashCap = 999
+    if ForgeEngine and type(ForgeEngine.GetStashCapacityStatus) == "function" then
+        local okSt, used, cap = pcall(ForgeEngine.GetStashCapacityStatus)
+        if okSt and type(used) == "number" and type(cap) == "number" and cap > 0 then
+            remainingStashCap = math.max(0, cap - used)
+            if remainingStashCap <= 0 then
+                notifyHealthPotSkip(
+                    "Health Pots: Stash Full",
+                    string.format("Stash is full (%d/%d) — cannot buy Health Potions before run", used, cap)
+                )
+                return 0, "stash_full"
+            end
+        end
     end
 
+    PotionEngine.RefreshWorldCatalog(false)
     local pd = State.PlayerData or ResolvePlayerData()
-    local gold = pd and pd.Data and tonumber(pd.Data.Gold) or 0
-    local maxHold = tonumber(bestInfo.maxLimit) or 10
-    local qty = math.min(needed, math.max(0, maxHold - PotionEngine.GetOwnedCount(bestId)))
-    if (bestInfo.price or 0) > 0 then
-        qty = math.min(qty, math.floor(gold / bestInfo.price))
-    end
-    if qty <= 0 then return 0 end
+    local pdData = pd and pd.Data
+    local gold = (pdData and tonumber(pdData.Gold)) or 0
 
-    -- Wait briefly if Mining AutoBuyPotions is finishing a purchase so glides never cancel each other
+    local bestId, bestStand, bestInfo, bestQty = nil, nil, nil, 0
+    local unaffordableInfo, unaffordablePrice = nil, nil
+    local blockedByCooldown = false
+    for _, id in ipairs({ "HealthPotion3", "HealthPotion2", "HealthPotion1" }) do
+        local info = PotionEngine.IdToData[id]
+        local failUntil = PotionEngine.LastBuyFailAt[id] or 0
+        if info and not isManual and os.clock() < failUntil then
+            blockedByCooldown = true
+        elseif info then
+            local stand = select(1, PotionEngine.FindShopStand(id))
+            if stand then
+                local standPosCheck = stand:IsA("Model") and stand:GetPivot().Position or stand.Position
+                if (State.HRP.Position - standPosCheck).Magnitude <= 2600 then
+                    local maxHold = tonumber(info.maxLimit) or 10
+                    local qty = math.min(needed, remainingStashCap, math.max(0, maxHold - PotionEngine.GetOwnedCount(id)))
+                    local effPrice = PotionEngine.GetEffectiveShopPrice(info.price or 0, pdData)
+                    if effPrice > 0 then
+                        local affordable = math.floor(gold / effPrice)
+                        if affordable <= 0 and qty > 0 and not unaffordableInfo then
+                            unaffordableInfo = info
+                            unaffordablePrice = math.ceil(effPrice)
+                        end
+                        qty = math.min(qty, affordable)
+                    end
+                    if qty > 0 then
+                        bestId, bestStand, bestInfo, bestQty = id, stand, info, qty
+                        break
+                    end
+                end
+            end
+        end
+    end
+    if not bestId or bestQty <= 0 then
+        if unaffordableInfo and unaffordablePrice then
+            notifyHealthPotSkip(
+                "Health Pots: Not Enough Gold",
+                string.format("Need $%s for %s (Have $%s)", WebhookEngine and WebhookEngine.FormatNumber(unaffordablePrice) or tostring(unaffordablePrice), tostring(unaffordableInfo.name), WebhookEngine and WebhookEngine.FormatNumber(math.floor(gold)) or tostring(math.floor(gold)))
+            )
+            return 0, "no_gold"
+        end
+        if blockedByCooldown then
+            return 0, "cooldown"
+        end
+        return 0, "failed"
+    end
+    local qty = bestQty
+
+    -- Wait briefly if Mining AutoBuyPotions is finishing a purchase; abort if still busy so glides NEVER overlap
     local waitT0 = os.clock()
-    while State.IsBuyingPotions and (os.clock() - waitT0) < 6.0 do
+    while State.IsBuyingPotions and (os.clock() - waitT0) < 8.0 do
         task.wait(0.2)
+    end
+    if State.IsBuyingPotions or State.IsMovingToRaidPad then
+        return 0, "busy"
     end
 
     State.IsBuyingHealthPotions = true
     local bought = 0
+    local buyReason = "failed"
     pcall(function()
-        if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
+        -- Cleanly release any mining/combat lock or active glide so nothing fights the shop glide
+        State.TargetRock = nil
+        State.CurrentRock = nil
+        State.TargetMob = nil
+        if NavEngine then
+            NavEngine.CachedRock = nil
+            NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
+            pcall(NavEngine.SurfaceIfUnderground)
+        end
+        if CombatEngine then
+            CombatEngine.ClearStanceLock()
+            CombatEngine.LastEngagedMob = nil
+        end
+        if State.HRP and State.HRP.Anchored then
+            if MiningEngine and MiningEngine.SafeUnanchor then
+                MiningEngine.SafeUnanchor()
+            else
+                State.HRP.Anchored = false
+            end
+        end
         if State.Humanoid then State.Humanoid.AutoRotate = true end
+
         local standPos = bestStand:IsA("Model") and bestStand:GetPivot().Position or bestStand.Position
-        local approachCF = CFrame.new(standPos + Vector3.new(0, 1.5, 2.5), standPos)
-        if (State.HRP.Position - standPos).Magnitude > 9 then
+        local approachCF = PotionEngine.GetSafeStandCFrame(standPos)
+        local pp = bestStand:FindFirstChildWhichIsA("ProximityPrompt", true)
+        local maxBuyDist = math.clamp(tonumber(pp and pp.MaxActivationDistance) or 8.5, 4.0, 9.5)
+        for glideAttempt = 1, 2 do
+            if not ScriptRunning or not State.HRP or (State.HRP.Position - standPos).Magnitude <= math.min(6.5, maxBuyDist) then
+                break
+            end
+            if (State.HRP.Position - standPos).Magnitude > 2200 then
+                -- Zone changed (e.g. teleported to Abyss Lobby mid-check): abort and let next tick use the local stand
+                break
+            end
+            if RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.GetActiveBossArena() ~= nil or os.clock() < (RaidEngine.ArenaLoadingUntil or 0)) then
+                break
+            end
             PotionEngine.SetStatus("Buying " .. bestInfo.name .. " x" .. qty, "Restocking Health Potions before run...")
             NavEngine.GlideTo(approachCF, Config.GlideSpeed or 55, true)
+            if NavEngine and not Config.Noclip then
+                pcall(NavEngine.RestoreCharacterPhysics)
+            end
             if State.HRP then
-                State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+                State.HRP.AssemblyLinearVelocity = Vector3.zero
+                State.HRP.AssemblyAngularVelocity = Vector3.zero
             end
             task.wait(0.15)
+            if State.HRP and (State.HRP.Position - standPos).Magnitude > 2200 then
+                break
+            end
+            if State.HRP and (State.HRP.Position - standPos).Magnitude > 14 and glideAttempt == 1 then
+                -- Recover cleanly if a server Anti-TP rollback interrupted the first cross-map glide
+                task.wait(0.70)
+            end
+        end
+        -- Recover cleanly if terrain/roof snagged the final approach (tightened to match server prompt radius)
+        if State.HRP then
+            local remDist = (State.HRP.Position - standPos).Magnitude
+            if remDist > math.min(7.5, maxBuyDist) and remDist <= 38 then
+                if NavEngine and not Config.Noclip then
+                    pcall(NavEngine.RestoreCharacterPhysics)
+                end
+                NavEngine.SafeTeleport(approachCF)
+                task.wait(0.12)
+            end
         end
         if State.HRP and (State.HRP.Position - standPos).Magnitude <= 14
             and not (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.GetActiveBossArena() ~= nil or (RaidEngine.IsNearActiveBossMob and RaidEngine.IsNearActiveBossMob(450)))) then
+            local startTotalOwned = PotionEngine.GetTotalHealthPotionsOwned()
+            local startTierOwned = PotionEngine.GetOwnedCount(bestId)
+            local maxHold = tonumber(bestInfo.maxLimit) or 10
+            local targetTierOwned = math.min(maxHold, startTierOwned + qty)
+
+            local function waitTierIncrement(prevVal, timeoutSec)
+                local t0 = os.clock()
+                while (os.clock() - t0) < (timeoutSec or 0.45) do
+                    local cur = PotionEngine.GetOwnedCount(bestId)
+                    if cur > prevVal then return cur end
+                    task.wait(0.05)
+                end
+                return PotionEngine.GetOwnedCount(bestId)
+            end
+
+            -- 1. Try full batch purchase first
             local okBuy, res = pcall(function() return Remotes.Purchase:InvokeServer(bestId, qty) end)
-            if okBuy and type(res) == "table" and res.Success then
-                bought = qty
-                task.wait(0.15)
-                PotionEngine.SetStatus("Restocked " .. bestInfo.name .. " x" .. qty, "Owned Health Pots: " .. tostring(PotionEngine.GetTotalHealthPotionsOwned()))
+            local curTierOwned = waitTierIncrement(startTierOwned, 0.50)
+
+            -- 2. Ground-truth verification: if Replica still shows fewer than targetTierOwned
+            -- (e.g. server rejected batch, only credited 1 per invoke, or hit brief debounce), loop right at the stand until full!
+            local remainingToBuy = math.min(
+                math.max(0, targetStock - PotionEngine.GetTotalHealthPotionsOwned()),
+                math.max(0, targetTierOwned - curTierOwned)
+            )
+            if remainingToBuy > 0 then
+                local consecFail = 0
+                for _ = 1, remainingToBuy + 4 do
+                    if not ScriptRunning then break end
+                    if RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.GetActiveBossArena() ~= nil or os.clock() < (RaidEngine.ArenaLoadingUntil or 0)) then
+                        break
+                    end
+                    curTierOwned = PotionEngine.GetOwnedCount(bestId)
+                    remainingToBuy = math.min(
+                        math.max(0, targetStock - PotionEngine.GetTotalHealthPotionsOwned()),
+                        math.max(0, targetTierOwned - curTierOwned)
+                    )
+                    if remainingToBuy <= 0 then break end
+
+                    -- Respect server purchase cooldown (0.30s normal, 0.50s after a rejection) so call #2 never gets dropped!
+                    task.wait(consecFail > 0 and 0.50 or 0.30)
+
+                    local preOwned = PotionEngine.GetOwnedCount(bestId)
+                    local reqQty = (consecFail == 0 and curTierOwned == startTierOwned and remainingToBuy > 1) and remainingToBuy or 1
+                    local okStep, resStep = pcall(function() return Remotes.Purchase:InvokeServer(bestId, reqQty) end)
+                    local postOwned = waitTierIncrement(preOwned, 0.45)
+                    if postOwned > preOwned then
+                        consecFail = 0
+                        okBuy = true
+                        res = resStep
+                    elseif okStep and (resStep == true or (type(resStep) == "table" and resStep.Success)) then
+                        -- Server returned Success but Replica lagged slightly; wait a moment and re-check
+                        task.wait(0.25)
+                        if PotionEngine.GetOwnedCount(bestId) > preOwned then
+                            consecFail = 0
+                        else
+                            consecFail = consecFail + 1
+                            if consecFail >= 3 then break end
+                        end
+                    else
+                        res = resStep
+                        consecFail = consecFail + 1
+                        if consecFail >= 3 then break end
+                    end
+                end
+            end
+
+            local finalTotalOwned = PotionEngine.GetTotalHealthPotionsOwned()
+            local actualBought = math.max(0, finalTotalOwned - startTotalOwned)
+            if actualBought > 0 or (okBuy and (res == true or (type(res) == "table" and res.Success))) then
+                bought = actualBought > 0 and actualBought or qty
+                buyReason = (finalTotalOwned >= targetStock) and "ok" or "partial"
+                PotionEngine.SetStatus("Restocked " .. bestInfo.name .. " x" .. bought, "Owned Health Pots: " .. tostring(finalTotalOwned))
                 local uiLib = Library or (typeof(getgenv) == "function" and getgenv().Library) or _G.Library
                 if uiLib and type(uiLib.Notify) == "function" then
                     pcall(function()
-                        uiLib:Notify({ Title = "Health Potions Bought", Desc = string.format("Purchased %s x%d (Total: %d)", bestInfo.name, qty, PotionEngine.GetTotalHealthPotionsOwned()), Duration = 3 })
+                        uiLib:Notify({ Title = "Health Potions Bought", Desc = string.format("Purchased %s x%d (Total: %d/%d)", bestInfo.name, bought, finalTotalOwned, targetStock), Duration = 3 })
                     end)
                 end
             else
@@ -13056,10 +17250,14 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
                 local warnMsg = (type(res) == "table" and res.WarnMessage) or "Purchase rejected"
                 PotionEngine.SetStatus("Health Pot Buy Failed", tostring(warnMsg))
             end
+        else
+            PotionEngine.LastBuyFailAt[bestId] = os.clock() + 8.0
+            local dNow = State.HRP and (State.HRP.Position - standPos).Magnitude or 999
+            PotionEngine.SetStatus("Health Pot Stand Unreachable", string.format("Stopped %.1f studs away from %s", dNow, tostring(bestInfo.name)))
         end
     end)
     State.IsBuyingHealthPotions = false
-    return bought
+    return bought, buyReason
 end
 
 function PotionEngine.HasBuyableSelectedOrder()
@@ -13097,19 +17295,34 @@ function PotionEngine.HasBuyableSelectedOrder()
     return false
 end
 
--- Checks specifically if any selected non-health shop potion has NO active effect AND 0 owned (ignoring totems/other buffs!)
+-- Checks if any selected shop potion urgently needs restock:
+-- - Non-health buff potion: buff expired/expiring (<= 10s) AND 0 owned
+-- - Health potion: 0 owned (Health Potions are not persistent buffs, so BuyOnlyAfterBuffsExpire must never starve them)
 function PotionEngine.HasMissingSelectedBuff()
     local buyIds = PotionEngine.ResolveSelectedIds(Config.AutoBuyPotionTypes, true)
+    if #buyIds == 0 then return false, nil end
+    local pd = State.PlayerData or ResolvePlayerData()
+    local pdData = pd and pd.Data
+    local gold = (pdData and tonumber(pdData.Gold)) or 0
     local now = os.clock()
     for _, id in ipairs(buyIds) do
         local info = PotionEngine.IdToData[id]
-        if info and not info.isHealth and now >= (PotionEngine.LastBuyFailAt[id] or 0) then
+        if info and now >= (PotionEngine.LastBuyFailAt[id] or 0) then
             local stand = select(1, PotionEngine.FindShopStand(id))
             if stand then
-                local owned = PotionEngine.GetOwnedCount(id)
-                local rem = PotionEngine.GetActiveRemaining(id)
-                if rem <= 10 and owned <= 0 then
-                    return true, id
+                local effPrice = PotionEngine.GetEffectiveShopPrice(info.price or 0, pdData)
+                if effPrice <= 0 or gold >= effPrice then
+                    local owned = PotionEngine.GetOwnedCount(id)
+                    if info.isHealth then
+                        if owned <= 0 then
+                            return true, id
+                        end
+                    else
+                        local rem = PotionEngine.GetActiveRemaining(id)
+                        if rem <= 10 and owned <= 0 then
+                            return true, id
+                        end
+                    end
                 end
             end
         end
@@ -13135,7 +17348,9 @@ end
 
 function PotionEngine.CheckOnAutoMineStart()
     if PotionEngine.CheckingOnStart then return end
-    if Config.AutoRaid or State.IsInRaid or State.IsBuyingHealthPotions then return end
+    local raidBusy = (RaidEngine and RaidEngine.IsBusyForShop and RaidEngine.IsBusyForShop())
+        or State.IsInRaid or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsEnhancing
+    if raidBusy then return end
     PotionEngine.CheckingOnStart = true
     State.CheckingPotionsOnStart = true
     local ok, err = pcall(function()
@@ -13194,10 +17409,30 @@ function PotionEngine.CheckOnAutoMineStart()
     end
 end
 
+-- Immediate potion shop restock after death: bypasses 'Buy Only After Buffs Expire' & interval timer before resuming farming
+function PotionEngine.RunDeathRestockCycle()
+    if not ScriptRunning or not Config.AutoBuyPotionsOnDeath then return 0 end
+    if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return 0 end
+    local raidBusy = (RaidEngine and RaidEngine.IsBusyForShop and RaidEngine.IsBusyForShop())
+        or State.IsInRaid or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsEnhancing
+    if raidBusy then return 0 end
+
+    PotionEngine.RefreshWorldCatalog(false)
+    table.clear(PotionEngine.LastBuyFailAt)
+    PotionEngine.LastBuyCheckAt = os.clock()
+    if PotionEngine.HasBuyableSelectedOrder() then
+        PotionEngine.SetStatus("Death Restock", "Visiting Potion Shop before resuming...")
+        return PotionEngine.RunAutoBuyCycle(true)
+    elseif Config.AutoUsePotions then
+        return PotionEngine.RunAutoUseCycle(true, false, false)
+    end
+    return 0
+end
+
 -- Background Auto-Buy & Auto-Use Potions Loop (isolated from Auto Raid / Health Potion restocking)
 task.spawn(function()
     while ScriptRunning do
-        if PotionEngine.CheckingOnStart then
+        if PotionEngine.CheckingOnStart or State.IsDeathRestockingPotions then
             task.wait(0.25)
             continue
         end
@@ -13206,17 +17441,19 @@ task.spawn(function()
         if PotionEngine.LastAbyssState ~= inAbyss then
             PotionEngine.RefreshWorldCatalog(true)
         end
-        local raidBusy = Config.AutoRaid or State.IsInRaid or State.IsBuyingHealthPotions
-            or (RaidEngine and RaidEngine.IsInActiveRun())
-        if raidBusy then
+        -- 1. Always allow drinking owned buff/health potions even during active Raid / Boss fights
+        if Config.AutoUsePotions and not State.IsAutoForging and not State.IsBuyingPotions and not State.IsBuyingHealthPotions and not State.IsMovingToRaidPad and not State.IsEnhancing then
+            pcall(PotionEngine.RunAutoUseCycle)
+        end
+        -- 2. Only block shop-glide AutoBuyPotions while RaidEngine, Comet mining, or Mob Defense / Air Regen is actively running
+        local raidBusyForShop = (RaidEngine and RaidEngine.IsBusyForShop and RaidEngine.IsBusyForShop())
+            or State.IsInRaid or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsEnhancing
+            or State.InAutoDefense or State.InDefenseRegen or State.IsMiningComet
+        if raidBusyForShop then
             task.wait(1.0)
             continue
         end
-        -- 1. Always drink any potions already owned in inventory first
-        if Config.AutoUsePotions then
-            pcall(PotionEngine.RunAutoUseCycle)
-        end
-        -- 2. Restock immediately if any selected buff is missing + 0 owned, or when interval/buff conditions pass
+        -- 3. Restock immediately if any selected buff is missing + 0 owned, or when interval/buff conditions pass
         if Config.AutoBuyPotions then
             local missingBuff = PotionEngine.HasMissingSelectedBuff()
             local intervalSec = math.max(8, (tonumber(Config.AutoBuyPotionIntervalMin) or 0) * 60)
@@ -13309,23 +17546,131 @@ end
 
 function TeleportEngine.TeleportToIsland(islandName)
     if not islandName or islandName == "" then return false end
-    local ok = false
-    pcall(function()
-        local KnitPkg = safeRequire(ReplicatedStorage.Shared.Packages.Knit)
-        local PS = KnitPkg.GetService("PortalService")
-        if PS and type(PS.TeleportToIsland) == "function" then
-            PS:TeleportToIsland(islandName):await()
-            ok = true
-        end
-    end)
-    if not ok and Remotes.TeleportToIsland then
-        pcall(function()
-            Remotes.TeleportToIsland:InvokeServer(islandName)
-            ok = true
+    if Config.AutoExecOnTeleport and MiscEngine and type(MiscEngine.QueueOnTeleportNow) == "function" then
+        pcall(MiscEngine.QueueOnTeleportNow, false)
+    end
+
+    local function invokeRaw()
+        if not Remotes.TeleportToIsland then return false, nil end
+        local callOk, res = pcall(function()
+            return Remotes.TeleportToIsland:InvokeServer(islandName)
         end)
+        if callOk and res ~= false and res ~= nil then
+            return true, res
+        end
+        return false, res
+    end
+
+    -- 1. Direct raw RemoteFunction call (thread-safe, avoids ClientComm.new capability stripping)
+    local ok = invokeRaw()
+    if ok then return true end
+
+    -- 2. Fallback: equip & activate PortalTool in case server requires an open Portal before accepting TeleportToIsland
+    local bp = LocalPlayer and LocalPlayer:FindFirstChild("Backpack")
+    local char = State.Character or (LocalPlayer and LocalPlayer.Character)
+    local pt = (char and char:FindFirstChild("PortalTool")) or (bp and bp:FindFirstChild("PortalTool"))
+    if pt then
+        if pt.Parent == bp and State.Humanoid then
+            pcall(function() State.Humanoid:EquipTool(pt) end)
+            task.wait(0.15)
+        end
+        if Remotes.ToolActivated then
+            pcall(function() Remotes.ToolActivated:InvokeServer("PortalTool") end)
+        else
+            pcall(function() pt:Activate() end)
+        end
+        task.wait(0.45)
+        ok = invokeRaw()
     end
     return ok
 end
+
+TeleportEngine.LastAutoIslandTpAt = 0
+-- Strict whitelist of main World Island PlaceIds (never includes Raids, Tower of Hell, Abyss sub-places, or Guild Island)
+TeleportEngine.WorldPlaceIds = {
+    [76558904092080] = "Stonewake's Cross",    -- World 1
+    [129009554587176] = "Forgotten Kingdom",   -- World 2
+    [131884594917121] = "Frostspire Expanse",  -- World 3
+    [74414241680540] = "Crimson Sakura Isles", -- World 4
+}
+
+function TeleportEngine.IsMainWorldIsland()
+    local cur = TeleportEngine.GetCurrentIslandInfo()
+    if cur and cur.index > 0 and type(cur.name) == "string" and cur.name ~= "" then
+        return true, cur.name, cur.index
+    end
+    local fallbackName = TeleportEngine.WorldPlaceIds[game.PlaceId]
+    if fallbackName then
+        return true, fallbackName, 0
+    end
+    return false, nil, -1
+end
+
+function TeleportEngine.CheckAutoIslandTeleport(isManual)
+    if not Config.AutoTeleportIsland then return false end
+    local targetName = tostring(Config.AutoTeleportTargetIsland or "")
+    if targetName == "" then return false end
+
+    -- Gate 1: ONLY run on main World Islands (1, 2, 3, 4) — NEVER redirect from Tower of Hell, Raids, Abyss sub-places, or Guild Island
+    local onWorldIsland, curName = TeleportEngine.IsMainWorldIsland()
+    if not onWorldIsland or not curName then
+        return false
+    end
+
+    -- Gate 2: Never redirect while inside Abyss Lobby, Abyss Run, RaidLevels, Boss Arenas, Guild Island, or launching a Raid/Boss
+    if workspace:GetAttribute("AbyssRun") == true or workspace:FindFirstChild("RaidLevels") ~= nil then
+        return false
+    end
+    if State.IsInRaid or State.IsMovingToRaidPad then
+        return false
+    end
+    if RaidEngine then
+        if RaidEngine.IsInActiveRun()
+            or RaidEngine.IsInAbyssLobby()
+            or RaidEngine.GetActiveBossArena() ~= nil
+            or (type(RaidEngine.IsInGuildIsland) == "function" and RaidEngine.IsInGuildIsland())
+            or (RaidEngine.RaidPlaceSet and RaidEngine.RaidPlaceSet[game.PlaceId])
+            or os.clock() < (RaidEngine.ArenaLoadingUntil or 0)
+            or (RaidEngine.LastPartyActivateAt and (os.clock() - RaidEngine.LastPartyActivateAt) < 15.0) then
+            return false
+        end
+    end
+
+    -- Gate 3: Already on Target Island -> nothing to do; any other World Island -> warp to Target Island
+    if curName == targetName then
+        return false
+    end
+
+    local islands = TeleportEngine.GetIslandsList()
+    local targetEntry = nil
+    for _, isl in ipairs(islands) do
+        if isl.name == targetName then
+            targetEntry = isl
+            break
+        end
+    end
+    if not targetEntry or targetEntry.isCurrent or not targetEntry.unlocked then
+        return false
+    end
+
+    local now = os.clock()
+    if not isManual and (now - (TeleportEngine.LastAutoIslandTpAt or 0)) < 20.0 then
+        return false
+    end
+    TeleportEngine.LastAutoIslandTpAt = now
+    Notify("Auto-Teleport Island", string.format("On %s -> Warping to %s...", curName, targetName), 3.0)
+    return TeleportEngine.TeleportToIsland(targetName)
+end
+
+task.spawn(function()
+    task.wait(2.2)
+    while ScriptRunning do
+        if Config.AutoTeleportIsland then
+            pcall(TeleportEngine.CheckAutoIslandTeleport, false)
+        end
+        task.wait(5.0)
+    end
+end)
 
 function TeleportEngine.IsWaypointUnlocked(wpName)
     local unlocked = false
@@ -14235,6 +18580,80 @@ function RuneEngine.IsRuneKept(runeId, guid)
     return false
 end
 
+-- Computes normalized Rune Quality % (0-100) from live Replica Traits using Shared.Data.Runes stat ranges.
+-- Automatically excludes fixed non-roll stats where Min == Max (e.g. MineDropCount = 1).
+function RuneEngine.ComputeRuneQuality(entry, modeOverride)
+    if type(entry) ~= "table" or type(entry.Traits) ~= "table" then
+        return 100, 100, 100, 100
+    end
+    local okR, Runes = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Runes) end)
+    local runeDef = (okR and Runes and Runes.Runes) and Runes.Runes[entry.Id] or nil
+    local primaryIds = {}
+    if runeDef and type(runeDef.Primary) == "table" then
+        for _, p in ipairs(runeDef.Primary) do
+            if type(p) == "table" and p.Type and p.Type.Id then
+                primaryIds[p.Type.Id] = true
+            end
+        end
+    end
+
+    local allRolls, primaryRolls = {}, {}
+    for tIdx, trait in ipairs(entry.Traits) do
+        if type(trait) == "table" and trait.Id then
+            local tData = (okR and Runes and type(Runes.GetTraitData) == "function") and Runes:GetTraitData(trait.Id) or nil
+            local tier = tonumber(trait.Tier) or 1
+            local isPrimary = primaryIds[trait.Id] == true or (next(primaryIds) == nil and tIdx == 1)
+            for statKey, rawVal in pairs(trait) do
+                if statKey ~= "Id" and statKey ~= "Tier" and statKey ~= "Whitelist" and type(rawVal) == "number" then
+                    local isFixed = false
+                    if tData and type(tData.Stats) == "table" and type(tData.Stats[statKey]) == "table" then
+                        local tierBounds = tData.Stats[statKey][tier]
+                        if type(tierBounds) == "table" and tierBounds.Min ~= nil and tierBounds.Max ~= nil and tierBounds.Min == tierBounds.Max then
+                            isFixed = true
+                        end
+                    elseif rawVal > 1.0001 or rawVal < -0.0001 then
+                        isFixed = true
+                    end
+                    if not isFixed then
+                        local pct = math.clamp(rawVal, 0, 1) * 100
+                        table.insert(allRolls, pct)
+                        if isPrimary then
+                            table.insert(primaryRolls, pct)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if #allRolls == 0 then
+        return 100, 100, 100, 100
+    end
+
+    local bestPct, sumPct = -math.huge, 0
+    for _, v in ipairs(allRolls) do
+        if v > bestPct then bestPct = v end
+        sumPct = sumPct + v
+    end
+    local avgPct = sumPct / #allRolls
+    local primBest = bestPct
+    if #primaryRolls > 0 then
+        primBest = -math.huge
+        for _, v in ipairs(primaryRolls) do
+            if v > primBest then primBest = v end
+        end
+    end
+
+    local mode = modeOverride or Config.RuneSellQualityMode or "Best Stat (Any >= %)"
+    local scorePct = bestPct
+    if mode == "Average Roll" then
+        scorePct = avgPct
+    elseif mode == "Primary Trait Only" then
+        scorePct = primBest
+    end
+    return scorePct, bestPct, avgPct, primBest
+end
+
 function RuneEngine.BuildSellRuneBasket()
     if #RuneEngine.RuneSellTypes == 0 or next(RuneEngine.IdToDisplayName) == nil then
         pcall(RuneEngine.BuildRuneSellCatalog)
@@ -14249,6 +18668,9 @@ function RuneEngine.BuildSellRuneBasket()
     local itemTypes = (typeof(getrenv) == "function" and getrenv()._G and getrenv()._G.ItemTypes) or _G.ItemTypes or {}
     local okR, Runes = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Runes) end)
 
+    local minQual = math.clamp(tonumber(Config.RuneSellMinQuality) or 0, 0, 100)
+    local scope = Config.RuneSellQualityScope or "Checked Keep Runes Only"
+
     local basket = {}
     local totalRunes = 0
     local sellableCount = 0
@@ -14261,9 +18683,21 @@ function RuneEngine.BuildSellRuneBasket()
                 local qty = math.max(1, math.floor(entry.Quantity or 1))
                 totalRunes = totalRunes + qty
                 local isFav = favs[entry.GUID] or favs[entry.Id]
-                if not isFav and not RuneEngine.IsRuneKept(entry.Id, entry.GUID) then
-                    basket[entry.GUID] = qty
-                    sellableCount = sellableCount + qty
+                if not isFav then
+                    local inKeepList = RuneEngine.IsRuneKept(entry.Id, entry.GUID)
+                    local shouldKeep = inKeepList
+                    if minQual > 0 then
+                        local scorePct = RuneEngine.ComputeRuneQuality(entry)
+                        if scope == "All Runes (Keep Any >= %)" then
+                            shouldKeep = (scorePct >= minQual)
+                        else
+                            shouldKeep = inKeepList and (scorePct >= minQual)
+                        end
+                    end
+                    if not shouldKeep then
+                        basket[entry.GUID] = qty
+                        sellableCount = sellableCount + qty
+                    end
                 end
             end
         end
@@ -14277,11 +18711,13 @@ function RuneEngine.UpdateSellStatusLabel()
     pcall(function()
         local _, sellableCount, totalRunes = RuneEngine.BuildSellRuneBasket()
         local used, cap, isFull = ForgeEngine.GetStashCapacityStatus()
+        local minQual = math.clamp(tonumber(Config.RuneSellMinQuality) or 0, 0, 100)
+        local qualTag = minQual > 0 and string.format(" (Keep >= %g%%)", minQual) or ""
         local stateStr = State.IsSellingRunes and "Selling..."
             or (Config.AutoSellRunes and "Active (Instant Remote Sell)" or "Off")
         RuneEngine.SellStatusLabel:SetTitle(string.format("Auto Sell Runes: %s", stateStr))
-        RuneEngine.SellStatusLabel:SetDesc(string.format("Runes: %d | Unchecked (Will Sell): %d | Bag: %d/%d%s",
-            totalRunes, sellableCount, used, cap, isFull and " [FULL]" or ""))
+        RuneEngine.SellStatusLabel:SetDesc(string.format("Runes: %d | Will Sell: %d%s | Bag: %d/%d%s",
+            totalRunes, sellableCount, qualTag, used, cap, isFull and " [FULL]" or ""))
     end)
 end
 
@@ -14333,6 +18769,7 @@ function RuneEngine.SellUnkeptRunes(fromMobChain)
     end
     return sellableCount, soldOk
 end
+State.RuneEngine = RuneEngine
 State.SellUnkeptRunes = RuneEngine.SellUnkeptRunes
 
 task.spawn(function()
@@ -14371,6 +18808,1682 @@ task.spawn(function()
         end
 
         task.wait(0.35)
+    end
+end)
+
+-- ===================================================================
+-- 12C. AUTO WEAPON ENHANCER ENGINE (EnhanceService + Medallions/Seals)
+-- ===================================================================
+local EnhanceEngine = {
+    EquipLabelToObj = {},
+    EquipLabels = {},
+    EquipDropdown = nil,
+    WeaponImage = nil,
+    StatusLabel = nil,
+    CostLabel = nil,
+    IsEnhancing = false,
+    StopBatch = false,
+    LastAutoAttempt = 0,
+    MedallionOptions = {
+        "Abyss Medallion I",
+        "Abyss Medallion II",
+        "Abyss Medallion III",
+        "Abyss Medallion IV",
+        "Abyss Medallion V",
+    },
+}
+State.EnhanceEngine = EnhanceEngine
+
+function EnhanceEngine.SetStatus(title, desc)
+    if EnhanceEngine.StatusLabel then
+        pcall(function()
+            EnhanceEngine.StatusLabel:SetTitle(title)
+            if desc ~= nil then EnhanceEngine.StatusLabel:SetDesc(desc) end
+        end)
+    end
+end
+
+function EnhanceEngine.SetCostStatus(title, desc)
+    if EnhanceEngine.CostLabel then
+        pcall(function()
+            EnhanceEngine.CostLabel:SetTitle(title)
+            if desc ~= nil then EnhanceEngine.CostLabel:SetDesc(desc) end
+        end)
+    end
+end
+
+function EnhanceEngine.GetMiscCount(itemName)
+    if type(itemName) ~= "string" or itemName == "" then return 0 end
+    local pd = State.PlayerData or ResolvePlayerData()
+    local inv = pd and pd.Data and pd.Data.Inventory
+    if type(inv) ~= "table" then return 0 end
+    if type(inv[itemName]) == "number" then
+        return math.floor(inv[itemName])
+    end
+    local count = 0
+    for _, entry in ipairs(inv.Misc or {}) do
+        if type(entry) == "table" and entry.Name == itemName and entry.GUID == nil then
+            count = count + (tonumber(entry.Quantity) or 1)
+        end
+    end
+    return math.floor(count)
+end
+
+function EnhanceEngine.GetEquippedKeys()
+    local keys = {}
+    local pd = State.PlayerData or ResolvePlayerData()
+    local equipped = pd and pd.Data and pd.Data.Equipped
+    if type(equipped) == "table" then
+        for _, eqItem in pairs(equipped) do
+            if type(eqItem) == "table" then
+                local k = eqItem.GUID or eqItem.Name
+                if k then keys[k] = true end
+            end
+        end
+    end
+    return keys
+end
+
+function EnhanceEngine.GetEnhanceableEquipments()
+    local pd = State.PlayerData or ResolvePlayerData()
+    local okEQ, Equipments = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Equipments) end)
+    local equippedKeys = EnhanceEngine.GetEquippedKeys()
+    local list = {}
+
+    table.clear(EnhanceEngine.EquipLabelToObj)
+    table.clear(EnhanceEngine.EquipLabels)
+
+    local slotPriority = { Weapon = 1, Chestplate = 2, Leggings = 3, Helmet = 4, Armor = 5 }
+
+    for _, eq in ipairs((pd and pd.Data and pd.Data.Inventory and pd.Data.Inventory.Equipments) or {}) do
+        if type(eq) == "table" and eq.GUID then
+            local itemName = tostring(eq.Type or eq.Name or "")
+            local itemCat = (okEQ and Equipments and Equipments.GetItemType) and Equipments:GetItemType(itemName) or "Unknown"
+            if itemCat == "Weapon" or itemCat == "Armor" then
+                local powerStat = 0
+                local subSlot = itemCat
+                if itemCat == "Weapon" then
+                    if okEQ and Equipments and Equipments.CalculateDamage then
+                        local okD, dVal = pcall(Equipments.CalculateDamage, Equipments, eq)
+                        if okD and type(dVal) == "number" then powerStat = dVal end
+                    end
+                else
+                    if okEQ and Equipments and Equipments.CalculateHealth then
+                        local okH, hVal = pcall(Equipments.CalculateHealth, Equipments, eq)
+                        if okH and type(hVal) == "number" then powerStat = hVal end
+                    end
+                    local nl = itemName:lower()
+                    if nl:find("helmet", 1, true) or nl:find("helm", 1, true) or nl:find("hood", 1, true) or nl:find("crown", 1, true) or nl:find("mask", 1, true) then
+                        subSlot = "Helmet"
+                    elseif nl:find("chest", 1, true) or nl:find("plate", 1, true) or nl:find("robe", 1, true) or nl:find("cuirass", 1, true) or nl:find("tunic", 1, true) then
+                        subSlot = "Chestplate"
+                    elseif nl:find("leg", 1, true) or nl:find("greave", 1, true) or nl:find("pants", 1, true) or nl:find("boot", 1, true) then
+                        subSlot = "Leggings"
+                    end
+                end
+                local upg = tonumber(eq.Upgrade) or 0
+                local isEq = equippedKeys[eq.GUID] == true or equippedKeys[eq.Name] == true
+                local eqTag = isEq and "[Eq]" or ""
+                local catTag = (itemCat == "Weapon") and "[Wpn] " or "[Armor] "
+                local upgTag = upg > 0 and (" +" .. tostring(upg)) or " +0"
+                local idTag = " #" .. tostring(eq.GUID):sub(1, 4)
+                local lbl = string.format("%s%s%s%s%s", eqTag, catTag, itemName, upgTag, idTag)
+                EnhanceEngine.EquipLabelToObj[lbl] = eq
+                EnhanceEngine.EquipLabelToObj[eq.GUID] = eq
+                table.insert(list, {
+                    label = lbl,
+                    eq = eq,
+                    category = itemCat,
+                    subSlot = subSlot,
+                    slotOrder = slotPriority[subSlot] or 6,
+                    isEquipped = isEq,
+                    upgrade = upg,
+                    dmg = (itemCat == "Weapon") and powerStat or 0,
+                    hp = (itemCat == "Armor") and powerStat or 0,
+                    stat = powerStat,
+                })
+            end
+        end
+    end
+
+    table.sort(list, function(a, b)
+        if a.isEquipped ~= b.isEquipped then return a.isEquipped end
+        if a.category ~= b.category then return a.category == "Weapon" end
+        if a.isEquipped and a.slotOrder ~= b.slotOrder then return a.slotOrder < b.slotOrder end
+        if a.stat ~= b.stat then return a.stat > b.stat end
+        if a.upgrade ~= b.upgrade then return a.upgrade > b.upgrade end
+        return a.label < b.label
+    end)
+
+    for _, item in ipairs(list) do
+        table.insert(EnhanceEngine.EquipLabels, item.label)
+    end
+    if #EnhanceEngine.EquipLabels == 0 then
+        table.insert(EnhanceEngine.EquipLabels, "No Equipment Found")
+    end
+    return list, EnhanceEngine.EquipLabels
+end
+
+EnhanceEngine.GetWeaponEquipments = EnhanceEngine.GetEnhanceableEquipments
+
+function EnhanceEngine.ResolveTargetEquipment()
+    local list = EnhanceEngine.GetEnhanceableEquipments()
+    if #list == 0 then return nil, "No Equipment Found" end
+
+    local mode = Config.EnhanceTargetMode or "Auto: Equipped Gear (All)"
+    local targetLvl = math.clamp(math.floor(tonumber(Config.EnhanceTargetLevel) or 9), 1, 9)
+
+    local function pickLowestBelowTarget(candidates)
+        if #candidates == 0 then return nil, nil end
+        local best = nil
+        for _, item in ipairs(candidates) do
+            if item.upgrade < targetLvl and item.upgrade < 9 then
+                if not best or item.upgrade < best.upgrade or (item.upgrade == best.upgrade and item.slotOrder < best.slotOrder) then
+                    best = item
+                end
+            end
+        end
+        if best then
+            return best.eq, best.label
+        end
+        -- All pieces in this group already reached targetLvl
+        return candidates[1].eq, candidates[1].label
+    end
+
+    if mode == "Auto: Equipped Gear (All)" then
+        local eqAll = {}
+        for _, item in ipairs(list) do
+            if item.isEquipped then table.insert(eqAll, item) end
+        end
+        if #eqAll > 0 then return pickLowestBelowTarget(eqAll) end
+        return list[1].eq, list[1].label
+    elseif mode == "Auto: Equipped Weapon" then
+        for _, item in ipairs(list) do
+            if item.isEquipped and item.category == "Weapon" then
+                return item.eq, item.label
+            end
+        end
+        for _, item in ipairs(list) do
+            if item.category == "Weapon" then
+                return item.eq, item.label
+            end
+        end
+        return list[1].eq, list[1].label
+    elseif mode == "Auto: Equipped Armor (All)" then
+        local eqArmors = {}
+        for _, item in ipairs(list) do
+            if item.isEquipped and item.category == "Armor" then table.insert(eqArmors, item) end
+        end
+        if #eqArmors > 0 then return pickLowestBelowTarget(eqArmors) end
+        for _, item in ipairs(list) do
+            if item.category == "Armor" then
+                return item.eq, item.label
+            end
+        end
+        return nil, "No Armor Found"
+    elseif mode == "Auto: Best Weapon in Bag" then
+        local best = nil
+        for _, item in ipairs(list) do
+            if item.category == "Weapon" then
+                if not best or item.dmg > best.dmg or (item.dmg == best.dmg and item.upgrade > best.upgrade) then
+                    best = item
+                end
+            end
+        end
+        if best then return best.eq, best.label end
+        return nil, "No Weapon Found"
+    elseif mode == "Auto: Best Armor in Bag" then
+        local best = nil
+        for _, item in ipairs(list) do
+            if item.category == "Armor" then
+                if not best or item.hp > best.hp or (item.hp == best.hp and item.upgrade > best.upgrade) then
+                    best = item
+                end
+            end
+        end
+        if best then return best.eq, best.label end
+        return nil, "No Armor Found"
+    else
+        local sel = Config.EnhanceSelectedEquip
+        if type(sel) == "string" and EnhanceEngine.EquipLabelToObj[sel] then
+            return EnhanceEngine.EquipLabelToObj[sel], sel
+        end
+        return list[1].eq, list[1].label
+    end
+end
+
+function EnhanceEngine.BuildMedalPicks(eq, maxGoalPct)
+    local picks = {}
+    local seal = nil
+    if not eq or not eq.GUID then return nil, nil end
+
+    local okAb, Abyss = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Abyss) end)
+    if not (okAb and Abyss and type(Abyss.MedallionsOn) == "function" and Abyss.MedallionsOn()) then
+        return nil, nil
+    end
+
+    local previewFn = Remotes.EnhancePreviewChance
+    local curFinal = 0
+    if previewFn then
+        local okP, resP = pcall(function() return previewFn:InvokeServer(eq.GUID, {}, nil) end)
+        if okP and type(resP) == "table" then
+            curFinal = tonumber(resP.Final) or 0
+        end
+    end
+    local maxChance = tonumber(Abyss.MaxChance) or 100
+    local goal = math.min(maxChance, maxGoalPct or 100)
+    if curFinal >= goal then
+        return nil, nil
+    end
+
+    if Config.EnhanceUseSeals and Abyss.FailStack and type(Abyss.FailStack.SealSteps) == "table" and type(Abyss.SealName) == "function" then
+        for i = #Abyss.FailStack.SealSteps, 1, -1 do
+            local sName = Abyss.SealName(Abyss.FailStack.SealSteps[i])
+            if sName and EnhanceEngine.GetMiscCount(sName) > 0 then
+                seal = sName
+                break
+            end
+        end
+        if seal and previewFn then
+            local okP, resP = pcall(function() return previewFn:InvokeServer(eq.GUID, {}, seal) end)
+            if okP and type(resP) == "table" then
+                curFinal = tonumber(resP.Final) or curFinal
+            end
+        end
+    end
+
+    if Config.EnhanceUseMedallions and curFinal < goal then
+        local allowed = {}
+        local sel = Config.EnhanceMedallionTiers
+        if type(sel) == "table" then
+            for k, v in pairs(sel) do
+                local name = (type(k) == "number") and tostring(v) or (v and tostring(k))
+                if name and name ~= "" then allowed[name] = true end
+            end
+        end
+        for _, mName in ipairs(EnhanceEngine.MedallionOptions) do
+            if allowed[mName] then
+                local owned = EnhanceEngine.GetMiscCount(mName)
+                local usedHere = 0
+                while owned > usedHere and curFinal < goal and usedHere < 20 do
+                    picks[mName] = (picks[mName] or 0) + 1
+                    usedHere = usedHere + 1
+                    if previewFn then
+                        local okP, resP = pcall(function() return previewFn:InvokeServer(eq.GUID, picks, seal) end)
+                        if okP and type(resP) == "table" then
+                            curFinal = tonumber(resP.Final) or curFinal
+                        else
+                            break
+                        end
+                    else
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    local hasPicks = next(picks) ~= nil
+    return hasPicks and picks or nil, seal
+end
+
+function EnhanceEngine.CheckRequirements(eq)
+    if not eq or not Remotes.EnhanceGetUpgradeRequirements then
+        return nil, false, "EnhanceService unavailable"
+    end
+    local okReq, req = pcall(function() return Remotes.EnhanceGetUpgradeRequirements:InvokeServer(eq) end)
+    if not okReq or type(req) ~= "table" then
+        return nil, false, "Could not fetch upgrade cost"
+    end
+
+    local pd = State.PlayerData or ResolvePlayerData()
+    local gold = pd and pd.Data and tonumber(pd.Data.Gold) or 0
+    local price = math.floor(tonumber(req.totalPrice) or 0)
+    if gold < price then
+        return req, false, string.format("Need $%s Gold (Have $%s)", WebhookEngine.FormatNumber(price), WebhookEngine.FormatNumber(gold))
+    end
+
+    local missing = {}
+    for _, matEntry in ipairs(req.materials or {}) do
+        local mName = matEntry.material and matEntry.material.Name
+        local needQty = tonumber(matEntry.quantity) or 0
+        if mName and needQty > 0 then
+            local haveQty = EnhanceEngine.GetMiscCount(mName)
+            if haveQty < needQty then
+                table.insert(missing, string.format("%s (%d/%d)", mName, haveQty, needQty))
+            end
+        end
+    end
+    if #missing > 0 then
+        return req, false, "Missing: " .. table.concat(missing, ", ")
+    end
+    return req, true, "Ready"
+end
+
+function EnhanceEngine.RefreshPreview()
+    local eq, lbl = EnhanceEngine.ResolveTargetEquipment()
+    if EnhanceEngine.WeaponImage then
+        local iconId = "rbxassetid://111362591084511"
+        if eq then
+            pcall(function()
+                local okEQ, Equipments = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Equipments) end)
+                local def = (okEQ and Equipments and Equipments.GetItemData) and Equipments:GetItemData(eq.Type or eq.Name) or nil
+                if type(def) == "table" and type(def.Slot) == "table" and type(def.Slot.Icon) == "string" and def.Slot.Icon ~= "" then
+                    iconId = def.Slot.Icon
+                end
+            end)
+        end
+        pcall(function()
+            EnhanceEngine.WeaponImage.Image = iconId
+            EnhanceEngine.WeaponImage.Visible = (eq ~= nil)
+        end)
+    end
+    if EnhanceEngine.EquipDropdown and type(EnhanceEngine.EquipDropdown.Refresh) == "function" then
+        local curVal = Config.EnhanceSelectedEquip
+        if type(curVal) ~= "string" or not EnhanceEngine.EquipLabelToObj[curVal] then
+            curVal = EnhanceEngine.EquipLabels[1]
+        end
+        pcall(function() EnhanceEngine.EquipDropdown:Refresh(EnhanceEngine.EquipLabels, curVal) end)
+    end
+    if not eq then
+        EnhanceEngine.SetStatus("Enhancer: No Equipment", "Craft or equip a weapon or armor first")
+        EnhanceEngine.SetCostStatus("Cost: --", "No target equipment selected")
+        return
+    end
+
+    local curLvl = tonumber(eq.Upgrade) or 0
+    local maxLvl = 9
+    local targetLvl = math.clamp(math.floor(tonumber(Config.EnhanceTargetLevel) or 9), 1, maxLvl)
+    if curLvl >= maxLvl or curLvl >= targetLvl then
+        EnhanceEngine.SetStatus(
+            string.format("%s (+%d / Target +%d)", tostring(eq.Type or eq.Name), curLvl, targetLvl),
+            curLvl >= maxLvl and "Already at maximum +9 enhancement" or "Target upgrade level reached!"
+        )
+        EnhanceEngine.SetCostStatus("Upgrade: Complete", string.format("Current: +%d | Target: +%d", curLvl, targetLvl))
+        return
+    end
+
+    local req, canAfford, reqMsg = EnhanceEngine.CheckRequirements(eq)
+    local prevText = "--"
+    if Remotes.EnhancePreviewChance then
+        local okP, resP = pcall(function() return Remotes.EnhancePreviewChance:InvokeServer(eq.GUID, {}, nil) end)
+        if okP and type(resP) == "table" then
+            prevText = string.format("%d%% (Base %d%% | Stack +%d)", tonumber(resP.Final) or 0, tonumber(resP.Base) or 0, tonumber(resP.FailStack) or 0)
+        end
+    end
+
+    local matParts = {}
+    if req and type(req.materials) == "table" then
+        for _, m in ipairs(req.materials) do
+            local mName = m.material and m.material.Name or "Mat"
+            table.insert(matParts, string.format("%dx %s", tonumber(m.quantity) or 0, mName))
+        end
+    end
+    local priceStr = req and ("$" .. WebhookEngine.FormatNumber(math.floor(tonumber(req.totalPrice) or 0))) or "--"
+    EnhanceEngine.SetCostStatus(
+        string.format("Next +%d -> +%d | Chance: %s", curLvl, curLvl + 1, prevText),
+        string.format("Cost: %s | %s (%s)", priceStr, (#matParts > 0 and table.concat(matParts, ", ") or "No mats"), canAfford and "Affordable" or reqMsg)
+    )
+    if not EnhanceEngine.IsEnhancing then
+        EnhanceEngine.SetStatus("Target: " .. tostring(lbl), Config.AutoEnhanceWeapon and "Auto Enhance Active" or "Ready")
+    end
+end
+
+function EnhanceEngine.EnhanceOnce(isManual)
+    if EnhanceEngine.IsEnhancing or State.IsAutoForging or State.DrainingFullBag or State.IsBuyingPotions or State.IsBuyingHealthPotions then
+        return false, "Busy"
+    end
+    if not Remotes.EnhanceEquipment then
+        return false, "EnhanceService unavailable"
+    end
+
+    local eq, lbl = EnhanceEngine.ResolveTargetEquipment()
+    if not eq then
+        EnhanceEngine.SetStatus("Enhancer: No Equipment", "Equip or craft a weapon or armor first")
+        return false, "No equipment"
+    end
+
+    local curLvl = tonumber(eq.Upgrade) or 0
+    local targetLvl = math.clamp(math.floor(tonumber(Config.EnhanceTargetLevel) or 9), 1, 9)
+    if curLvl >= targetLvl or curLvl >= 9 then
+        EnhanceEngine.SetStatus(
+            string.format("Target Reached (+%d)", curLvl),
+            tostring(eq.Type or eq.Name) .. " is already +" .. tostring(curLvl)
+        )
+        return false, "Target reached"
+    end
+
+    local _, canAfford, reqMsg = EnhanceEngine.CheckRequirements(eq)
+    if not canAfford then
+        EnhanceEngine.SetStatus("Enhancer: Waiting Resources", reqMsg)
+        if isManual then Notify("Auto Enhancer", reqMsg, 3.0) end
+        return false, reqMsg
+    end
+
+    EnhanceEngine.IsEnhancing = true
+    local enhancedOk = false
+    local outcomeMsg = "Failed"
+
+    pcall(function()
+        local picks, seal = EnhanceEngine.BuildMedalPicks(eq, 100)
+        local finalChance = 100
+        if Remotes.EnhancePreviewChance then
+            local okP, resP = pcall(function() return Remotes.EnhancePreviewChance:InvokeServer(eq.GUID, picks or {}, seal) end)
+            if okP and type(resP) == "table" then
+                finalChance = tonumber(resP.Final) or finalChance
+            end
+        end
+
+        local minChance = math.clamp(tonumber(Config.EnhanceMinChancePct) or 0, 0, 100)
+        if finalChance < minChance then
+            outcomeMsg = string.format("Chance %d%% < Min %d%%", finalChance, minChance)
+            EnhanceEngine.SetStatus("Paused: Low Chance", outcomeMsg)
+            if isManual then Notify("Auto Enhancer", outcomeMsg, 3.0) end
+            return
+        end
+
+        local okEnh, res = pcall(function()
+            return Remotes.EnhanceEquipment:InvokeServer(eq.GUID, picks, seal)
+        end)
+
+        -- If server enforces Enhancer NPC proximity (CloseDistance = 20), glide there and retry once
+        if (not okEnh or type(res) ~= "table" or res.newLevel == nil) and Config.EnhanceAutoGlide then
+            local raidActive = Config.AutoRaid and (State.IsInRaid or (RaidEngine and RaidEngine.IsInActiveRun()))
+            if not raidActive and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
+                local prox = workspace:FindFirstChild("Proximity")
+                local npc = prox and prox:FindFirstChild("Enhancer")
+                if npc then
+                    local npcCF = TeleportEngine.GetInstanceCFrame(npc)
+                    if npcCF and (State.HRP.Position - npcCF.Position).Magnitude > 14 and (State.HRP.Position - npcCF.Position).Magnitude <= 2600 then
+                        State.IsEnhancing = true
+                        EnhanceEngine.SetStatus("Moving to Enhancer NPC", "Gliding within range to enhance...")
+                        if CombatEngine then CombatEngine.ClearStanceLock() end
+                        if State.HRP.Anchored then
+                            if MiningEngine and MiningEngine.SafeUnanchor then
+                                MiningEngine.SafeUnanchor()
+                            else
+                                State.HRP.Anchored = false
+                            end
+                        end
+                        if State.Humanoid then State.Humanoid.AutoRotate = true end
+                        NavEngine.GlideTo(npcCF, Config.GlideSpeed or 55, true)
+                        if NavEngine and not Config.Noclip then
+                            pcall(NavEngine.RestoreCharacterPhysics)
+                        end
+                        task.wait(0.15)
+                        okEnh, res = pcall(function()
+                            return Remotes.EnhanceEquipment:InvokeServer(eq.GUID, picks, seal)
+                        end)
+                        State.IsEnhancing = false
+                    end
+                end
+            end
+        end
+
+        if okEnh and type(res) == "table" and res.newLevel ~= nil then
+            local newLvl = tonumber(res.newLevel) or curLvl
+            local prevLvl = tonumber(res.previousLevel) or curLvl
+            if res.success == true then
+                enhancedOk = true
+                outcomeMsg = string.format("%s: +%d -> +%d!", tostring(eq.Type or eq.Name), prevLvl, newLvl)
+                EnhanceEngine.SetStatus("Success: +" .. tostring(newLvl), outcomeMsg)
+                if isManual or newLvl >= targetLvl then
+                    Notify("Auto Enhancer", outcomeMsg, 3.0)
+                end
+            else
+                outcomeMsg = string.format("%s: Failed at +%d (now +%d)", tostring(eq.Type or eq.Name), prevLvl, newLvl)
+                EnhanceEngine.SetStatus("Roll Failed (+" .. tostring(newLvl) .. ")", outcomeMsg)
+            end
+        else
+            outcomeMsg = (type(res) == "table" and (res.message or res.WarnMessage or res.error)) or tostring(res or "Rejected")
+            EnhanceEngine.SetStatus("Enhance Blocked", tostring(outcomeMsg))
+            if isManual then Notify("Auto Enhancer", tostring(outcomeMsg), 3.0) end
+        end
+    end)
+
+    EnhanceEngine.IsEnhancing = false
+    task.delay(0.25, EnhanceEngine.RefreshPreview)
+    return enhancedOk, outcomeMsg
+end
+
+function EnhanceEngine.EnhanceBatchToTarget()
+    if EnhanceEngine.IsEnhancing then return end
+    EnhanceEngine.StopBatch = false
+    local eq = select(1, EnhanceEngine.ResolveTargetEquipment())
+    if not eq then
+        Notify("Auto Enhancer", "No weapon or armor found to enhance!", 3.0)
+        return
+    end
+    local targetLvl = math.clamp(math.floor(tonumber(Config.EnhanceTargetLevel) or 9), 1, 9)
+    for _ = 1, 60 do
+        if not ScriptRunning or EnhanceEngine.StopBatch then break end
+        eq = select(1, EnhanceEngine.ResolveTargetEquipment())
+        if not eq or (tonumber(eq.Upgrade) or 0) >= targetLvl or (tonumber(eq.Upgrade) or 0) >= 9 then
+            break
+        end
+        local _, canAfford, reqMsg = EnhanceEngine.CheckRequirements(eq)
+        if not canAfford then
+            Notify("Auto Enhancer", reqMsg, 3.0)
+            break
+        end
+        local ok, msg = EnhanceEngine.EnhanceOnce(false)
+        if not ok and type(msg) == "string" and (msg:find("Chance", 1, true) or msg:find("Rejected", 1, true) or msg:find("Missing", 1, true) or msg:find("Need %$")) then
+            break
+        end
+        task.wait(0.45)
+    end
+    EnhanceEngine.RefreshPreview()
+end
+
+task.spawn(function()
+    while ScriptRunning do
+        local inRaidOrLobby = State.IsInRaid or (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.IsInAbyssLobby() or RaidEngine.GetActiveBossArena() ~= nil))
+        if Config.AutoEnhanceWeapon
+            and not inRaidOrLobby
+            and not EnhanceEngine.IsEnhancing
+            and not State.IsAutoForging
+            and not State.DrainingFullBag
+            and not State.IsCrafting
+            and not State.IsBuyingPotions
+            and not State.IsBuyingHealthPotions
+            and not State.SellingMobLoot
+            and State.HRP and State.Humanoid and State.Humanoid.Health > 0
+            and (os.clock() - (EnhanceEngine.LastAutoAttempt or 0)) >= 1.5 then
+            EnhanceEngine.LastAutoAttempt = os.clock()
+            local eq = select(1, EnhanceEngine.ResolveTargetEquipment())
+            local targetLvl = math.clamp(math.floor(tonumber(Config.EnhanceTargetLevel) or 9), 1, 9)
+            if eq and (tonumber(eq.Upgrade) or 0) < targetLvl and (tonumber(eq.Upgrade) or 0) < 9 then
+                local _, canAfford = EnhanceEngine.CheckRequirements(eq)
+                if canAfford then
+                    EnhanceEngine.EnhanceOnce(false)
+                else
+                    EnhanceEngine.RefreshPreview()
+                end
+            end
+        end
+        task.wait(0.8)
+    end
+end)
+
+-- ===================================================================
+-- 12D. NATIVE ORE AUTO-SELL ENGINE (ORE RARITY + PER-ORE KEEP QUANTITY)
+-- ===================================================================
+local AutoSellEngine = {
+    RarityOrder = { "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Relic", "Exotic", "Divine" },
+    Ores = {},               -- { { name, rarity, order, label }, ... }
+    OreByName = {},          -- { [name] = entry }
+    OreDropdownLabels = {},  -- { "[Common] Stone", ... }
+    LabelToOreName = {},     -- { ["[Common] Stone"] = "Stone" }
+    SelectedOres = {},       -- Current multi-select picker entries in Mining -> Selling
+    DraftKeepQty = "0",      -- Textbox buffer for Keep Quantity input
+    CatalogBuilt = false,
+    StatusLabel = nil,
+    KeepRulesLabel = nil,
+    OreSelectDropdown = nil,
+    LastSellAt = 0,
+    TotalOresSold = 0,
+}
+
+function AutoSellEngine.SaveConfig()
+    if Config.AutoSaveConfig ~= false and ConfigManager and type(ConfigManager.ScheduleSave) == "function" then
+        ConfigManager.ScheduleSave(0.15)
+    end
+end
+
+-- Supports both array format ({"Common", "Uncommon"} from Aether Multi-Dropdown) and legacy map format ({Common = true})
+function AutoSellEngine.GetActiveRaritySet()
+    local set = {}
+    local raw = Config.AutoSellOreRarities
+    if type(raw) == "table" then
+        for k, v in pairs(raw) do
+            if type(k) == "number" and type(v) == "string" then
+                set[v] = true
+            elseif type(k) == "string" and v == true then
+                set[k] = true
+            end
+        end
+    end
+    return set
+end
+
+function AutoSellEngine.GetActiveRarityArray()
+    local set = AutoSellEngine.GetActiveRaritySet()
+    local arr = {}
+    for _, r in ipairs(AutoSellEngine.RarityOrder) do
+        if set[r] then
+            table.insert(arr, r)
+        end
+    end
+    return arr
+end
+
+function AutoSellEngine.BuildCatalog(force)
+    if AutoSellEngine.CatalogBuilt and not force and #AutoSellEngine.Ores > 0 then
+        return true
+    end
+    local orderIdx = {}
+    for i, r in ipairs(AutoSellEngine.RarityOrder) do
+        orderIdx[r] = i
+    end
+
+    local ores, oreByName, labels, labelToOre = {}, {}, {}, {}
+    local okO, OreData = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Ore) end)
+    if okO and type(OreData) == "table" then
+        for key, info in pairs(OreData) do
+            if type(info) == "table" then
+                local name = tostring(info.Name or key)
+                local rarity = tostring(info.Rarity or "Common")
+                if name ~= "" and rarity ~= "Unobtainable" and orderIdx[rarity] then
+                    local lbl = string.format("[%s] %s", rarity, name)
+                    local entry = {
+                        name = name,
+                        rarity = rarity,
+                        order = orderIdx[rarity] or 99,
+                        label = lbl,
+                    }
+                    table.insert(ores, entry)
+                    oreByName[name] = entry
+                    labelToOre[lbl] = name
+                end
+            end
+        end
+    end
+
+    table.sort(ores, function(a, b)
+        if a.order ~= b.order then return a.order < b.order end
+        return a.name < b.name
+    end)
+    for _, o in ipairs(ores) do
+        table.insert(labels, o.label)
+    end
+
+    if #ores > 0 then
+        AutoSellEngine.Ores = ores
+        AutoSellEngine.OreByName = oreByName
+        AutoSellEngine.OreDropdownLabels = labels
+        AutoSellEngine.LabelToOreName = labelToOre
+        AutoSellEngine.CatalogBuilt = true
+    end
+    return AutoSellEngine.CatalogBuilt
+end
+
+function AutoSellEngine.ResolveOreName(rawLabel)
+    if type(rawLabel) ~= "string" then return nil end
+    if AutoSellEngine.LabelToOreName[rawLabel] then
+        return AutoSellEngine.LabelToOreName[rawLabel]
+    end
+    local stripped = rawLabel:gsub("^%[[^%]]+%]%s*", "")
+    return stripped ~= "" and stripped or nil
+end
+
+-- Computes Ore Auto-Sell plan without mutating inventory.
+-- Precedence: Favorites ALWAYS protected > Per-Ore Keep Qty overrides Ore Rarity > Ore Rarity > Keep All.
+function AutoSellEngine.BuildSellPlan()
+    AutoSellEngine.BuildCatalog(false)
+    ResolvePlayerData()
+    local data = State.PlayerData and State.PlayerData.Data
+    local inv = data and data.Inventory
+    local favs = (data and data.Favorites) or {}
+    local plan = {
+        basket = {},
+        oreUnits = 0,
+        oreTypes = 0,
+        activeRarities = 0,
+        activeKeepRules = 0,
+    }
+
+    local keepMap = type(Config.AutoSellOreKeepQty) == "table" and Config.AutoSellOreKeepQty or {}
+    local raritySet = AutoSellEngine.GetActiveRaritySet()
+    for _ in pairs(raritySet) do plan.activeRarities = plan.activeRarities + 1 end
+    for _, v in pairs(keepMap) do
+        if v ~= nil and v ~= "" and tonumber(v) ~= nil then
+            plan.activeKeepRules = plan.activeKeepRules + 1
+        end
+    end
+
+    if type(inv) ~= "table" then
+        return plan
+    end
+
+    local blacklistedForgeOres = ForgeEngine and type(ForgeEngine.GetBlacklistedForgeOresMap) == "function" and ForgeEngine.GetBlacklistedForgeOresMap() or {}
+
+    for _, ore in ipairs(AutoSellEngine.Ores) do
+        local owned = inv[ore.name]
+        if type(owned) == "number" and owned > 0 then
+            owned = math.floor(owned)
+            if not favs[ore.name] and not blacklistedForgeOres[ore.name] then
+                local keepCap = nil
+                local rawKeep = keepMap[ore.name]
+                if rawKeep ~= nil and rawKeep ~= "" then
+                    local n = tonumber(rawKeep)
+                    if n and n >= 0 then
+                        keepCap = math.floor(n)
+                    end
+                elseif raritySet[ore.rarity] == true then
+                    keepCap = 0
+                end
+
+                if keepCap ~= nil and owned > keepCap then
+                    local sellQty = owned - keepCap
+                    plan.basket[ore.name] = sellQty
+                    plan.oreUnits = plan.oreUnits + sellQty
+                    plan.oreTypes = plan.oreTypes + 1
+                end
+            end
+        end
+    end
+
+    return plan
+end
+
+function AutoSellEngine.FormatKeepRulesSummary()
+    local keepMap = type(Config.AutoSellOreKeepQty) == "table" and Config.AutoSellOreKeepQty or {}
+    local items = {}
+    for oreName, qty in pairs(keepMap) do
+        local n = tonumber(qty)
+        if n and n >= 0 then
+            table.insert(items, { name = tostring(oreName), qty = math.floor(n) })
+        end
+    end
+    table.sort(items, function(a, b) return a.name < b.name end)
+    if #items == 0 then
+        return 0, "None — using Ore Rarity rules only"
+    end
+    local parts = {}
+    local maxShow = math.min(#items, 12)
+    for i = 1, maxShow do
+        table.insert(parts, string.format("%s: %d", items[i].name, items[i].qty))
+    end
+    if #items > maxShow then
+        table.insert(parts, string.format("+%d more", #items - maxShow))
+    end
+    return #items, table.concat(parts, " · ")
+end
+
+function AutoSellEngine.UpdateSummaryUI(plan)
+    plan = plan or AutoSellEngine.BuildSellPlan()
+    local statusText = State.IsAutoSellingMenu and "Selling..."
+        or (Config.AutoSellMenuEnabled and "Active" or "Off")
+    if AutoSellEngine.StatusLabel then
+        pcall(function()
+            AutoSellEngine.StatusLabel:SetTitle(string.format("Ore Auto-Sell: %s", statusText))
+            AutoSellEngine.StatusLabel:SetDesc(string.format(
+                "Matching: %d Ore(s) (%d types) | Rarities: %d | Keep Rules: %d | Sold: %d",
+                plan.oreUnits, plan.oreTypes, plan.activeRarities, plan.activeKeepRules, AutoSellEngine.TotalOresSold
+            ))
+        end)
+    end
+    if AutoSellEngine.KeepRulesLabel then
+        pcall(function()
+            local cnt, desc = AutoSellEngine.FormatKeepRulesSummary()
+            AutoSellEngine.KeepRulesLabel:SetTitle(string.format("Active Keep Rules (%d)", cnt))
+            AutoSellEngine.KeepRulesLabel:SetDesc(desc)
+        end)
+    end
+end
+
+function AutoSellEngine.RunSellCycle(isManual)
+    if State.IsAutoSellingMenu then return 0, false end
+    if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return 0, false end
+
+    local hasPass = ForgeEngine and type(ForgeEngine.HasSellAnywherePass) == "function" and ForgeEngine.HasSellAnywherePass()
+    local inRestrictedZone = State.IsInRaid
+        or (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.IsInAbyssLobby() or RaidEngine.GetActiveBossArena() ~= nil))
+    if inRestrictedZone and not hasPass then
+        return 0, false
+    end
+
+    if not isManual then
+        if State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsEnhancing or State.IsMiningComet or State.SellingMobLoot or State.IsSellingRunes then
+            return 0, false
+        end
+        if Config.AutoSellOnlyWhenBagFull and ForgeEngine and type(ForgeEngine.GetStashCapacityStatus) == "function" then
+            local _, _, isFull = ForgeEngine.GetStashCapacityStatus()
+            if not isFull then
+                return 0, false
+            end
+        end
+    end
+
+    local plan = AutoSellEngine.BuildSellPlan()
+    if not next(plan.basket) then
+        if isManual then
+            Notify("Ore Auto-Sell", "No ores matched your Rarity or Keep Qty rules.", 2.5)
+        end
+        AutoSellEngine.UpdateSummaryUI(plan)
+        return 0, false
+    end
+
+    local prox = workspace:FindFirstChild("Proximity")
+    local hasCey = prox and prox:FindFirstChild("Greedy Cey") ~= nil
+    if not hasPass and not hasCey then
+        if isManual then Notify("Ore Auto-Sell", "Greedy Cey not reachable on this map.", 3.0) end
+        return 0, false
+    end
+
+    State.IsAutoSellingMenu = true
+    AutoSellEngine.LastSellAt = os.clock()
+    AutoSellEngine.UpdateSummaryUI(plan)
+
+    local soldOk = false
+    pcall(function()
+        soldOk = ForgeEngine.SellMiscBasket(plan.basket)
+    end)
+
+    State.IsAutoSellingMenu = false
+    if soldOk then
+        AutoSellEngine.TotalOresSold = AutoSellEngine.TotalOresSold + plan.oreUnits
+        Notify("Ore Auto-Sell", string.format("Sold %d ore(s) (%d types)!", plan.oreUnits, plan.oreTypes), 3.0)
+    elseif isManual then
+        Notify("Ore Auto-Sell", "Sell attempt failed (check Greedy Cey / Sell Anywhere).", 3.0)
+    end
+
+    task.delay(0.25, function()
+        if ScriptRunning then
+            AutoSellEngine.UpdateSummaryUI()
+        end
+    end)
+    return plan.oreUnits, soldOk
+end
+
+-- Background Ore Auto-Sell Loop
+task.spawn(function()
+    local tickCount = 0
+    while ScriptRunning do
+        tickCount = tickCount + 1
+        if (tickCount % 3) == 0 then
+            pcall(AutoSellEngine.UpdateSummaryUI)
+        end
+        local interval = math.clamp(tonumber(Config.AutoSellInterval) or 12, 4, 300)
+        if Config.AutoSellMenuEnabled and not State.IsAutoSellingMenu and (os.clock() - (AutoSellEngine.LastSellAt or 0)) >= interval then
+            pcall(AutoSellEngine.RunSellCycle, false)
+        end
+        task.wait(1.0)
+    end
+end)
+
+-- ===================================================================
+-- 12E. AUTO QUESTS ENGINE (QUESTBOARD + SENSEI MORO + DAILY/WEEKLY NPCS)
+-- ===================================================================
+local QuestEngine = {
+    IsRunning = false,
+    CancelRequested = false,
+    LastSweepAt = 0,
+    LastObjectiveRouteAt = 0,
+    TotalClaimed = 0,
+    TotalAccepted = 0,
+    StatusLabel = nil,
+    ActiveQuestsLabel = nil,
+    LastResultText = "Idle — enable QuestBoard Claim, Sensei Moro, or Daily NPC Auto-Accept",
+    CommandCooldown = {}, -- { [cmd] = os.clock() } prevents spamming rejected dialogue commands
+    -- Verified NPC -> Give/Check DialogueService.RF.RunCommand mappings (extracted directly from ReplicatedStorage.Dialogues)
+    SenseiMoroCommands = {
+        { npc = "Sensei Moro", give = { "GiveIntroduction1" }, prefix = "Introduction", doneCheckIds = { "Introduction1" } },
+        { npc = "Sensei Moro 2", give = { "GiveIsland2Quest1", "GiveIsland2Quest2" }, prefix = "Island2Quest", doneCheckIds = { "Island2Quest1", "Island2Quest2" } },
+        { npc = "Sensei Moro 3", give = { "GiveSenseiMoro3Quest1" }, prefix = "SenseiMoro3Quest", doneCheckIds = { "SenseiMoro3Quest1" } },
+        { npc = "Sensei Moro 4", give = { "GiveSenseiMoro4Quest1" }, prefix = "SenseiMoro4Quest", doneCheckIds = { "SenseiMoro4Quest1" } },
+    },
+    DailyNPCCommands = {
+        { npc = "Ceypai", questId = "Daily1", give = "GiveDaily1", check = "CheckDaily1" },
+        { npc = "Not Real Ceypai", questId = "Weekly1", give = "GiveWeekly1", check = "CheckWeekly1" },
+        { npc = "Amber", questId = "Daily_EliteHunt", give = "GiveAmberQuest", check = "CheckQuest" },
+        { npc = "Barakkulf", questId = "Daily_Mine", give = "GiveBarakkulfQuest", check = "CheckQuest" },
+        { npc = "Nord", questId = "Mining1", give = "GiveMining1", check = "CheckQuest" },
+        { npc = "Farmer", questId = "Daily_Farmer", give = "GiveDaily_Farmer", check = "TurnIn" },
+        { npc = "Masked Stranger", questId = "Daily_SkeletalThreat", give = "GiveMaskedStrangerQuest", check = "CheckQuest" },
+        { npc = "Masked Stranger2", questId = "Daily_Maze", give = "GiveMaskedStranger2Quest", check = "CheckQuest" },
+        { npc = "CultAida", questId = "Daily_RavenAida", give = "GiveDaily_RavenAida", check = "CheckQuest" },
+        { npc = "Akane", questId = "Daily_Island4_1", give = "GiveDaily_Island4_1", check = "CheckQuest" },
+        { npc = "Mer", questId = "Daily_Island4_2", give = "GiveDaily_Island4_2", check = "CheckQuest" },
+        { npc = "Tetsuya", questId = "Daily_Island4_3", give = "GiveDaily_Island4_3", check = "CheckQuest" },
+        { npc = "Inverted", questId = "Daily_Island4_4", give = "GiveDaily_Island4_4", check = "CheckQuest" },
+        { npc = "Kage", questId = "Daily_Island4_5", give = "GiveDaily_Island4_5", check = "CheckQuest" },
+        { npc = "Daichi", questId = "Daily_Island4_6", give = "GiveDaily_Island4_6", check = "CheckQuest" },
+        { npc = "Tsukiyo", questId = "Daily_Island4_7", give = "GiveDaily_Island4_7", check = "CheckQuest" },
+        { npc = "Shogun", questId = "ShogunQuest1", give = "GiveShogunQuest1", check = "CheckQuest", prefix = "ShogunQuest" },
+        { npc = "Raid QuestNPC", questId = "RaidTrialQuest", give = "GiveRaidTrialQuest", check = "CheckQuest", prefix = "RaidTrial" },
+        -- Fusion Chamber chain: requires Zachariel (MazeQuest3) or Morveth (MorvethQuest) prerequisite done first; talks to ONE of Zachariel or Morveth
+        {
+            npc = "FusionZachariel,FusionMorveth",
+            questId = "FusionQuest1",
+            requireAnyCompleted = { "MorvethQuest", "MazeQuest3", "FusionQuest1", "FusionQuest2", "FusionQuest3" },
+            chainIds = { "FusionQuest1", "FusionQuest2", "FusionQuest3", "FusionQuest4" },
+            chainGives = { "GiveFusionQuest1", "GiveFusionQuest2", "GiveFusionQuest3", "GiveFusionQuest4" },
+            check = "CheckQuest",
+            prefix = "FusionQuest",
+        },
+    },
+}
+
+function QuestEngine.FindNpcInstance(npcName)
+    local prox = workspace:FindFirstChild("Proximity")
+    if not prox or type(npcName) ~= "string" then return nil end
+    -- Support comma-separated NPC lists like "FusionZachariel,FusionMorveth" (returns first present NPC)
+    for part in string.gmatch(npcName, "[^,]+") do
+        local trimmed = part:match("^%s*(.-)%s*$")
+        if trimmed and trimmed ~= "" then
+            local direct = prox:FindFirstChild(trimmed)
+            if direct then return direct end
+            local lower = string.lower(trimmed)
+            for _, ch in ipairs(prox:GetChildren()) do
+                local bn = tostring(ch:GetAttribute("BillboardName") or "")
+                if string.lower(ch.Name) == lower or string.lower(bn) == lower then
+                    return ch
+                end
+            end
+            for _, ch in ipairs(prox:GetChildren()) do
+                if string.find(string.lower(ch.Name), lower, 1, true) then
+                    return ch
+                end
+            end
+        end
+    end
+    return nil
+end
+
+function QuestEngine.GetNpcCFrame(inst)
+    if not inst then return nil end
+    if inst:IsA("BasePart") then return inst.CFrame end
+    if inst:IsA("Model") then
+        local hrp = inst:FindFirstChild("HumanoidRootPart") or inst.PrimaryPart
+        if hrp and hrp:IsA("BasePart") then return hrp.CFrame end
+        local ok, piv = pcall(function() return inst:GetPivot() end)
+        if ok and piv then return piv end
+    end
+    local bp = inst:FindFirstChildWhichIsA("BasePart", true)
+    return bp and bp.CFrame or nil
+end
+
+function QuestEngine.CloseDialogueCleanly()
+    pcall(function()
+        local char = State.Character or (LocalPlayer and LocalPlayer.Character)
+        local status = char and char:FindFirstChild("Status")
+        -- Drain every stacked server NoMovement tag by sending matching DialogueEvent("Closed") signals
+        local noMoveCount = 0
+        if status then
+            for _, ch in ipairs(status:GetChildren()) do
+                if ch.Name == "NoMovement" then
+                    noMoveCount = noMoveCount + 1
+                elseif ch.Name == "DisableBackpack" then
+                    pcall(function() ch:Destroy() end)
+                end
+            end
+        end
+        local closeCalls = math.clamp(math.max(1, noMoveCount), 1, 12)
+        if Remotes.DialogueEvent then
+            for _ = 1, closeCalls do
+                pcall(function() Remotes.DialogueEvent:FireServer("Closed") end)
+                task.wait(0.04)
+            end
+        end
+        -- Remove any lingering client-side NoMovement/DisableBackpack tags and restore WalkSpeed & camera
+        if status then
+            for _, ch in ipairs(status:GetChildren()) do
+                if ch.Name == "NoMovement" or ch.Name == "DisableBackpack" then
+                    pcall(function() ch:Destroy() end)
+                end
+            end
+        end
+        if State.HRP and State.HRP.Anchored then
+            State.HRP.Anchored = false
+        end
+        if State.Humanoid then
+            State.Humanoid.AutoRotate = true
+            State.Humanoid.PlatformStand = false
+            if State.Humanoid.WalkSpeed <= 1 then
+                State.Humanoid.WalkSpeed = (Config.CustomWalkSpeed and Config.WalkSpeedValue) or State.OriginalWalkSpeed or 16
+            end
+        end
+        local cam = workspace.CurrentCamera
+        if cam then
+            -- Stop any active Spring2 tween on CurrentCamera (DialogueHandler hijacks Camera CFrame/FOV via Spring2)
+            pcall(function()
+                local Spring2 = safeRequire(ReplicatedStorage.Shared.Spring2)
+                if Spring2 and type(Spring2.stop) == "function" then
+                    Spring2.stop(cam, "CFrame")
+                    Spring2.stop(cam, "FieldOfView")
+                end
+            end)
+            if cam.CameraType == Enum.CameraType.Scriptable then
+                cam.CameraType = Enum.CameraType.Custom
+            end
+            if State.Humanoid then
+                cam.CameraSubject = State.Humanoid
+            end
+            cam.FieldOfView = tonumber(cam:GetAttribute("Default")) or 70
+        end
+        local dUi = PlayerGui and PlayerGui:FindFirstChild("DialogueUI")
+        if dUi and dUi:IsA("ScreenGui") then
+            dUi.Enabled = false
+        end
+        -- Re-enable Roblox PlayerModule controls in case DialogueUI disabled them
+        pcall(function()
+            local ps = LocalPlayer and LocalPlayer:FindFirstChild("PlayerScripts")
+            local pm = ps and ps:FindFirstChild("PlayerModule")
+            if pm then
+                local mod = require(pm)
+                local ctrls = mod and mod.GetControls and mod:GetControls()
+                if ctrls and ctrls.Enable then ctrls:Enable() end
+            end
+        end)
+    end)
+end
+
+-- Invokes ProximityService.RF.Dialogue while cleanly suppressing client DialogueHandler cutscene/camera hijack & SpeakerCharacter nil crashes.
+function QuestEngine.InvokeProximityDialogueSilently(npcInst)
+    if not Remotes.ProximityDialogue or not npcInst or not npcInst.Parent then return false end
+    local dRemote = ReplicatedStorage:FindFirstChild("DialogueEvents")
+    dRemote = dRemote and dRemote:FindFirstChild("DialogueRemote")
+
+    -- Method 1: Temporarily disable DialogueRemote.OnClientEvent connections (prevents DialogueHandler from ever running!)
+    local disabledConns = {}
+    if dRemote and typeof(getconnections) == "function" then
+        pcall(function()
+            for _, conn in ipairs(getconnections(dRemote.OnClientEvent)) do
+                if conn and conn.Enabled and type(conn.Disable) == "function" then
+                    pcall(function()
+                        conn:Disable()
+                        table.insert(disabledConns, conn)
+                    end)
+                end
+            end
+        end)
+    end
+
+    -- Method 2 (Fallback if executor lacks getconnections): DialogueHandler.OnEvent immediately returns if DialogueUI.Enabled == true
+    local dUi = PlayerGui and PlayerGui:FindFirstChild("DialogueUI")
+    local origEnabled = dUi and dUi:IsA("ScreenGui") and dUi.Enabled or false
+    local hiddenChildren = {}
+    if #disabledConns == 0 and dUi and dUi:IsA("ScreenGui") and not origEnabled then
+        pcall(function()
+            for _, ch in ipairs(dUi:GetChildren()) do
+                if ch:IsA("GuiObject") and ch.Visible then
+                    hiddenChildren[ch] = true
+                    ch.Visible = false
+                end
+            end
+            dUi.Enabled = true
+        end)
+    end
+
+    local ok, res = pcall(function()
+        return Remotes.ProximityDialogue:InvokeServer(npcInst)
+    end)
+    -- Brief settle so any queued DialogueRemote packet is dropped before re-enabling
+    task.wait(0.18)
+
+    if #disabledConns > 0 then
+        for _, conn in ipairs(disabledConns) do
+            pcall(function() conn:Enable() end)
+        end
+    elseif dUi and dUi:IsA("ScreenGui") then
+        pcall(function()
+            dUi.Enabled = origEnabled
+            for ch in pairs(hiddenChildren) do
+                if ch and ch.Parent then ch.Visible = true end
+            end
+        end)
+    end
+    return ok and res ~= false
+end
+
+function QuestEngine.StopAll()
+    QuestEngine.CancelRequested = true
+    State.IsDoingQuestNpc = false
+    if NavEngine then
+        NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
+        pcall(NavEngine.RestoreCharacterPhysics)
+    end
+    QuestEngine.CloseDialogueCleanly()
+end
+
+function QuestEngine.IsQuestCompleted(questObj)
+    if type(questObj) ~= "table" or type(questObj.Progress) ~= "table" then return false end
+    local hasAny = false
+    for _, step in pairs(questObj.Progress) do
+        if type(step) == "table" then
+            hasAny = true
+            local cur = tonumber(step.currentProgress) or 0
+            local req = tonumber(step.requiredAmount) or 1
+            if cur < req then return false end
+        end
+    end
+    return hasAny
+end
+
+-- QuestBoard Daily / Weekly / Monthly + Milestone Chests: 100% REMOTE (zero gliding required)
+function QuestEngine.ClaimQuestBoardRewards()
+    if not Remotes.QuestBoardClaimQuest and not Remotes.QuestBoardClaimChest then return 0 end
+    ResolvePlayerData()
+    local data = State.PlayerData and State.PlayerData.Data
+    local qb = data and data.QuestBoard
+    if type(qb) ~= "table" then return 0 end
+
+    local claimed = 0
+    if Remotes.QuestBoardClaimQuest then
+        for _, tier in ipairs({ "Daily", "Weekly", "Monthly" }) do
+            local tierTbl = qb[tier]
+            local list = type(tierTbl) == "table" and tierTbl.Quests
+            if type(list) == "table" then
+                for idx, entry in pairs(list) do
+                    local numIdx = tonumber(idx)
+                    if numIdx and type(entry) == "table" and entry.Claimed ~= true then
+                        local prog = tonumber(entry.Progress) or 0
+                        local goal = tonumber(entry.Goal) or 1
+                        if goal > 0 and prog >= goal then
+                            local ok = pcall(function()
+                                return Remotes.QuestBoardClaimQuest:InvokeServer(tier, numIdx)
+                            end)
+                            if ok then
+                                claimed = claimed + 1
+                                task.wait(0.12)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if Remotes.QuestBoardClaimChest then
+        local pts = tonumber(qb.Points) or 0
+        local chestsClaimed = type(qb.ChestsClaimed) == "table" and qb.ChestsClaimed or {}
+        local okQB, QBData = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.QuestBoard) end)
+        local chestsCfg = (okQB and type(QBData) == "table" and type(QBData.Chests) == "table") and QBData.Chests or nil
+        if chestsCfg then
+            for idx, cDef in pairs(chestsCfg) do
+                local numIdx = tonumber(idx)
+                local reqPts = type(cDef) == "table" and (tonumber(cDef.Points) or tonumber(cDef.RequiredPoints)) or nil
+                if numIdx and reqPts and pts >= reqPts and not chestsClaimed[numIdx] and not chestsClaimed[tostring(numIdx)] then
+                    local ok = pcall(function()
+                        return Remotes.QuestBoardClaimChest:InvokeServer(numIdx)
+                    end)
+                    if ok then
+                        claimed = claimed + 1
+                        task.wait(0.12)
+                    end
+                end
+            end
+        end
+    end
+
+    return claimed
+end
+
+-- Glides smoothly to the NPC on the current island, runs dialogue without stacking NoMovement locks, and restores full player movement immediately.
+function QuestEngine.InteractAndRunCommands(npcInst, cmdList, checkQuestId, isManual)
+    if QuestEngine.CancelRequested or not ScriptRunning then return false end
+    if not isManual and not Config.AutoAcceptSenseiMoro and not Config.AutoAcceptDailyNPCQuests then return false end
+    if not npcInst or not npcInst.Parent or not Remotes.DialogueRunCommand or not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then
+        return false
+    end
+    if type(cmdList) == "string" then cmdList = { cmdList } end
+    if type(cmdList) ~= "table" or #cmdList == 0 then return false end
+
+    local now = os.clock()
+    local runnable = {}
+    for _, cmd in ipairs(cmdList) do
+        if type(cmd) == "string" and cmd ~= "" and (now - (QuestEngine.CommandCooldown[cmd] or 0)) >= 30.0 then
+            table.insert(runnable, cmd)
+        end
+    end
+    if #runnable == 0 then return false end
+
+    local npcCF = QuestEngine.GetNpcCFrame(npcInst)
+    if not npcCF then return false end
+    local npcPos = npcCF.Position
+    if (npcPos - State.HRP.Position).Magnitude > 2200 then
+        return false
+    end
+
+    -- Compute ground stand spot ~3.5 studs in front of the NPC so server proximity validation passes
+    local standPos = npcPos + npcCF.LookVector * 3.5
+    local floorHit = NavEngine.RaycastSolidFloor(Vector3.new(standPos.X, npcPos.Y + 8.0, standPos.Z), Vector3.new(0, -24.0, 0))
+    if floorHit then
+        standPos = Vector3.new(floorHit.Position.X, floorHit.Position.Y + NavEngine.GetCharacterStandOffset(), floorHit.Position.Z)
+    else
+        standPos = Vector3.new(standPos.X, npcPos.Y + 1.5, standPos.Z)
+    end
+    local standCF = NavEngine.SafeLookAt(standPos, Vector3.new(npcPos.X, standPos.Y, npcPos.Z))
+
+    State.IsDoingQuestNpc = true
+    CombatEngine.ClearStanceLock()
+    if State.HRP.Anchored then
+        if MiningEngine and MiningEngine.SafeUnanchor then
+            pcall(MiningEngine.SafeUnanchor)
+        else
+            State.HRP.Anchored = false
+        end
+    end
+    if State.Humanoid then State.Humanoid.AutoRotate = true end
+
+    local okNav = true
+    if (State.HRP.Position - npcPos).Magnitude > 8.5 then
+        -- Use forceComplete = false so closed doors/chambers abort cleanly after 2 stalls instead of getting stuck indefinitely
+        okNav = NavEngine.NavigateTo(standCF, false)
+    end
+    if QuestEngine.CancelRequested or not ScriptRunning or (not isManual and not Config.AutoAcceptSenseiMoro and not Config.AutoAcceptDailyNPCQuests) then
+        State.IsDoingQuestNpc = false
+        QuestEngine.CloseDialogueCleanly()
+        return false
+    end
+    if not okNav or not State.HRP or (State.HRP.Position - npcPos).Magnitude > 14.0 then
+        for _, cmd in ipairs(runnable) do
+            QuestEngine.CommandCooldown[cmd] = os.clock() + 90.0 -- Backoff unreachable NPC for 2 minutes
+        end
+        State.IsDoingQuestNpc = false
+        return false
+    end
+
+    -- Broadphase sync settle before talking to NPC
+    State.HRP.AssemblyLinearVelocity = Vector3.new(0, 1.5, 0)
+    task.wait(0.16)
+
+    -- Pass 1 (Clean, zero cutscene): run command(s) directly while standing next to NPC (does NOT lock dashing or camera)
+    local anySuccess = false
+    for _, cmd in ipairs(runnable) do
+        QuestEngine.CommandCooldown[cmd] = os.clock()
+        local ok, res = pcall(function()
+            return Remotes.DialogueRunCommand:InvokeServer(cmd)
+        end)
+        if ok and res ~= false then
+            anySuccess = true
+        end
+        task.wait(0.10)
+    end
+
+    -- Verify if server required ProximityService.RF.Dialogue session (only fallback if quest didn't register)
+    local questAcquired = (checkQuestId == nil)
+    if checkQuestId and not QuestEngine.CancelRequested then
+        task.wait(0.18)
+        ResolvePlayerData()
+        local aq = State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.Quests
+        questAcquired = (type(aq) == "table" and aq[checkQuestId] ~= nil)
+    end
+    if not questAcquired and Remotes.ProximityDialogue and not QuestEngine.CancelRequested then
+        -- Silently opens server dialogue session while suppressing client DialogueHandler cutscene/camera/SpeakerCharacter crash
+        QuestEngine.InvokeProximityDialogueSilently(npcInst)
+        for _, cmd in ipairs(runnable) do
+            local ok, res = pcall(function()
+                return Remotes.DialogueRunCommand:InvokeServer(cmd)
+            end)
+            if ok and res ~= false then anySuccess = true end
+            task.wait(0.10)
+        end
+        if checkQuestId then
+            task.wait(0.18)
+            ResolvePlayerData()
+            local aq = State.PlayerData and State.PlayerData.Data and State.PlayerData.Data.Quests
+            questAcquired = (type(aq) == "table" and aq[checkQuestId] ~= nil)
+        end
+    end
+
+    -- If the server rejected the quest (unmet prerequisite / already done), back off 5 min so we never loop back to this NPC
+    if checkQuestId and not questAcquired then
+        for _, cmd in ipairs(runnable) do
+            QuestEngine.CommandCooldown[cmd] = os.clock() + 270.0
+        end
+        anySuccess = false
+    end
+
+    -- Always close server dialogue state cleanly so dashing, movement, and camera stay 100% unlocked
+    QuestEngine.CloseDialogueCleanly()
+    State.IsDoingQuestNpc = false
+    return anySuccess
+end
+
+function QuestEngine.AcceptAndTurnInNPCQuests(forceNow)
+    if not Remotes.DialogueRunCommand then return 0, 0 end
+    if QuestEngine.CancelRequested then return 0, 0 end
+    if State.IsInRaid or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsEnhancing or State.IsAutoSellingMenu then
+        return 0, 0
+    end
+    if RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.IsInAbyssLobby() or RaidEngine.GetActiveBossArena() ~= nil or (type(RaidEngine.IsInGuildIsland) == "function" and RaidEngine.IsInGuildIsland())) then
+        return 0, 0
+    end
+    if forceNow then table.clear(QuestEngine.CommandCooldown) end
+
+    ResolvePlayerData()
+    local data = State.PlayerData and State.PlayerData.Data
+    if type(data) ~= "table" then return 0, 0 end
+    local activeQuests = type(data.Quests) == "table" and data.Quests or {}
+    local completedQuests = type(data.CompletedQuests) == "table" and data.CompletedQuests or {}
+    local cooldownQuests = type(data.CooldownQuests) == "table" and data.CooldownQuests or {}
+    local srvNow = os.time()
+
+    local okQD, QuestsData = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Quests) end)
+    local qDefs = (okQD and type(QuestsData) == "table") and QuestsData or {}
+
+    local accepted, turnedIn = 0, 0
+
+    -- 1. Turn in any completed NPC quests whose quest giver is on THIS island
+    for qid, qObj in pairs(activeQuests) do
+        if QuestEngine.CancelRequested or (not forceNow and not Config.AutoAcceptSenseiMoro and not Config.AutoAcceptDailyNPCQuests) then break end
+        if QuestEngine.IsQuestCompleted(qObj) then
+            local qDef = qDefs[qid]
+            local npcName = qDef and (qDef.Npc or qDef.NPC) or nil
+            local npcInst = npcName and QuestEngine.FindNpcInstance(npcName) or nil
+            if npcInst then
+                local lid = string.lower(tostring(qid))
+                local checkCmds = { "CheckQuest" }
+                if lid == "daily1" then checkCmds = { "CheckDaily1", "CheckQuest" }
+                elseif lid == "weekly1" then checkCmds = { "CheckWeekly1", "CheckQuest" }
+                elseif lid == "daily_farmer" then checkCmds = { "TurnIn", "CheckQuest" } end
+                if QuestEngine.InteractAndRunCommands(npcInst, checkCmds, nil, forceNow) then
+                    turnedIn = turnedIn + 1
+                    task.wait(0.18)
+                end
+            end
+        end
+    end
+
+    if QuestEngine.CancelRequested then return accepted, turnedIn end
+
+    -- Refresh activeQuests after turn-ins
+    ResolvePlayerData()
+    data = State.PlayerData and State.PlayerData.Data or data
+    activeQuests = type(data.Quests) == "table" and data.Quests or {}
+    completedQuests = type(data.CompletedQuests) == "table" and data.CompletedQuests or {}
+
+    -- 2. Auto-Accept Sensei Moro quests for the Sensei Moro NPC on THIS island (glides + dialogue)
+    if forceNow or Config.AutoAcceptSenseiMoro then
+        for _, mDef in ipairs(QuestEngine.SenseiMoroCommands) do
+            if QuestEngine.CancelRequested or (not forceNow and not Config.AutoAcceptSenseiMoro) then break end
+            local npcInst = QuestEngine.FindNpcInstance(mDef.npc)
+            if npcInst then
+                local alreadyHasChain = false
+                for qid in pairs(activeQuests) do
+                    if string.find(tostring(qid), mDef.prefix, 1, true) then
+                        alreadyHasChain = true
+                        break
+                    end
+                end
+                local alreadyCompletedStarter = false
+                if not alreadyHasChain and type(mDef.doneCheckIds) == "table" and #mDef.doneCheckIds > 0 then
+                    alreadyCompletedStarter = true
+                    for _, chkId in ipairs(mDef.doneCheckIds) do
+                        if completedQuests[chkId] ~= true then
+                            alreadyCompletedStarter = false
+                            break
+                        end
+                    end
+                end
+                if not alreadyHasChain and not alreadyCompletedStarter then
+                    if QuestEngine.InteractAndRunCommands(npcInst, mDef.give, nil, forceNow) then
+                        accepted = accepted + 1
+                        task.wait(0.18)
+                    end
+                end
+            end
+        end
+    end
+
+    -- 3. Auto-Accept Daily / Weekly / Island / Fusion Chamber NPC quests present on THIS island
+    if forceNow or Config.AutoAcceptDailyNPCQuests then
+        for _, dDef in ipairs(QuestEngine.DailyNPCCommands) do
+            if QuestEngine.CancelRequested or (not forceNow and not Config.AutoAcceptDailyNPCQuests) then break end
+            local npcInst = QuestEngine.FindNpcInstance(dDef.npc)
+            if npcInst then
+                -- Prerequisite guard (e.g. Fusion Chamber requires Morveth or Zachariel quest completed first)
+                local prereqMet = true
+                if type(dDef.requireAnyCompleted) == "table" and #dDef.requireAnyCompleted > 0 then
+                    prereqMet = false
+                    for _, reqId in ipairs(dDef.requireAnyCompleted) do
+                        if completedQuests[reqId] == true then
+                            prereqMet = true
+                            break
+                        end
+                    end
+                end
+
+                local targetQuestId = prereqMet and dDef.questId or nil
+                local giveCmd = prereqMet and dDef.give or nil
+                -- Multi-stage chain support (e.g. FusionQuest1..4 via Zachariel or Morveth)
+                if prereqMet and type(dDef.chainIds) == "table" and type(dDef.chainGives) == "table" then
+                    targetQuestId = nil
+                    giveCmd = nil
+                    for idx, cid in ipairs(dDef.chainIds) do
+                        if activeQuests[cid] ~= nil then
+                            targetQuestId = cid
+                            break
+                        elseif completedQuests[cid] ~= true then
+                            targetQuestId = cid
+                            giveCmd = dDef.chainGives[idx]
+                            break
+                        end
+                    end
+                end
+
+                if targetQuestId and giveCmd then
+                    local isActive = activeQuests[targetQuestId] ~= nil
+                    if not isActive and dDef.prefix then
+                        for aqId in pairs(activeQuests) do
+                            if string.find(tostring(aqId), dDef.prefix, 1, true) then
+                                isActive = true
+                                break
+                            end
+                        end
+                    end
+                    local cdEnd = tonumber(cooldownQuests[targetQuestId]) or 0
+                    local onCd = (cdEnd > srvNow)
+                    local isRepeatable = string.find(string.lower(targetQuestId), "daily", 1, true) ~= nil
+                        or string.find(string.lower(targetQuestId), "weekly", 1, true) ~= nil
+                        or targetQuestId == "Mining1"
+                    local doneOnce = (completedQuests[targetQuestId] == true) and (not isRepeatable)
+                    if not isActive and not onCd and not doneOnce then
+                        if QuestEngine.InteractAndRunCommands(npcInst, giveCmd, targetQuestId, forceNow) then
+                            accepted = accepted + 1
+                            task.wait(0.18)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return accepted, turnedIn
+end
+
+-- Returns pending quest objectives filtered STRICTLY to the island you are currently on
+function QuestEngine.GetPendingObjectives()
+    ResolvePlayerData()
+    local data = State.PlayerData and State.PlayerData.Data
+    local activeQuests = type(data) == "table" and type(data.Quests) == "table" and data.Quests or {}
+    local validRocks = ConfigManager and ConfigManager.ValidRockSet or {}
+    local validMobs = ConfigManager and ConfigManager.ValidMobSet or {}
+    local mobKeyMap = ConfigManager and ConfigManager.MobKeyToName or {}
+    local okQD, QuestsData = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Quests) end)
+    local qDefs = (okQD and type(QuestsData) == "table") and QuestsData or {}
+
+    local list = {}
+    for qid, qObj in pairs(activeQuests) do
+        if type(qObj) == "table" and type(qObj.Progress) == "table" then
+            local lid = string.lower(tostring(qid))
+            local isMoro = lid:find("moro", 1, true) ~= nil or lid:find("introduction", 1, true) ~= nil or lid:find("island2quest", 1, true) ~= nil
+            local isDaily = lid:find("daily", 1, true) ~= nil or lid:find("weekly", 1, true) ~= nil
+            local prio = 2
+            if Config.AutoQuestPriority == "Sensei Moro First" then
+                prio = isMoro and 1 or (isDaily and 2 or 3)
+            elseif Config.AutoQuestPriority == "Daily Quests First" then
+                prio = isDaily and 1 or (isMoro and 2 or 3)
+            end
+            local qDef = qDefs[qid]
+            local qNpcName = qDef and (qDef.Npc or qDef.NPC) or nil
+            local npcOnThisIsland = (qNpcName ~= nil) and (QuestEngine.FindNpcInstance(qNpcName) ~= nil)
+
+            for _, step in pairs(qObj.Progress) do
+                if type(step) == "table" then
+                    local cur = tonumber(step.currentProgress) or 0
+                    local req = tonumber(step.requiredAmount) or 1
+                    local qType = tostring(step.questType or "")
+                    local target = tostring(step.target or "")
+                    if cur < req and target ~= "" then
+                        local onCurrentIsland = false
+                        local resolvedTarget = target
+                        if qType == "Mine" then
+                            onCurrentIsland = (validRocks[target] == true)
+                        elseif qType == "Kill" then
+                            if validMobs[target] then
+                                onCurrentIsland = true
+                            elseif mobKeyMap[target] and validMobs[mobKeyMap[target]] then
+                                onCurrentIsland = true
+                                resolvedTarget = mobKeyMap[target]
+                            end
+                        else
+                            -- Collect / other objectives: only show if the quest giver belongs to THIS island
+                            onCurrentIsland = npcOnThisIsland
+                        end
+
+                        if onCurrentIsland then
+                            table.insert(list, {
+                                questId = tostring(qid),
+                                questType = qType,
+                                target = resolvedTarget,
+                                cur = cur,
+                                req = req,
+                                prio = prio,
+                            })
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(list, function(a, b)
+        if a.prio ~= b.prio then return a.prio < b.prio end
+        return a.questId < b.questId
+    end)
+    return list
+end
+
+function QuestEngine.RouteActiveObjectives()
+    if not Config.AutoDoQuestObjectives then return end
+    if State.IsInRaid or State.IsDoingQuestNpc or (RaidEngine and RaidEngine.IsInActiveRun()) then return end
+    local objs = QuestEngine.GetPendingObjectives()
+    if #objs == 0 then return end
+
+    for _, obj in ipairs(objs) do
+        if obj.questType == "Mine" and Config.AutoMine then
+            if not (type(Config.MineTargets) == "table" and #Config.MineTargets == 1 and Config.MineTargets[1] == obj.target) then
+                Config.MineTargets = { obj.target }
+                State.TargetRock = nil
+            end
+            break
+        elseif obj.questType == "Kill" and Config.AutoMobFarm then
+            if not (type(Config.MobFarmTargets) == "table" and #Config.MobFarmTargets == 1 and Config.MobFarmTargets[1] == obj.target) then
+                Config.MobFarmTargets = { obj.target }
+                State.TargetMob = nil
+            end
+            break
+        end
+    end
+end
+
+function QuestEngine.UpdateSummaryUI()
+    ResolvePlayerData()
+    local data = State.PlayerData and State.PlayerData.Data
+    local qb = type(data) == "table" and type(data.QuestBoard) == "table" and data.QuestBoard or nil
+    local readyBoard = 0
+    if qb then
+        for _, tier in ipairs({ "Daily", "Weekly", "Monthly" }) do
+            local list = type(qb[tier]) == "table" and qb[tier].Quests
+            if type(list) == "table" then
+                for _, entry in pairs(list) do
+                    if type(entry) == "table" and entry.Claimed ~= true and (tonumber(entry.Progress) or 0) >= math.max(1, tonumber(entry.Goal) or 1) then
+                        readyBoard = readyBoard + 1
+                    end
+                end
+            end
+        end
+    end
+    local objs = QuestEngine.GetPendingObjectives()
+    local curIsl = TeleportEngine and TeleportEngine.GetCurrentIslandInfo and TeleportEngine.GetCurrentIslandInfo()
+    local mapLabel = (curIsl and curIsl.index > 0 and curIsl.name) or "This Island"
+
+    if QuestEngine.StatusLabel then
+        pcall(function()
+            local anyOn = Config.AutoClaimQuestBoard or Config.AutoAcceptSenseiMoro or Config.AutoAcceptDailyNPCQuests or Config.AutoDoQuestObjectives
+            QuestEngine.StatusLabel:SetTitle(string.format("Auto Quests: %s", anyOn and "Active" or "Off"))
+            QuestEngine.StatusLabel:SetDesc(string.format(
+                "Board Ready: %d | Session Claimed: %d | Accepted: %d | %s",
+                readyBoard, QuestEngine.TotalClaimed, QuestEngine.TotalAccepted, tostring(QuestEngine.LastResultText or "Ready")
+            ))
+        end)
+    end
+    if QuestEngine.ActiveQuestsLabel then
+        pcall(function()
+            if #objs == 0 then
+                QuestEngine.ActiveQuestsLabel:SetTitle(string.format("%s Quest Objectives (0)", mapLabel))
+                QuestEngine.ActiveQuestsLabel:SetDesc("No pending Mine/Kill/Collect quest objectives on this island")
+            else
+                local lines = {}
+                for i = 1, math.min(#objs, 4) do
+                    local o = objs[i]
+                    table.insert(lines, string.format("%s %s (%d/%d)", o.questType, o.target, o.cur, o.req))
+                end
+                if #objs > 4 then
+                    table.insert(lines, string.format("+%d more", #objs - 4))
+                end
+                QuestEngine.ActiveQuestsLabel:SetTitle(string.format("%s Quest Objectives (%d)", mapLabel, #objs))
+                QuestEngine.ActiveQuestsLabel:SetDesc(table.concat(lines, " · "))
+            end
+        end)
+    end
+end
+
+function QuestEngine.RunSweep(isManual)
+    if QuestEngine.IsRunning then return 0, 0 end
+    QuestEngine.IsRunning = true
+    QuestEngine.CancelRequested = false
+    QuestEngine.LastSweepAt = os.clock()
+
+    local claimed, accepted, turnedIn = 0, 0, 0
+    pcall(function()
+        if isManual or Config.AutoClaimQuestBoard then
+            claimed = QuestEngine.ClaimQuestBoardRewards()
+        end
+        if not QuestEngine.CancelRequested and (isManual or Config.AutoAcceptSenseiMoro or Config.AutoAcceptDailyNPCQuests) then
+            accepted, turnedIn = QuestEngine.AcceptAndTurnInNPCQuests(isManual)
+        end
+        if not QuestEngine.CancelRequested and Config.AutoDoQuestObjectives then
+            QuestEngine.RouteActiveObjectives()
+        end
+    end)
+
+    State.IsDoingQuestNpc = false
+    QuestEngine.TotalClaimed = QuestEngine.TotalClaimed + claimed + turnedIn
+    QuestEngine.TotalAccepted = QuestEngine.TotalAccepted + accepted
+    if claimed > 0 or accepted > 0 or turnedIn > 0 then
+        QuestEngine.LastResultText = string.format("Claimed %d · Accepted %d", claimed + turnedIn, accepted)
+        Notify("Auto Quests", string.format("Claimed %d reward(s), accepted %d quest(s)!", claimed + turnedIn, accepted), 3.0)
+    elseif isManual and not QuestEngine.CancelRequested then
+        QuestEngine.LastResultText = "Checked — no ready claims or new NPC quests on this island"
+        Notify("Auto Quests", QuestEngine.LastResultText, 2.5)
+    end
+    QuestEngine.IsRunning = false
+    QuestEngine.UpdateSummaryUI()
+    return claimed + turnedIn, accepted
+end
+
+-- Background Auto Quests Loop
+task.spawn(function()
+    local tick = 0
+    while ScriptRunning do
+        tick = tick + 1
+        if (tick % 4) == 0 then
+            pcall(QuestEngine.UpdateSummaryUI)
+        end
+        local now = os.clock()
+        local anyAuto = Config.AutoClaimQuestBoard or Config.AutoAcceptSenseiMoro or Config.AutoAcceptDailyNPCQuests
+        local interval = math.clamp(tonumber(Config.AutoQuestInterval) or 15, 5, 120)
+        if anyAuto and not QuestEngine.IsRunning and (now - (QuestEngine.LastSweepAt or 0)) >= interval then
+            pcall(QuestEngine.RunSweep, false)
+        end
+        if Config.AutoDoQuestObjectives and (now - (QuestEngine.LastObjectiveRouteAt or 0)) >= 3.0 then
+            QuestEngine.LastObjectiveRouteAt = now
+            pcall(QuestEngine.RouteActiveObjectives)
+        end
+        task.wait(1.0)
     end
 end)
 
@@ -14530,137 +20643,304 @@ if not Window then return end
 -- 14. UI TABS & CONTROLS
 -- ===================================================================
 
--- TAB 1: MINING (Sub-sections: Mining, Craft, Selling, Forge, Shop)
+-- DASHBOARD SUBTAB UNDER HOME (keeps top bar at 6 tabs so tab text names stay visible)
 do
-    local MiningTab = Window:Tab({ Title = "Mining", Icon = "zap" })
-    local SubMining = (typeof(MiningTab.SubTab) == "function") and MiningTab:SubTab("Mining") or MiningTab
-    local SubCraft = (typeof(MiningTab.SubTab) == "function") and MiningTab:SubTab("Craft") or MiningTab
-    local SubSelling = (typeof(MiningTab.SubTab) == "function") and MiningTab:SubTab("Selling") or MiningTab
-    local SubForge = (typeof(MiningTab.SubTab) == "function") and MiningTab:SubTab("Forge") or MiningTab
-    local SubShop = (typeof(MiningTab.SubTab) == "function") and MiningTab:SubTab("Shop") or MiningTab
+    local DashboardTab = (Window.HomeTab and type(Window.HomeTab.SubTab) == "function")
+        and Window.HomeTab:SubTab({ Title = "Dashboard", Icon = "activity" })
+        or Window:Tab({ Title = "Stats", Icon = "activity" })
+    local DashBossSec = DashboardTab:Section({ Title = "Boss & Raid Timers", Side = "Left" })
+    local DashSessionSec = DashboardTab:Section({ Title = "Session & Character", Side = "Left" })
+    local DashInvSec = DashboardTab:Section({ Title = "Inventory & Bags", Side = "Right" })
+    local DashBuffsSec = DashboardTab:Section({ Title = "Potions, Essences & Actions", Side = "Right" })
 
-    -- ===================================================================
-    -- SUB-SECTION 1B: CRAFT (AUTO ORE CRAFTING & MEDALLIONS)
-    -- ===================================================================
-    do
-        CraftEngine.LoadCatalog(false)
-        local CraftMainSection = SubCraft:Section({ Title = "Auto Craft (Ore Craft Stations)", Side = "Left" })
-        local CraftSlotSection = SubCraft:Section({ Title = "Craft Slots & Settings", Side = "Right" })
+    local sessionStartedAt = os.clock()
 
-        CraftEngine.StatusLabel = CraftMainSection:Label({
-            Title = "Auto-Craft: Idle",
-            Desc = "Priority: Auto Mine / Combat > Auto Craft > Auto Forge"
-        })
+    local asuraLbl = DashBossSec:Label({
+        Title = "Asura's Incarnate: Checking...",
+        Desc = "Raid Tickets: -- | Status: --"
+    })
+    local otherBossLbl = DashBossSec:Label({
+        Title = "Other Bosses: --",
+        Desc = "Goblin King • Golem • Skeleton King"
+    })
+    local raidStatsLbl = DashBossSec:Label({
+        Title = "Raid Session: 0 Runs",
+        Desc = "Raid Gold: +$0 | Floor/Wave: --"
+    })
 
-        CraftMainSection:Toggle({
-            Title = "Enable Auto Craft",
-            Desc = "Queues selected recipes into open Craft slots (runs before Auto Forge on full bag, or when idle)",
-            Value = Config.AutoCraft,
-            Callback = function(val)
-                Config.AutoCraft = val
-                if not val then
-                    State.IsCrafting = false
-                    NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
-                end
-                CraftEngine.UpdateStatus()
+    local overviewLbl = DashSessionSec:Label({
+        Title = "Level -- | Gold: $--",
+        Desc = "Island: -- | Runtime: 0m 00s | Rate: $0/hr"
+    })
+    local gearLbl = DashSessionSec:Label({
+        Title = "Gear: Checking...",
+        Desc = "Pickaxe: -- | Rare Ores Found: 0"
+    })
+    local activeModesLbl = DashSessionSec:Label({
+        Title = "Active Automations: Idle",
+        Desc = "Toggle features in Mining / Combat / Misc tabs"
+    })
+
+    local bagsLbl = DashInvSec:Label({
+        Title = "Stash Bag: --/-- | Equip Bag: --/--",
+        Desc = "Runes: -- | Total Ore Units: --"
+    })
+    local topOresLbl = DashInvSec:Label({
+        Title = "Top Ores in Stash",
+        Desc = "Scanning inventory..."
+    })
+
+    local potionsLbl = DashBuffsSec:Label({
+        Title = "Health Potions: 0",
+        Desc = "Active Buffs: None"
+    })
+    local essencesLbl = DashBuffsSec:Label({
+        Title = "Essences & Medallions",
+        Desc = "Scanning misc inventory..."
+    })
+
+    local function fmtTimeShort(sec)
+        sec = math.max(0, math.floor(tonumber(sec) or 0))
+        local h = math.floor(sec / 3600)
+        local m = math.floor((sec % 3600) / 60)
+        local s = sec % 60
+        if h > 0 then
+            return string.format("%dh %02dm %02ds", h, m, s)
+        end
+        return string.format("%dm %02ds", m, s)
+    end
+
+    local function fmtBossLine(bossName)
+        local bInfo = RaidEngine and RaidEngine.GetBossWindowInfo and RaidEngine.GetBossWindowInfo(bossName)
+        if not bInfo then
+            return bossName .. ": N/A"
+        end
+        if bInfo.alreadyKilled then
+            return string.format("%s: Defeated (Next %s)", bossName, fmtTimeShort(bInfo.remainingSec))
+        elseif bInfo.open then
+            return string.format("%s: OPEN (%s left)", bossName, fmtTimeShort(bInfo.remainingSec))
+        else
+            return string.format("%s: Spawns in %s", bossName, fmtTimeShort(bInfo.remainingSec))
+        end
+    end
+
+    local function refreshDashboard()
+        local pd = State.PlayerData or ResolvePlayerData()
+        local data = pd and pd.Data
+        local inv = data and data.Inventory
+
+        -- 1. Asura & Boss Timers
+        local asuraInfo = RaidEngine and RaidEngine.GetBossWindowInfo and RaidEngine.GetBossWindowInfo("Asura's Incarnate")
+        local tickets = (RaidEngine and RaidEngine.GetRaidTicketCount and RaidEngine.GetRaidTicketCount()) or 0
+        local targetTix = math.max(1, math.floor(tonumber(Config.AsuraTargetTickets) or 5))
+        local asuraTitle = "Asura's Incarnate: Unknown"
+        if asuraInfo then
+            if asuraInfo.alreadyKilled then
+                asuraTitle = "Asura: Defeated — Next in " .. fmtTimeShort(asuraInfo.remainingSec)
+            elseif asuraInfo.open then
+                asuraTitle = "Asura: OPEN NOW! (" .. fmtTimeShort(asuraInfo.remainingSec) .. " left)"
+            else
+                asuraTitle = "Asura: Spawns in " .. fmtTimeShort(asuraInfo.remainingSec)
             end
-        })
+        end
+        pcall(function()
+            asuraLbl:SetTitle(asuraTitle)
+            asuraLbl:SetDesc(string.format("Raid Tickets: %d/%d | Raid Status: %s", tickets, targetTix, tostring(RaidEngine and RaidEngine.StatusText or "Idle")))
+        end)
 
-        CraftEngine.RecipesDropdown = CraftMainSection:Dropdown({
-            Title = "Recipes To Craft (Priority Order)",
-            Desc = "Select Ores or Abyss Medallions to auto-craft using open Craft slots (Multi-Select)",
-            List = (#CraftEngine.RecipeNames > 0) and CraftEngine.RecipeNames or { "Earthite" },
-            Value = Config.CraftTargets,
-            Multi = true,
-            Callback = function(val)
-                if type(val) == "table" then
-                    Config.CraftTargets = val
-                elseif type(val) == "string" then
-                    Config.CraftTargets = { val }
-                else
-                    Config.CraftTargets = {}
-                end
-                CraftEngine.UpdateStatus()
+        local otherLines = {
+            fmtBossLine("Goblin King"),
+            fmtBossLine("Golem"),
+            fmtBossLine("Skeleton King"),
+        }
+        pcall(function()
+            otherBossLbl:SetTitle("World Boss Timers")
+            otherBossLbl:SetDesc(table.concat(otherLines, "\n"))
+        end)
+
+        local runsSess = (WebhookEngine and WebhookEngine.RaidRunsSession) or 0
+        local raidGoldSess = (WebhookEngine and WebhookEngine.RaidGoldSession) or 0
+        local inRunTxt = (RaidEngine and RaidEngine.IsInActiveRun and RaidEngine.IsInActiveRun())
+            and string.format("Floor %d / Wave %d", RaidEngine.CurrentFloor or 0, RaidEngine.CurrentWave or 0)
+            or "Not in Run"
+        pcall(function()
+            raidStatsLbl:SetTitle(string.format("Raid Session: %d Run(s) | +$%s", runsSess, WebhookEngine.FormatNumber(raidGoldSess)))
+            raidStatsLbl:SetDesc("Live Run: " .. inRunTxt .. " | Mode: " .. tostring(RaidEngine and RaidEngine.FormatModeLabel and RaidEngine.FormatModeLabel(Config.RaidMode) or Config.RaidMode))
+        end)
+
+        -- 2. Player & Session Overview
+        local stats = (WebhookEngine and WebhookEngine.GetPlayerStats and WebhookEngine.GetPlayerStats()) or { Gold = 0, GoldEarned = 0, Level = 1, Island = "Unknown" }
+        local elapsedSec = math.max(1, math.floor(os.clock() - sessionStartedAt))
+        local goldPerHr = math.floor(((stats.GoldEarned or 0) / elapsedSec) * 3600)
+        pcall(function()
+            overviewLbl:SetTitle(string.format("Lv. %d | Gold: $%s (+$%s)", stats.Level or 1, WebhookEngine.FormatNumber(stats.Gold or 0), WebhookEngine.FormatNumber(stats.GoldEarned or 0)))
+            overviewLbl:SetDesc(string.format("Island: %s | Runtime: %s | ~$%s/hr", tostring(stats.Island or "Unknown"), fmtTimeShort(elapsedSec), WebhookEngine.FormatNumber(goldPerHr)))
+        end)
+
+        local pwr, pickName = 0, "None"
+        if MiningEngine and MiningEngine.GetPlayerPickaxePower then
+            pcall(function() pwr, pickName = MiningEngine.GetPlayerPickaxePower() end)
+        end
+        local eqWeapStr = "None"
+        if EnhanceEngine and EnhanceEngine.ResolveTargetEquipment then
+            local okW, eqW = pcall(EnhanceEngine.ResolveTargetEquipment)
+            if okW and eqW then
+                eqWeapStr = string.format("%s +%d", tostring(eqW.Type or eqW.Name or "Weapon"), tonumber(eqW.Upgrade) or 0)
             end
-        })
-        if #CraftEngine.RecipeNames == 0 then
+        end
+        pcall(function()
+            gearLbl:SetTitle("Weapon: " .. eqWeapStr)
+            gearLbl:SetDesc(string.format("Pickaxe: %s (Power %s) | Rare Ores: %d", tostring(pickName), WebhookEngine.FormatNumber(pwr or 0), tonumber(WebhookEngine and WebhookEngine.RareFindsSession) or 0))
+        end)
+
+        local modes = {}
+        if Config.AutoMine then table.insert(modes, (RaidEngine and RaidEngine.MineYieldActive) and "Auto Mine (Paused)" or "Auto Mine") end
+        if Config.AutoMineYieldToBoss then table.insert(modes, "Pause for Asura") end
+        if Config.AutoMobFarm then table.insert(modes, "Auto Combat") end
+        if Config.AutoRaid then table.insert(modes, Config.AutoAsuraToTower and "Asura -> Tower" or "Auto Raid") end
+        if Config.AutoForgeArmor then table.insert(modes, "Auto Forge") end
+        if Config.AutoEnhanceWeapon then table.insert(modes, "Auto Enhance") end
+        if Config.AutoBuyPotions then table.insert(modes, "Auto Buy Pots") end
+        if Config.WebhookEnabled then table.insert(modes, "Webhook") end
+        pcall(function()
+            activeModesLbl:SetTitle("Active: " .. (#modes > 0 and table.concat(modes, ", ") or "Idle"))
+            activeModesLbl:SetDesc(string.format("Mine Target: %s | Filter Ore Peek: %s",
+                type(Config.MineTargets) == "table" and table.concat(Config.MineTargets, ", ") or tostring(Config.MineTarget or "All"),
+                Config.FilterRocksByOre and "ON" or "OFF"))
+        end)
+
+        -- 3. Inventory & Bag Stats
+        local stashUsed, stashCap, _, usableOres = 0, 0, false, 0
+        if ForgeEngine and ForgeEngine.GetStashCapacityStatus then
+            pcall(function() stashUsed, stashCap, _, usableOres = ForgeEngine.GetStashCapacityStatus() end)
+        end
+        local eqCount = (inv and type(inv.Equipments) == "table") and #inv.Equipments or 0
+        local eqCap = 0
+        if ForgeEngine and ForgeEngine.GetEquipmentCapacityStatus then
+            pcall(function()
+                local u, c = ForgeEngine.GetEquipmentCapacityStatus()
+                if type(u) == "number" then eqCount = u end
+                if type(c) == "number" then eqCap = c end
+            end)
+        end
+        local runeCount = 0
+        if inv and type(inv.Misc) == "table" then
+            for _, m in ipairs(inv.Misc) do
+                if type(m) == "table" and m.GUID ~= nil then
+                    runeCount = runeCount + 1
+                end
+            end
+        end
+        if inv and type(inv.Runes) == "table" then
+            for _ in pairs(inv.Runes) do runeCount = runeCount + 1 end
+        end
+        local stashPct = (stashCap and stashCap > 0) and math.floor((stashUsed / stashCap) * 100) or 0
+        pcall(function()
+            bagsLbl:SetTitle(string.format("Stash: %d/%d (%d%%) | Gear: %d%s", stashUsed or 0, stashCap or 0, stashPct, eqCount, eqCap > 0 and ("/" .. tostring(eqCap)) or ""))
+            bagsLbl:SetDesc(string.format("Usable Ores: %s | Runes Owned: %d", WebhookEngine.FormatNumber(usableOres or 0), runeCount))
+        end)
+
+        local oreEntries = {}
+        local totalOreUnits = 0
+        if type(inv) == "table" and ForgeEngine and ForgeEngine.OreDataByName then
+            for k, v in pairs(inv) do
+                if type(v) == "number" and v > 0 and ForgeEngine.OreDataByName[k] then
+                    totalOreUnits = totalOreUnits + math.floor(v)
+                    table.insert(oreEntries, { name = k, qty = math.floor(v) })
+                end
+            end
+        end
+        table.sort(oreEntries, function(a, b)
+            if a.qty ~= b.qty then return a.qty > b.qty end
+            return a.name < b.name
+        end)
+        local topParts = {}
+        for i = 1, math.min(6, #oreEntries) do
+            table.insert(topParts, string.format("%s x%s", oreEntries[i].name, WebhookEngine.FormatNumber(oreEntries[i].qty)))
+        end
+        pcall(function()
+            topOresLbl:SetTitle(string.format("Ores in Stash (%s total, %d types)", WebhookEngine.FormatNumber(totalOreUnits), #oreEntries))
+            topOresLbl:SetDesc(#topParts > 0 and table.concat(topParts, " • ") or "No ores in stash")
+        end)
+
+        -- 4. Potions, Active Buffs, Essences & Medallions
+        local hp3 = PotionEngine and PotionEngine.GetOwnedCount("HealthPotion3") or 0
+        local hp2 = PotionEngine and PotionEngine.GetOwnedCount("HealthPotion2") or 0
+        local hp1 = PotionEngine and PotionEngine.GetOwnedCount("HealthPotion1") or 0
+        local activeBuffs = {}
+        if data and type(data.Potions) == "table" then
+            for pid, remSec in pairs(data.Potions) do
+                if type(remSec) == "number" and remSec > 1 then
+                    local info = PotionEngine and PotionEngine.IdToData and PotionEngine.IdToData[pid]
+                    local nm = (info and info.name) or tostring(pid)
+                    table.insert(activeBuffs, string.format("%s (%s)", nm, fmtTimeShort(remSec)))
+                end
+            end
+        end
+        pcall(function()
+            potionsLbl:SetTitle(string.format("Health Pots: %d (III:%d • II:%d • I:%d)", hp3 + hp2 + hp1, hp3, hp2, hp1))
+            potionsLbl:SetDesc("Active Buffs: " .. (#activeBuffs > 0 and table.concat(activeBuffs, ", ") or "None"))
+        end)
+
+        local essList = {}
+        local keyMisc = {
+            "Mythical Essence", "Superior Essence", "Greater Essence", "Large Essence", "Medium Essence", "Tiny Essence",
+            "Abyss Medallion V", "Abyss Medallion IV", "Abyss Medallion III", "Abyss Medallion II", "Abyss Medallion I",
+        }
+        for _, mName in ipairs(keyMisc) do
+            local cnt = EnhanceEngine and EnhanceEngine.GetMiscCount(mName) or 0
+            if cnt > 0 then
+                local shortName = mName:gsub(" Essence", " Ess"):gsub("Abyss Medallion ", "Med ")
+                table.insert(essList, string.format("%s: %s", shortName, WebhookEngine.FormatNumber(cnt)))
+            end
+        end
+        pcall(function()
+            essencesLbl:SetTitle("Essences & Abyss Medallions")
+            essencesLbl:SetDesc(#essList > 0 and table.concat(essList, " • ") or "None owned yet")
+        end)
+    end
+
+    DashBuffsSec:Button({
+        Title = "Refresh Dashboard Now",
+        Desc = "Immediately re-scans boss timers, inventory, bags, and buffs",
+        Callback = function()
+            task.spawn(refreshDashboard)
+        end
+    })
+
+    DashBuffsSec:Button({
+        Title = "Warp to Asura's Temple",
+        Desc = "Fast-travels via Waypoint (if unlocked) or glides to Asura's Incarnate portal",
+        Callback = function()
             task.spawn(function()
-                for _ = 1, 60 do
-                    task.wait(0.5)
-                    if not ScriptRunning then return end
-                    if CraftEngine.LoadCatalog(true) and #CraftEngine.RecipeNames > 0 then
-                        if CraftEngine.RecipesDropdown and type(CraftEngine.RecipesDropdown.Refresh) == "function" then
-                            pcall(function() CraftEngine.RecipesDropdown:Refresh(CraftEngine.RecipeNames, Config.CraftTargets) end)
-                        end
-                        CraftEngine.UpdateStatus()
-                        break
+                if TeleportEngine and type(TeleportEngine.IsWaypointUnlocked) == "function" and TeleportEngine.IsWaypointUnlocked("Asura's Temple") then
+                    pcall(TeleportEngine.TeleportToWaypoint, "Asura's Temple")
+                    Notify("Dashboard", "Warped to Asura's Temple!", 2.5)
+                else
+                    local _, padPos = RaidEngine.FindPartyPadForMode("Asura's Incarnate")
+                    if padPos then
+                        NavEngine.GlideTo(CFrame.new(padPos + Vector3.new(0, 2.5, 0)), Config.GlideSpeed or 55, true)
+                    else
+                        Notify("Dashboard", "Asura's Temple is only on Crimson Sakura (Island 4).", 3.5)
                     end
                 end
             end)
         end
+    })
 
-        CraftMainSection:Slider({
-            Title = "Batch Amount Per Slot",
-            Desc = "Quantity to craft per open slot (1 uses minimal materials)",
-            Min = 1,
-            Max = 25,
-            Value = Config.CraftBatchAmount,
-            Rounding = 0,
-            Callback = function(val) Config.CraftBatchAmount = val end
-        })
+    task.spawn(function()
+        task.wait(0.5)
+        while ScriptRunning do
+            pcall(refreshDashboard)
+            task.wait(1.0)
+        end
+    end)
+end
 
-        CraftMainSection:Toggle({
-            Title = "Craft Whenever Slot Opens (Interrupt Farm)",
-            Desc = "OFF: Auto Mine/Combat > Auto Craft > Auto Forge (runs before Forge on full bag or when idle). ON: crafts anytime a slot opens",
-            Value = Config.AutoCraftInterruptFarm,
-            Callback = function(val) Config.AutoCraftInterruptFarm = val end
-        })
-
-        CraftMainSection:Button({
-            Title = "Craft Open Slots Now",
-            Desc = "Claims finished crafts and immediately queues selected recipes into free Craft slots",
-            Callback = function()
-                task.spawn(function()
-                    local done = CraftEngine.RunAutoCraftCycle(true)
-                    if done > 0 then
-                        Notify("Auto Craft", string.format("Queued %d Craft slot(s)!", done), 3.0)
-                    else
-                        Notify("Auto Craft", "No open Craft slots or insufficient materials for selected recipes.", 3.0)
-                    end
-                end)
-            end
-        })
-
-        CraftEngine.SlotInfoLabel = CraftSlotSection:Label({
-            Title = "Craft Slots: Scanning...",
-            Desc = "Shows live Craft slots (usually 2 unlocked free slots)"
-        })
-
-        CraftSlotSection:Toggle({
-            Title = "Auto Claim Completed Crafts",
-            Desc = "Automatically claims crafts the exact second their timer finishes (event + timer driven)",
-            Value = Config.AutoClaimSmelt,
-            Callback = function(val)
-                Config.AutoClaimSmelt = val
-                if val then
-                    pcall(CraftEngine.ScheduleCompletionClaim)
-                end
-            end
-        })
-
-        CraftSlotSection:Button({
-            Title = "Check / Claim Crafts Now",
-            Desc = "Manually checks & claims any finished Craft slots now",
-            Callback = function()
-                if Remotes.CheckCraftCompletions then
-                    pcall(function() Remotes.CheckCraftCompletions:InvokeServer() end)
-                end
-                task.delay(0.15, function() pcall(CraftEngine.UpdateStatus) end)
-            end
-        })
-
-        pcall(CraftEngine.UpdateStatus)
-    end
+-- TAB 1: MINING (Clean flat tab — Auto Mine, Safeties & Ore Peek)
+do
+    local MiningTab = Window:Tab({ Title = "Mining", Icon = "zap" })
+    local SubMining = MiningTab
 
     -- ===================================================================
     -- SUB-SECTION 1: MINING (AUTOMATION & SAFETIES)
@@ -14677,6 +20957,8 @@ do
                 State.CheckingPotionsOnStart = true
                 task.spawn(PotionEngine.CheckOnAutoMineStart)
             else
+                State.InAutoDefense = false
+                MiningEngine.ActiveSunkenCF = nil
                 State.CheckingPotionsOnStart = false
                 State.TargetRock = nil
                 State.CurrentRock = nil
@@ -14687,7 +20969,7 @@ do
                     NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
                     pcall(NavEngine.RestoreCharacterPhysics)
                 end
-                if State.HRP and State.HRP.Anchored then
+                if State.HRP and State.HRP.Anchored and not (RaidEngine and RaidEngine.SkyAnchorCF) then
                     pcall(function()
                         if NavEngine.IsSunkenMode(Config.MinePositionMode) then
                             State.HRP.CFrame = CFrame.new(State.HRP.Position + Vector3.new(0, 4.0, 0))
@@ -14770,6 +21052,23 @@ do
         end
     })
 
+    MainSection:Toggle({
+        Title = "Prioritize Comet Star Event Rocks",
+        Desc = "Interrupts Auto Mine / Auto Combat to mine fallen Comet Star event rocks (Galaxite / Star Dust), then resumes",
+        Value = Config.PrioritizeCometRocks,
+        Callback = function(val)
+            Config.PrioritizeCometRocks = val
+            MiningEngine.LastCometCheckAt = 0
+            MiningEngine.HasActiveCometRock = false
+            if not val and MiningEngine.IsCometTarget then
+                MiningEngine.IsCometTarget = false
+                State.TargetRock = nil
+                State.CurrentRock = nil
+                NavEngine.CachedRock = nil
+            end
+        end
+    })
+
     MainSection:Dropdown({
         Title = "Target Mining Zones",
         Desc = "Restrict Auto Mine to specific caves/zones (or 'Any' for all zones)",
@@ -14836,6 +21135,35 @@ do
         Callback = function(val) Config.SunkenDistance = val end
     })
 
+    MainSection:Toggle({
+        Title = "Multi-Hit Close Rocks (2x)",
+        Desc = "When two target rocks are right next to each other, positions in the middle to mine both simultaneously",
+        Value = Config.MineMultiRock,
+        Callback = function(val)
+            Config.MineMultiRock = val
+            NavEngine.CachedRock = nil
+            NavEngine.CachedPartnerRock = nil
+            if not val and MiningEngine and MiningEngine.PartnerRock then
+                MiningEngine.SetRockLocalCollision(MiningEngine.PartnerRock, true)
+                MiningEngine.PartnerRock = nil
+            end
+        end
+    })
+
+    MainSection:Slider({
+        Title = "Multi-Hit Max Gap (Studs)",
+        Desc = "Maximum edge-to-edge gap between two rocks to mine both at once (default: 8.5)",
+        Min = 2.0,
+        Max = 12.0,
+        Value = Config.MineMultiRockMaxGap,
+        Rounding = 1,
+        Callback = function(val)
+            Config.MineMultiRockMaxGap = val
+            NavEngine.CachedRock = nil
+            NavEngine.CachedPartnerRock = nil
+        end
+    })
+
     local SafetiesSection = SubMining:Section({ Title = "Safeties & Gear", Side = "Right" })
 
     local TargetStatusLabel = SafetiesSection:Label({
@@ -14859,8 +21187,77 @@ do
     })
 
     SafetiesSection:Toggle({
-        Title = "Spam Weapon While Mining",
-        Desc = "Fires Weapon alongside Pickaxe to hit nearby mobs while mining",
+        Title = "Kill Threatening Mobs While Mining",
+        Desc = "Pauses mining to kill nearby or attacking mobs with your weapon, then resumes your rock (zero mining slowdown)",
+        Value = Config.MineKillMobsEnabled,
+        Callback = function(val)
+            Config.MineKillMobsEnabled = val
+            if not val then
+                State.InAutoDefense = false
+                if MiningEngine then
+                    MiningEngine.ClearDefenseRegen(true)
+                    MiningEngine.LastAttackerMob = nil
+                    MiningEngine.LastDamagedAt = 0
+                end
+            end
+        end
+    })
+
+    SafetiesSection:Dropdown({
+        Title = "Mob Defense Trigger",
+        Desc = "Choose whether to fight mobs that get close, mobs that attack you, or both",
+        List = { "Both (Near or Attacked)", "When Nearby (Range)", "When Attacked (Damage / Parry)" },
+        Value = Config.MineKillMobsTrigger,
+        Callback = function(val)
+            if type(val) == "string" then Config.MineKillMobsTrigger = val end
+        end
+    })
+
+    SafetiesSection:Slider({
+        Title = "Mob Defense Range (Studs)",
+        Desc = "Distance threshold to detect nearby hostile mobs while mining",
+        Min = 8,
+        Max = 45,
+        Value = Config.MineKillMobsRange,
+        Rounding = 0,
+        Callback = function(val) Config.MineKillMobsRange = val end
+    })
+
+    SafetiesSection:Toggle({
+        Title = "Low-HP Air Retreat (Mob Defense)",
+        Desc = "Flies into the air to regenerate when HP drops low during Mob Defense. Buy Health Potions in the Potions & Shop tab to heal faster (works alongside Auto Use Potions).",
+        Value = Config.MineDefenseLowHpRetreat,
+        Callback = function(val)
+            Config.MineDefenseLowHpRetreat = val
+            if not val and MiningEngine then
+                MiningEngine.ClearDefenseRegen(true)
+            end
+        end
+    })
+
+    SafetiesSection:Slider({
+        Title = "Defense Retreat Below HP %",
+        Desc = "Flies into the air & drinks Health Potions (buy in Potions & Shop tab) at or below this HP %",
+        Min = 10,
+        Max = 75,
+        Value = Config.MineDefenseRetreatHP,
+        Rounding = 0,
+        Callback = function(val) Config.MineDefenseRetreatHP = val end
+    })
+
+    SafetiesSection:Slider({
+        Title = "Defense Resume Fight At HP %",
+        Desc = "Drops back down to finish fighting once HP recovers to this %",
+        Min = 40,
+        Max = 100,
+        Value = Config.MineDefenseResumeHP,
+        Rounding = 0,
+        Callback = function(val) Config.MineDefenseResumeHP = val end
+    })
+
+    SafetiesSection:Toggle({
+        Title = "Spam Weapon While Mining (Legacy)",
+        Desc = "Fires Weapon on every pickaxe swing (can slow heavy weapons — prefer 'Kill Threatening Mobs' above)",
         Value = Config.AutoDefense,
         Callback = function(val) Config.AutoDefense = val end
     })
@@ -14975,124 +21372,18 @@ do
             end
         })
     end
+end
 
-    -- ===================================================================
-    -- SUB-SECTION 2: SELLING (ARMOR & SELECTIVE ORE WHITELIST)
-    -- ===================================================================
-    local ArmorSellSection = SubSelling:Section({ Title = "Armor Selling (Remote Marbles)", Side = "Left" })
+-- TAB 2: FORGE & GEAR (SubTabs: Forge, Craft, Runes, Enhancer, Calculator)
+do
+    local ForgeTab = Window:Tab({ Title = "Forge & Gear", Icon = "flame" })
+    local SubForge = (typeof(ForgeTab.SubTab) == "function") and ForgeTab:SubTab("Forge", "flame") or ForgeTab
+    local SubCraft = (typeof(ForgeTab.SubTab) == "function") and ForgeTab:SubTab("Craft", "hammer") or ForgeTab
+    local SubRunes = (typeof(ForgeTab.SubTab) == "function") and ForgeTab:SubTab("Runes", "gem") or ForgeTab
+    local SubEnhance = (typeof(ForgeTab.SubTab) == "function") and ForgeTab:SubTab("Enhancer", "sparkles") or ForgeTab
+    local SubCalc = (typeof(ForgeTab.SubTab) == "function") and ForgeTab:SubTab("Calculator", "calculator") or ForgeTab
 
-    local ArmorSellStatusLabel = ArmorSellSection:Label({
-        Title = "Armor Selling: Ready",
-        Desc = "Auto-sell runs automatically inside Auto Forge"
-    })
-    ForgeEngine.ArmorSellStatusLabel = ArmorSellStatusLabel
-
-    local StashSellSection = SubSelling:Section({ Title = "Selective Ore Selling (Protected)", Side = "Right" })
-
-    local StashSellStatusLbl = StashSellSection:Label({
-        Title = "Ore Filter: 0 Ores Selected",
-        Desc = "ONLY ores picked below will be sold; non-picked ores are protected!"
-    })
-    ForgeEngine.StashSellStatusLabel = StashSellStatusLbl
-
-    if #ForgeEngine.SellableOreNames == 0 then
-        ForgeEngine.EnsureOreCatalog()
-    end
-    ForgeEngine.SellOresDropdown = StashSellSection:Dropdown({
-        Title = "Target Ores to Sell",
-        Desc = "Pick which ores you WANT to sell. Non-picked ores are NEVER sold!",
-        List = ForgeEngine.SellableOreNames,
-        Value = Config.SellOreWhitelist,
-        Multi = true,
-        Callback = function(val)
-            if type(val) == "table" then
-                Config.SellOreWhitelist = val
-            elseif type(val) == "string" then
-                Config.SellOreWhitelist = { val }
-            else
-                Config.SellOreWhitelist = {}
-            end
-            local wl = ForgeEngine.GetSelectedSellOresList()
-            if StashSellStatusLbl then
-                if #wl == 0 then
-                    StashSellStatusLbl:SetTitle("Ore Filter: None Selected (All Safe)")
-                    StashSellStatusLbl:SetDesc("Pick ores above to enable selling; unselected ores stay safe")
-                else
-                    StashSellStatusLbl:SetTitle(string.format("Ore Filter: %d Type(s) Selected", #wl))
-                    StashSellStatusLbl:SetDesc("Will sell ONLY: " .. table.concat(wl, ", "))
-                end
-            end
-        end
-    })
-    -- Sync initial label + retry lazy catalog population if Raid/Island data finished loading slightly after UI
     do
-        local wlInit = ForgeEngine.GetSelectedSellOresList()
-        if #wlInit > 0 and StashSellStatusLbl then
-            StashSellStatusLbl:SetTitle(string.format("Ore Filter: %d Type(s) Selected", #wlInit))
-            StashSellStatusLbl:SetDesc("Will sell ONLY: " .. table.concat(wlInit, ", "))
-        end
-        if not ForgeEngine.OreCatalogComplete or #ForgeEngine.SellableOreNames == 0 then
-            task.spawn(function()
-                for _ = 1, 60 do
-                    task.wait(0.5)
-                    if not ScriptRunning then return end
-                    local hasAny, grew = ForgeEngine.EnsureOreCatalog()
-                    if hasAny and (grew or ForgeEngine.OreCatalogComplete) and #ForgeEngine.SellableOreNames > 0 then
-                        if ForgeEngine.SellOresDropdown and type(ForgeEngine.SellOresDropdown.Refresh) == "function" then
-                            pcall(function() ForgeEngine.SellOresDropdown:Refresh(ForgeEngine.SellableOreNames, Config.SellOreWhitelist) end)
-                        end
-                        if ForgeEngine.BlacklistOresDropdown and type(ForgeEngine.BlacklistOresDropdown.Refresh) == "function" then
-                            pcall(function() ForgeEngine.BlacklistOresDropdown:Refresh(ForgeEngine.ForgeableOreNames, Config.ForgeOreBlacklist) end)
-                        end
-                        local hList = { "Auto: Best From Inventory" }
-                        for _, oName in ipairs(ForgeEngine.AllOreNames or {}) do
-                            if oName ~= "Auto: Best From Inventory" then table.insert(hList, oName) end
-                        end
-                        for slotIdx = 1, 4 do
-                            local hd = ForgeEngine.HuntSlotDropdowns[slotIdx]
-                            if hd and type(hd.Refresh) == "function" then
-                                pcall(function() hd:Refresh(hList, Config["WeaponHuntOre" .. tostring(slotIdx)]) end)
-                            end
-                            local cd = ForgeEngine.SlotDropdowns[slotIdx]
-                            if cd and type(cd.Refresh) == "function" then
-                                pcall(function() cd:Refresh(ForgeEngine.AllOreNames, Config["CalcSlot" .. tostring(slotIdx) .. "Ore"]) end)
-                            end
-                        end
-                        if ForgeEngine.OreCatalogComplete then
-                            break
-                        end
-                    end
-                end
-            end)
-        end
-    end
-
-    StashSellSection:Toggle({
-        Title = "Auto-Sell Selected Ores",
-        Desc = "Periodically sells ONLY the ores picked above (protects all other ores)",
-        Value = Config.AutoSellStash,
-        Callback = function(val) Config.AutoSellStash = val end
-    })
-
-    StashSellSection:Slider({
-        Title = "Auto-Sell Ore Interval (s)",
-        Desc = "Cooldown between whitelisted ore sales in seconds",
-        Min = 10,
-        Max = 300,
-        Value = Config.SellStashInterval,
-        Rounding = 0,
-        Callback = function(val) Config.SellStashInterval = val end
-    })
-
-    StashSellSection:Button({
-        Title = "Claim Daily & Mail All",
-        Desc = "Claims all pending daily and mailbox rewards",
-        Callback = function()
-            if Remotes.ClaimDaily then pcall(function() Remotes.ClaimDaily:InvokeServer() end) end
-            if Remotes.ClaimMailAll then pcall(function() Remotes.ClaimMailAll:InvokeServer() end) end
-        end
-    })
-
     -- ===================================================================
     -- SUB-SECTION 3: FORGE (AUTO-PROFIT & MINIGAMES)
     -- ===================================================================
@@ -15323,7 +21614,7 @@ do
         Callback = function(val) Config.WeaponHuntOverride = val end
     })
 
-    WeaponHuntSection:Toggle({
+    ForgeEngine.WeaponHuntRunToggle = WeaponHuntSection:Toggle({
         Title = "Auto 1-1-1-1 Hunt Now (Keep Rolling Until Got)",
         Desc = "Continuously crafts 1-1-1-1 Weapons right now until your target sword drops or ores run out",
         Value = Config.WeaponHuntRunning,
@@ -15347,12 +21638,19 @@ do
     local targetWeaponList = ForgeEngine.GetTargetWeaponOptions()
     WeaponHuntSection:Dropdown({
         Title = "Target Sword / Weapon",
-        Desc = "Stops immediately as soon as this sword/weapon is forged",
+        Desc = "Desired weapon to keep (all other rolls are treated as failed rolls)",
         List = targetWeaponList,
         Value = Config.WeaponHuntTarget,
         Callback = function(val)
             if type(val) == "string" then Config.WeaponHuntTarget = val end
         end
+    })
+
+    WeaponHuntSection:Toggle({
+        Title = "Stop Forging When Desired Weapon Crafted",
+        Desc = "Stops 1-1-1-1 forging immediately when your Target Sword / Weapon drops (OFF = keeps target & keeps rolling)",
+        Value = Config.WeaponHuntStopOnCraft,
+        Callback = function(val) Config.WeaponHuntStopOnCraft = val end
     })
 
     local huntOreList = { "Auto: Best From Inventory" }
@@ -15442,128 +21740,409 @@ do
         Value = Config.AutoClaimSmelt,
         Callback = function(val) Config.AutoClaimSmelt = val end
     })
+    end
 
     -- ===================================================================
-    -- SUB-SECTION 4: SHOP (AUTO BUY & AUTO USE POTIONS)
+    -- SUB-SECTION 1B: CRAFT (AUTO ORE CRAFTING & MEDALLIONS)
     -- ===================================================================
-    local PotionBuySection = SubShop:Section({ Title = "Auto Buy Potions", Side = "Left" })
+    do
+        CraftEngine.LoadCatalog(false)
+        local CraftMainSection = SubCraft:Section({ Title = "Auto Craft (Ore Craft Stations)", Side = "Left" })
+        local CraftSlotSection = SubCraft:Section({ Title = "Craft Slots & Settings", Side = "Right" })
 
-    PotionEngine.StatusLabel = PotionBuySection:Label({
-        Title = "Potions: Idle",
-        Desc = "Auto-glides to current map Potion Shop to restock & maintains active potion buffs"
-    })
+        CraftEngine.StatusLabel = CraftMainSection:Label({
+            Title = "Auto-Craft: Idle",
+            Desc = "Priority: Auto Mine / Combat > Auto Craft > Auto Forge"
+        })
 
-    PotionBuySection:Toggle({
-        Title = "Auto Buy Potions",
-        Desc = "Smooth-glides to Potion Shop when owned stock drops below Target Stock",
-        Value = Config.AutoBuyPotions,
-        Callback = function(val)
-            Config.AutoBuyPotions = val
-            if val then
-                PotionEngine.LastBuyCheckAt = 0
-                table.clear(PotionEngine.LastBuyFailAt)
-                if Config.AutoMine then
-                    State.CheckingPotionsOnStart = true
-                    task.spawn(PotionEngine.CheckOnAutoMineStart)
-                end
-            else
-                State.CheckingPotionsOnStart = false
-                if State.IsBuyingPotions then
-                    State.IsBuyingPotions = false
+        CraftMainSection:Toggle({
+            Title = "Enable Auto Craft",
+            Desc = "Queues selected recipes into open Craft slots (runs before Auto Forge on full bag, or when idle)",
+            Value = Config.AutoCraft,
+            Callback = function(val)
+                Config.AutoCraft = val
+                if not val then
+                    State.IsCrafting = false
                     NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
-                    pcall(NavEngine.RestoreCharacterPhysics)
+                end
+                CraftEngine.UpdateStatus()
+            end
+        })
+
+        CraftEngine.RecipesDropdown = CraftMainSection:Dropdown({
+            Title = "Recipes To Craft (Priority Order)",
+            Desc = "Select Ores or Abyss Medallions to auto-craft using open Craft slots (Multi-Select)",
+            List = (#CraftEngine.RecipeNames > 0) and CraftEngine.RecipeNames or { "Earthite" },
+            Value = Config.CraftTargets,
+            Multi = true,
+            Callback = function(val)
+                if type(val) == "table" then
+                    Config.CraftTargets = val
+                elseif type(val) == "string" then
+                    Config.CraftTargets = { val }
+                else
+                    Config.CraftTargets = {}
+                end
+                CraftEngine.UpdateStatus()
+            end
+        })
+        if #CraftEngine.RecipeNames == 0 then
+            task.spawn(function()
+                for _ = 1, 60 do
+                    task.wait(0.5)
+                    if not ScriptRunning then return end
+                    if CraftEngine.LoadCatalog(true) and #CraftEngine.RecipeNames > 0 then
+                        if CraftEngine.RecipesDropdown and type(CraftEngine.RecipesDropdown.Refresh) == "function" then
+                            pcall(function() CraftEngine.RecipesDropdown:Refresh(CraftEngine.RecipeNames, Config.CraftTargets) end)
+                        end
+                        CraftEngine.UpdateStatus()
+                        break
+                    end
+                end
+            end)
+        end
+
+        CraftMainSection:Slider({
+            Title = "Batch Amount Per Slot",
+            Desc = "Quantity to craft per open slot (1 uses minimal materials)",
+            Min = 1,
+            Max = 25,
+            Value = Config.CraftBatchAmount,
+            Rounding = 0,
+            Callback = function(val) Config.CraftBatchAmount = val end
+        })
+
+        CraftMainSection:Toggle({
+            Title = "Craft Whenever Slot Opens (Interrupt Farm)",
+            Desc = "OFF: Auto Mine/Combat > Auto Craft > Auto Forge (runs before Forge on full bag or when idle). ON: crafts anytime a slot opens",
+            Value = Config.AutoCraftInterruptFarm,
+            Callback = function(val) Config.AutoCraftInterruptFarm = val end
+        })
+
+        CraftMainSection:Button({
+            Title = "Craft Open Slots Now",
+            Desc = "Claims finished crafts and immediately queues selected recipes into free Craft slots",
+            Callback = function()
+                task.spawn(function()
+                    local done = CraftEngine.RunAutoCraftCycle(true)
+                    if done > 0 then
+                        Notify("Auto Craft", string.format("Queued %d Craft slot(s)!", done), 3.0)
+                    else
+                        Notify("Auto Craft", "No open Craft slots or insufficient materials for selected recipes.", 3.0)
+                    end
+                end)
+            end
+        })
+
+        CraftEngine.SlotInfoLabel = CraftSlotSection:Label({
+            Title = "Craft Slots: Scanning...",
+            Desc = "Shows live Craft slots (usually 2 unlocked free slots)"
+        })
+
+        CraftSlotSection:Toggle({
+            Title = "Auto Claim Completed Crafts",
+            Desc = "Automatically claims crafts the exact second their timer finishes (event + timer driven)",
+            Value = Config.AutoClaimSmelt,
+            Callback = function(val)
+                Config.AutoClaimSmelt = val
+                if val then
+                    pcall(CraftEngine.ScheduleCompletionClaim)
                 end
             end
-        end
-    })
+        })
 
-    PotionEngine.BuyDropdown = PotionBuySection:Dropdown({
-        Title = "Potions To Buy",
-        Desc = "Select shop potions to automatically restock on the active map (Multi-Select)",
-        List = PotionEngine.ShopPotionLabels,
-        Value = Config.AutoBuyPotionTypes,
-        Multi = true,
-        Callback = function(val)
-            if type(val) == "table" then
-                Config.AutoBuyPotionTypes = val
-            elseif type(val) == "string" then
-                Config.AutoBuyPotionTypes = { val }
+        CraftSlotSection:Button({
+            Title = "Check / Claim Crafts Now",
+            Desc = "Manually checks & claims any finished Craft slots now",
+            Callback = function()
+                if Remotes.CheckCraftCompletions then
+                    pcall(function() Remotes.CheckCraftCompletions:InvokeServer() end)
+                end
+                task.delay(0.15, function() pcall(CraftEngine.UpdateStatus) end)
             end
-            table.clear(PotionEngine.LastBuyFailAt)
+        })
+
+        pcall(CraftEngine.UpdateStatus)
+    end
+
+    do
+    -- ===================================================================
+    -- SUB-TAB 3: RUNES (Best Rune Optimizer, Attach Cost & Auto Put Runes)
+    -- ===================================================================
+    local RuneInfoSection = SubRunes:Section({ Title = "Best Rune & Attach Cost Calculator", Side = "Right" })
+    local RuneControlSection = SubRunes:Section({ Title = "Auto Put Runes & Selection", Side = "Left" })
+
+    RuneEngine.BestRuneLabel = RuneInfoSection:Label({
+        Title = "BEST Rune: Scanning...",
+        Desc = "Finds the highest-% roll rune in your bag (overall or per Focus Trait)"
+    })
+
+    RuneEngine.BestPickaxeRuneLabel = RuneInfoSection:Label({
+        Title = "BEST Pickaxe Rune: Scanning...",
+        Desc = "Finds the best Pickaxe rune (Miner Shard) currently in your inventory"
+    })
+
+    RuneEngine.CostInfoLabel = RuneInfoSection:Label({
+        Title = "Attach Cost: --",
+        Desc = "Select target equipment & check open slots + Gold cost"
+    })
+
+    RuneEngine.ActionStatusLabel = RuneInfoSection:Label({
+        Title = "Runes: Ready",
+        Desc = "Attaches runes remotely from anywhere without leaving your spot"
+    })
+
+    RuneEngine.RefreshDropdownLists()
+
+    RuneControlSection:Dropdown({
+        Title = "Equipment Filter",
+        Desc = "Show Pickaxes & Weapons together, or filter to Pickaxes Only / Weapons Only / Armor Only",
+        List = { "Pickaxes & Weapons", "Pickaxes Only", "Weapons Only", "Armor Only" },
+        Value = Config.RuneEquipFilter,
+        Callback = function(val)
+            if type(val) == "string" then
+                Config.RuneEquipFilter = val
+                Config.RuneTargetEquipment = ""
+                RuneEngine.RefreshDropdownLists()
+            end
         end
     })
 
-    PotionBuySection:Slider({
-        Title = "Target Stock Per Potion",
-        Desc = "Restocks selected shop potions up to this quantity in bag",
+    RuneEngine.EquipDropdown = RuneControlSection:Dropdown({
+        Title = "Target Equipment (Pickaxe / Weapon)",
+        Desc = "Choose which Pickaxe, Weapon, or Armor to evaluate open rune slots & attach cost for",
+        List = RuneEngine.EquipLabels,
+        Value = Config.RuneTargetEquipment ~= "" and Config.RuneTargetEquipment or RuneEngine.EquipLabels[1],
+        Callback = function(val)
+            if type(val) == "string" then
+                Config.RuneTargetEquipment = val
+                RuneEngine.RefreshRunesAndInfo()
+            end
+        end
+    })
+
+    RuneControlSection:Dropdown({
+        Title = "Trait Focus Filter",
+        Desc = "Prioritizes runes with the highest % roll for this trait (e.g. Fire %, Mining)",
+        List = RuneEngine.FocusOptions,
+        Value = Config.RuneTraitFocus,
+        Callback = function(val)
+            if type(val) == "string" then
+                Config.RuneTraitFocus = val
+                RuneEngine.RefreshRunesAndInfo()
+            end
+        end
+    })
+
+    RuneEngine.RuneDropdown = RuneControlSection:Dropdown({
+        Title = "Rune To Attach",
+        Desc = "Sorted highest % first; keep 'Auto: Best For Focus' or pick manually",
+        List = RuneEngine.RuneLabels,
+        Value = Config.RuneSelectedManual,
+        Callback = function(val)
+            if type(val) == "string" then
+                Config.RuneSelectedManual = val
+                RuneEngine.UpdateInfoWindow()
+            end
+        end
+    })
+
+    RuneControlSection:Toggle({
+        Title = "Auto Put Best Runes",
+        Desc = "Automatically attaches your highest-% compatible rune whenever Target Weapon has an open slot",
+        Value = Config.AutoPutRunes,
+        Callback = function(val)
+            Config.AutoPutRunes = val
+            if val then
+                task.spawn(RuneEngine.AttachSelectedRune)
+            end
+        end
+    })
+
+    RuneControlSection:Button({
+        Title = "Refresh Weapons, Runes & Cost",
+        Desc = "Re-scans inventory runes, weapon slots, and attach Gold quote",
+        Callback = function()
+            RuneEngine.RefreshDropdownLists()
+            RuneEngine.UpdateSellStatusLabel()
+        end
+    })
+
+    -- ===================================================================
+    -- SUB-TAB 3B: AUTO WEAPON ENHANCER
+    -- ===================================================================
+    local EnhLeft = SubEnhance:Section({ Title = "Auto Equipment Enhancer", Side = "Left" })
+    local EnhRight = SubEnhance:Section({ Title = "Cost, Chance & Medallions", Side = "Right" })
+
+    EnhanceEngine.StatusLabel = EnhLeft:Label({
+        Title = "Enhancer: Ready",
+        Desc = "Upgrades your Weapons & Armors automatically using Gold & Essences"
+    })
+
+    if type(EnhRight.Image) == "function" then
+        local imgLbl = EnhRight:Image({
+            Image = "rbxassetid://111362591084511",
+            Height = 88
+        })
+        if imgLbl then
+            pcall(function()
+                imgLbl.ScaleType = Enum.ScaleType.Fit
+                imgLbl.Visible = false
+            end)
+            EnhanceEngine.WeaponImage = imgLbl
+        end
+    end
+
+    EnhanceEngine.CostLabel = EnhRight:Label({
+        Title = "Cost: --",
+        Desc = "Shows live upgrade requirements & success chance"
+    })
+
+    EnhLeft:Dropdown({
+        Title = "Target Equipment Mode",
+        Desc = "Upgrade all equipped gear (Weapon + Armors), Weapon only, Armors only, best in bag, or a specific item",
+        List = {
+            "Auto: Equipped Gear (All)",
+            "Auto: Equipped Weapon",
+            "Auto: Equipped Armor (All)",
+            "Auto: Best Weapon in Bag",
+            "Auto: Best Armor in Bag",
+            "Selected Equipment",
+        },
+        Value = Config.EnhanceTargetMode,
+        Callback = function(val)
+            Config.EnhanceTargetMode = val
+            task.spawn(EnhanceEngine.RefreshPreview)
+        end
+    })
+
+    local _, initEquipLabels = EnhanceEngine.GetEnhanceableEquipments()
+    local initEnhVal = (type(Config.EnhanceSelectedEquip) == "string" and EnhanceEngine.EquipLabelToObj[Config.EnhanceSelectedEquip])
+        and Config.EnhanceSelectedEquip
+        or initEquipLabels[1]
+
+    EnhanceEngine.EquipDropdown = EnhLeft:Dropdown({
+        Title = "Select Equipment (Weapon / Armor)",
+        Desc = "Used when Target Equipment Mode is set to 'Selected Equipment'",
+        List = initEquipLabels,
+        Value = initEnhVal,
+        Callback = function(val)
+            Config.EnhanceSelectedEquip = val
+            task.spawn(EnhanceEngine.RefreshPreview)
+        end
+    })
+
+    EnhLeft:Slider({
+        Title = "Target Upgrade Level (+1 to +9)",
+        Desc = "Auto Enhancer stops once target Weapon / Armor pieces reach this +Level",
         Min = 1,
-        Max = 10,
-        Value = Config.AutoBuyPotionStock,
+        Max = 9,
+        Value = Config.EnhanceTargetLevel,
         Rounding = 0,
-        Callback = function(val) Config.AutoBuyPotionStock = val end
-    })
-
-    PotionBuySection:Toggle({
-        Title = "Buy Only After Buffs Expire",
-        Desc = "Waits until all active potion buffs finish before leaving Auto Mine to buy",
-        Value = Config.AutoBuyAfterBuffsExpire,
-        Callback = function(val) Config.AutoBuyAfterBuffsExpire = val end
-    })
-
-    PotionBuySection:Slider({
-        Title = "Buy Every X Minutes",
-        Desc = "Minimum minutes between potion shop runs (0 = no interval cooldown)",
-        Min = 0,
-        Max = 60,
-        Value = Config.AutoBuyPotionIntervalMin,
-        Rounding = 0,
-        Callback = function(val) Config.AutoBuyPotionIntervalMin = val end
-    })
-
-    local PotionUseSection = SubShop:Section({ Title = "Auto Use Potions", Side = "Right" })
-
-    PotionUseSection:Toggle({
-        Title = "Auto Use Potions",
-        Desc = "Automatically drinks & stacks selected potions up to max duration (or below HP% for healing)",
-        Value = Config.AutoUsePotions,
         Callback = function(val)
-            Config.AutoUsePotions = val
-            if val and Config.AutoMine then
-                State.CheckingPotionsOnStart = true
-                task.spawn(PotionEngine.CheckOnAutoMineStart)
+            Config.EnhanceTargetLevel = val
+            task.spawn(EnhanceEngine.RefreshPreview)
+        end
+    })
+
+    EnhLeft:Toggle({
+        Title = "Auto Enhance Equipment",
+        Desc = "Automatically enhances your target Weapon / Armors whenever you have enough Gold & Essences",
+        Value = Config.AutoEnhanceWeapon,
+        Callback = function(val)
+            Config.AutoEnhanceWeapon = val
+            EnhanceEngine.StopBatch = not val
+            if val then
+                task.spawn(EnhanceEngine.RefreshPreview)
+            else
+                EnhanceEngine.SetStatus("Enhancer: Paused", "Toggle ON to resume auto upgrading")
             end
         end
     })
 
-    PotionEngine.UseDropdown = PotionUseSection:Dropdown({
-        Title = "Potions To Use",
-        Desc = "Select potions from stash/bag to keep active automatically (Multi-Select)",
-        List = PotionEngine.AllPotionLabels,
-        Value = Config.AutoUsePotionTypes,
+    EnhLeft:Button({
+        Title = "Enhance Equipment Once",
+        Desc = "Immediately performs one upgrade roll on the current target Weapon / Armor",
+        Callback = function()
+            task.spawn(function()
+                EnhanceEngine.EnhanceOnce(true)
+            end)
+        end
+    })
+
+    EnhLeft:Button({
+        Title = "Enhance Until Target / Out of Mats",
+        Desc = "Upgrades repeatedly until Target Level is reached (across all selected gear) or Gold/Essences run out",
+        Callback = function()
+            task.spawn(EnhanceEngine.EnhanceBatchToTarget)
+        end
+    })
+
+    EnhLeft:Button({
+        Title = "Refresh Gear & Cost",
+        Desc = "Re-scans inventory Weapons & Armors, Gold, Essences, and success chance",
+        Callback = function()
+            task.spawn(EnhanceEngine.RefreshPreview)
+        end
+    })
+
+    EnhRight:Slider({
+        Title = "Minimum Success Chance %",
+        Desc = "Skips enhancing if predicted chance (after Medallions/Seals) is below this % (0 = always roll)",
+        Min = 0,
+        Max = 100,
+        Value = Config.EnhanceMinChancePct,
+        Rounding = 0,
+        Callback = function(val) Config.EnhanceMinChancePct = val end
+    })
+
+    EnhRight:Toggle({
+        Title = "Auto-Use Abyss Medallions",
+        Desc = "Automatically adds selected Abyss Medallions (lowest tier first) up to 100% chance",
+        Value = Config.EnhanceUseMedallions,
+        Callback = function(val) Config.EnhanceUseMedallions = val end
+    })
+
+    EnhRight:Dropdown({
+        Title = "Allowed Medallion Tiers",
+        Desc = "Which Abyss Medallion tiers Auto Enhancer is allowed to spend",
+        List = EnhanceEngine.MedallionOptions,
+        Value = Config.EnhanceMedallionTiers,
         Multi = true,
         Callback = function(val)
             if type(val) == "table" then
-                Config.AutoUsePotionTypes = val
+                Config.EnhanceMedallionTiers = val
             elseif type(val) == "string" then
-                Config.AutoUsePotionTypes = { val }
+                Config.EnhanceMedallionTiers = { val }
+            else
+                Config.EnhanceMedallionTiers = {}
             end
         end
     })
 
-    PotionUseSection:Slider({
-        Title = "Health Potion Trigger HP %",
-        Desc = "Auto-drinks selected Health Potions when HP drops to or below this percentage",
-        Min = 10,
-        Max = 95,
-        Value = Config.AutoUseHealthPct,
-        Rounding = 0,
-        Callback = function(val) Config.AutoUseHealthPct = val end
+    EnhRight:Toggle({
+        Title = "Auto-Use FailStack Seals",
+        Desc = "Uses owned FailStack Seals when success chance is below 100%",
+        Value = Config.EnhanceUseSeals,
+        Callback = function(val) Config.EnhanceUseSeals = val end
     })
-end
 
--- TAB 2: INTERACTIVE FORGE CALCULATOR (theforge.gg/calculator Replica)
-do
-    local CalcTab = Window:Tab({ Title = "Calculator", Icon = "calculator" })
+    EnhRight:Toggle({
+        Title = "Glide to Enhancer NPC if Needed",
+        Desc = "If server requires standing near Enhancer NPC (20 studs), glides there automatically",
+        Value = Config.EnhanceAutoGlide,
+        Callback = function(val) Config.EnhanceAutoGlide = val end
+    })
+
+    task.delay(0.8, function()
+        if ScriptRunning then
+            pcall(EnhanceEngine.RefreshPreview)
+        end
+    end)
+    end
+
+    do
+        local CalcTab = SubCalc
     local ResultsSection = CalcTab:Section({ Title = "Live Forge Calculator Results (Armor & Weapon)", Side = "Right" })
     local SlotsSection = CalcTab:Section({ Title = "Category & Crucible Ore Slots (1-4)", Side = "Left" })
     local CategoryDropdown = nil
@@ -15761,15 +22340,15 @@ do
     end
 
     ForgeEngine.UpdateCalculatorUI()
+    end
 end
 
--- TAB 3: COMBAT & MOBS (SubTabs: Auto Farm, Auto Parry, Runes, Abyss / Raid)
+-- TAB 3: COMBAT (SubTabs: Auto Farm, Auto Parry, Abyss / Raid)
 do
     local CombatTab = Window:Tab({ Title = "Combat", Icon = "shield" })
-    local SubAutoFarm = (typeof(CombatTab.SubTab) == "function") and CombatTab:SubTab("Auto Farm") or CombatTab
-    local SubAutoParry = (typeof(CombatTab.SubTab) == "function") and CombatTab:SubTab("Auto Parry") or CombatTab
-    local SubRunes = (typeof(CombatTab.SubTab) == "function") and CombatTab:SubTab("Runes") or CombatTab
-    local SubAbyss = (typeof(CombatTab.SubTab) == "function") and CombatTab:SubTab("Abyss / Raid") or CombatTab
+    local SubAutoFarm = (typeof(CombatTab.SubTab) == "function") and CombatTab:SubTab("Auto Farm", "swords") or CombatTab
+    local SubAutoParry = (typeof(CombatTab.SubTab) == "function") and CombatTab:SubTab("Auto Parry", "shield") or CombatTab
+    local SubAbyss = (typeof(CombatTab.SubTab) == "function") and CombatTab:SubTab("Abyss / Raid", "skull") or CombatTab
 
     -- ===================================================================
     -- SUB-TAB 1: AUTO FARM (Mob Automation & Stance Tuning)
@@ -15802,16 +22381,11 @@ do
                 if State.Humanoid then
                     pcall(function() State.Humanoid.AutoRotate = true end)
                 end
-                CombatEngine.IsParrying = false
-                CombatEngine.ParryHoldUntil = 0
+                CombatEngine.ReleaseBlockIfStuck()
                 State.TargetMob = nil
                 State.CurrentMob = nil
                 State.LastFarmedMob = nil
                 State.ResumingMobAfterDeath = false
-                pcall(function()
-                    local TC = SafeGetController("ToolController")
-                    if TC then TC.isBlocking = false end
-                end)
             end
         end
     })
@@ -15890,42 +22464,6 @@ do
         end
     })
 
-    MobSection:Toggle({
-        Title = "Auto-Sell Loot to Greedy Cey (Bag Full)",
-        Desc = "When bag is full while farming mobs, remotely sells unblacklisted loot to Greedy Cey (chains into Auto Sell Runes if enabled)",
-        Value = Config.AutoSellMobLootWhenFull,
-        Callback = function(val) Config.AutoSellMobLootWhenFull = val end
-    })
-
-    ForgeEngine.LootBlacklistDropdown = MobSection:Dropdown({
-        Title = "Blacklist Loot (Keep From Selling)",
-        Desc = "Select items (fragments, shards, bones, essences, runes, ores) to NEVER sell",
-        List = GreedyCeyLootTypes,
-        Value = Config.MobLootSellBlacklist,
-        Multi = true,
-        Callback = function(val)
-            if type(val) == "table" then
-                Config.MobLootSellBlacklist = val
-            elseif type(val) == "string" then
-                Config.MobLootSellBlacklist = { val }
-            else
-                Config.MobLootSellBlacklist = {}
-            end
-        end
-    })
-    if #GreedyCeyLootTypes == 0 then
-        task.spawn(function()
-            for _ = 1, 60 do
-                task.wait(0.5)
-                if not ScriptRunning then return end
-                if ConfigManager.RebuildGreedyCeyLootTypes() and ForgeEngine.LootBlacklistDropdown and type(ForgeEngine.LootBlacklistDropdown.Refresh) == "function" then
-                    pcall(function() ForgeEngine.LootBlacklistDropdown:Refresh(GreedyCeyLootTypes, Config.MobLootSellBlacklist) end)
-                    break
-                end
-            end
-        end)
-    end
-
     HitboxSection:Slider({
         Title = "Above Enemy Height (studs)",
         Desc = "How high above the enemy you float (default: 5.5)",
@@ -15966,7 +22504,12 @@ do
         Title = "Enable Auto Parry",
         Desc = "Automatically parries enemy attacks via ParryIndicator & animations",
         Value = Config.AutoParry,
-        Callback = function(val) Config.AutoParry = val end
+        Callback = function(val)
+            Config.AutoParry = val
+            if not val then
+                CombatEngine.ReleaseBlockIfStuck()
+            end
+        end
     })
 
     ParrySettingsSection:Toggle({
@@ -16052,183 +22595,6 @@ do
     })
 
     -- ===================================================================
-    -- SUB-TAB 3: RUNES (Best Rune Optimizer, Attach Cost & Auto Put Runes)
-    -- ===================================================================
-    local RuneInfoSection = SubRunes:Section({ Title = "Best Rune & Attach Cost Calculator", Side = "Right" })
-    local RuneControlSection = SubRunes:Section({ Title = "Auto Put Runes & Selection", Side = "Left" })
-
-    RuneEngine.BestRuneLabel = RuneInfoSection:Label({
-        Title = "BEST Rune: Scanning...",
-        Desc = "Finds the highest-% roll rune in your bag (overall or per Focus Trait)"
-    })
-
-    RuneEngine.BestPickaxeRuneLabel = RuneInfoSection:Label({
-        Title = "BEST Pickaxe Rune: Scanning...",
-        Desc = "Finds the best Pickaxe rune (Miner Shard) currently in your inventory"
-    })
-
-    RuneEngine.CostInfoLabel = RuneInfoSection:Label({
-        Title = "Attach Cost: --",
-        Desc = "Select target equipment & check open slots + Gold cost"
-    })
-
-    RuneEngine.ActionStatusLabel = RuneInfoSection:Label({
-        Title = "Runes: Ready",
-        Desc = "Attaches runes remotely from anywhere without leaving your spot"
-    })
-
-    RuneEngine.RefreshDropdownLists()
-
-    RuneControlSection:Dropdown({
-        Title = "Equipment Filter",
-        Desc = "Show Pickaxes & Weapons together, or filter to Pickaxes Only / Weapons Only / Armor Only",
-        List = { "Pickaxes & Weapons", "Pickaxes Only", "Weapons Only", "Armor Only" },
-        Value = Config.RuneEquipFilter,
-        Callback = function(val)
-            if type(val) == "string" then
-                Config.RuneEquipFilter = val
-                Config.RuneTargetEquipment = ""
-                RuneEngine.RefreshDropdownLists()
-            end
-        end
-    })
-
-    RuneEngine.EquipDropdown = RuneControlSection:Dropdown({
-        Title = "Target Equipment (Pickaxe / Weapon)",
-        Desc = "Choose which Pickaxe, Weapon, or Armor to evaluate open rune slots & attach cost for",
-        List = RuneEngine.EquipLabels,
-        Value = Config.RuneTargetEquipment ~= "" and Config.RuneTargetEquipment or RuneEngine.EquipLabels[1],
-        Callback = function(val)
-            if type(val) == "string" then
-                Config.RuneTargetEquipment = val
-                RuneEngine.RefreshRunesAndInfo()
-            end
-        end
-    })
-
-    RuneControlSection:Dropdown({
-        Title = "Trait Focus Filter",
-        Desc = "Prioritizes runes with the highest % roll for this trait (e.g. Fire %, Mining)",
-        List = RuneEngine.FocusOptions,
-        Value = Config.RuneTraitFocus,
-        Callback = function(val)
-            if type(val) == "string" then
-                Config.RuneTraitFocus = val
-                RuneEngine.RefreshRunesAndInfo()
-            end
-        end
-    })
-
-    RuneEngine.RuneDropdown = RuneControlSection:Dropdown({
-        Title = "Rune To Attach",
-        Desc = "Sorted highest % first; keep 'Auto: Best For Focus' or pick manually",
-        List = RuneEngine.RuneLabels,
-        Value = Config.RuneSelectedManual,
-        Callback = function(val)
-            if type(val) == "string" then
-                Config.RuneSelectedManual = val
-                RuneEngine.UpdateInfoWindow()
-            end
-        end
-    })
-
-    RuneControlSection:Toggle({
-        Title = "Auto Put Best Runes",
-        Desc = "Automatically attaches your highest-% compatible rune whenever Target Weapon has an open slot",
-        Value = Config.AutoPutRunes,
-        Callback = function(val)
-            Config.AutoPutRunes = val
-            if val then
-                task.spawn(RuneEngine.AttachSelectedRune)
-            end
-        end
-    })
-
-    RuneControlSection:Button({
-        Title = "Refresh Weapons, Runes & Cost",
-        Desc = "Re-scans inventory runes, weapon slots, and attach Gold quote",
-        Callback = function()
-            RuneEngine.RefreshDropdownLists()
-            RuneEngine.UpdateSellStatusLabel()
-        end
-    })
-
-    local RuneSellSection = SubRunes:Section({ Title = "Auto Sell Runes (Greedy Cey)", Side = "Right" })
-
-    RuneEngine.SellStatusLabel = RuneSellSection:Label({
-        Title = "Auto Sell Runes: Off",
-        Desc = "Runes: -- | Unchecked (Will Sell): -- | Bag: --/--"
-    })
-    RuneEngine.UpdateSellStatusLabel()
-
-    RuneSellSection:Toggle({
-        Title = "Auto Sell Runes (Instant)",
-        Desc = "Instantly sells any unchecked (non-favorited) runes remotely to Greedy Cey from anywhere without waiting for bag full",
-        Value = Config.AutoSellRunes,
-        Callback = function(val)
-            Config.AutoSellRunes = val
-            if not val then
-                State.PendingRuneSell = false
-            else
-                task.spawn(function()
-                    RuneEngine.SellUnkeptRunes(false)
-                end)
-            end
-            RuneEngine.UpdateSellStatusLabel()
-        end
-    })
-
-    if #RuneEngine.RuneSellTypes == 0 then
-        pcall(RuneEngine.BuildRuneSellCatalog)
-    end
-    RuneEngine.KeepRunesDropdown = RuneSellSection:Dropdown({
-        Title = "Keep Runes (Do Not Sell)",
-        Desc = "Select runes you DO NOT want to sell; everything unchecked is sold automatically",
-        List = RuneEngine.RuneSellTypes,
-        Value = Config.RuneSellKeepList,
-        Multi = true,
-        Callback = function(val)
-            if type(val) == "table" then
-                Config.RuneSellKeepList = val
-            elseif type(val) == "string" then
-                Config.RuneSellKeepList = { val }
-            else
-                Config.RuneSellKeepList = {}
-            end
-            RuneEngine.UpdateSellStatusLabel()
-        end
-    })
-    if not RuneEngine.RunesModuleLoaded or #RuneEngine.RuneSellTypes == 0 then
-        task.spawn(function()
-            for _ = 1, 60 do
-                task.wait(0.5)
-                if not ScriptRunning then return end
-                local prevCount = #RuneEngine.RuneSellTypes
-                pcall(RuneEngine.BuildRuneSellCatalog)
-                if (RuneEngine.RunesModuleLoaded or #RuneEngine.RuneSellTypes > prevCount) and #RuneEngine.RuneSellTypes > 0 then
-                    if RuneEngine.KeepRunesDropdown and type(RuneEngine.KeepRunesDropdown.Refresh) == "function" then
-                        pcall(function() RuneEngine.KeepRunesDropdown:Refresh(RuneEngine.RuneSellTypes, Config.RuneSellKeepList) end)
-                    end
-                    RuneEngine.UpdateSellStatusLabel()
-                    if RuneEngine.RunesModuleLoaded then
-                        break
-                    end
-                end
-            end
-        end)
-    end
-
-    RuneSellSection:Button({
-        Title = "Sell Unchecked Runes Now",
-        Desc = "Immediately sells all unchecked (non-favorited) runes to Greedy Cey",
-        Callback = function()
-            task.spawn(function()
-                RuneEngine.SellUnkeptRunes(false)
-            end)
-        end
-    })
-
-    -- ===================================================================
     -- SUB-TAB 4: ABYSS / RAID AUTOMATION
     -- ===================================================================
     local RaidLeft = SubAbyss:Section({ Title = "Abyss & Raid Control", Side = "Left" })
@@ -16259,7 +22625,7 @@ do
         end
     end)
 
-    local raidAutoToggle, raidAutoEnterToggle, asuraTowerToggle = nil, nil, nil
+    local raidAutoToggle, raidAutoEnterToggle, asuraTowerToggle, pauseMineToggle = nil, nil, nil, nil
 
     raidAutoToggle = RaidLeft:Toggle({
         Title = "Enable Auto Raid / Abyss",
@@ -16267,24 +22633,42 @@ do
         Value = Config.AutoRaid,
         Callback = function(val)
             Config.AutoRaid = val
-            if val and (Config.AutoAsuraToTower or RaidEngine.NormalizeMode(Config.RaidMode) == "Asura's Incarnate") then
-                Config.RaidAutoCreateStart = true
-                if raidAutoEnterToggle and raidAutoEnterToggle.SetValue then
-                    pcall(function() raidAutoEnterToggle:SetValue(true, true) end)
-                end
-            elseif not val then
+            if not val then
                 State.IsInRaid = false
                 State.IsBuyingHealthPotions = false
-                RaidEngine.RecoveringHP = false
+                State.IsMovingToRaidPad = false
+                RaidEngine.AsuraState = "IDLE"
+                RaidEngine.MineYieldActive = false
+                RaidEngine.PartyLaunchHoldUntil = 0
+                RaidEngine.ClearHealAnchor(true)
                 RaidEngine.StrandedSince = nil
-                CombatEngine.ActiveStanceCF = nil
+                CombatEngine.ClearStanceLock()
                 CombatEngine.LastEngagedMob = nil
+                CombatEngine.ActiveSkillName = nil
+                CombatEngine.ResetKillWatchdog()
                 NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
                 pcall(NavEngine.PreventBossArenaVoidFall)
                 pcall(NavEngine.SurfaceIfUnderground)
                 pcall(NavEngine.RestoreCharacterPhysics)
                 if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
                 if State.Humanoid then State.Humanoid.AutoRotate = true end
+                if ConfigManager and ConfigManager.ScheduleSave then
+                    ConfigManager.ScheduleSave(0.05)
+                end
+            end
+        end
+    })
+
+    pauseMineToggle = RaidLeft:Toggle({
+        Title = "Pause Auto Mine for Asura Boss",
+        Desc = "Asura & Asura -> Tower: mines while Asura is on cooldown and pauses to fight when spawned (preserved across mode switches)",
+        Value = Config.AutoMineYieldToBoss,
+        Callback = function(val)
+            Config.AutoMineYieldToBoss = val
+            if val and not RaidEngine.IsAsuraYieldSupported() then
+                Notify("Pause Auto Mine", "Saved ON — will automatically pause Auto Mine whenever Mode is Asura's Incarnate or Asura -> Tower.", 4.0)
+            elseif not val and RaidEngine then
+                RaidEngine.MineYieldActive = false
             end
         end
     })
@@ -16307,7 +22691,7 @@ do
 
     RaidEngine.ModeDropdown = RaidLeft:Dropdown({
         Title = "Mode",
-        Desc = "Pick Abyss, Tower Of Hell, or Asura's Incarnate (farms Raid Tickets)",
+        Desc = "Pick Abyss, Tower Of Hell, Guild Boss (Guild Golem/Guardian), Golem, or Asura's Incarnate",
         List = availModes,
         Value = currentModeLabel,
         Callback = function(val)
@@ -16319,23 +22703,15 @@ do
             end
             local norm = RaidEngine.NormalizeMode(val)
             Config.RaidMode = norm
-            if norm == "Asura's Incarnate" then
-                Config.RaidAutoCreateStart = true
-                if raidAutoEnterToggle and raidAutoEnterToggle.SetValue then
-                    pcall(function() raidAutoEnterToggle:SetValue(true, true) end)
-                end
-                if raidAutoToggle and raidAutoToggle.SetValue then
-                    pcall(function() raidAutoToggle:SetValue(true) end)
-                else
-                    Config.AutoRaid = true
-                end
+            if not RaidEngine.IsAsuraYieldSupported() and RaidEngine then
+                RaidEngine.MineYieldActive = false
             end
         end
     })
 
     asuraTowerToggle = RaidLeft:Toggle({
         Title = "Asura Until X Tickets -> Tower Of Hell",
-        Desc = "Auto-enables Auto Raid & Enter: farms Asura until Target Tickets is met, then runs Tower Of Hell until out of tickets (toggle Auto Raid OFF to pause)",
+        Desc = "Farms Asura until Target Tickets is met, then runs Tower Of Hell until out of tickets (requires Enable Auto Raid ON)",
         Value = Config.AutoAsuraToTower,
         Callback = function(val)
             Config.AutoAsuraToTower = val
@@ -16344,15 +22720,6 @@ do
                 Config.RaidMode = effMode
                 if RaidEngine.ModeDropdown and RaidEngine.ModeDropdown.SetValue then
                     pcall(function() RaidEngine.ModeDropdown:SetValue(RaidEngine.FormatModeLabel(effMode), true) end)
-                end
-                Config.RaidAutoCreateStart = true
-                if raidAutoEnterToggle and raidAutoEnterToggle.SetValue then
-                    pcall(function() raidAutoEnterToggle:SetValue(true, true) end)
-                end
-                if raidAutoToggle and raidAutoToggle.SetValue then
-                    pcall(function() raidAutoToggle:SetValue(true) end)
-                else
-                    Config.AutoRaid = true
                 end
             end
         end
@@ -16406,9 +22773,16 @@ do
         Callback = function(val) Config.AutoRaidRetry = val end
     })
 
+    RaidLeft:Toggle({
+        Title = "Auto Leave Guild Island After Boss Kill",
+        Desc = "Automatically leaves Guild Island once the Guild Boss is defeated & chest is claimed",
+        Value = Config.GuildBossAutoLeaveAfterKill,
+        Callback = function(val) Config.GuildBossAutoLeaveAfterKill = val end
+    })
+
     RaidLeft:Slider({
         Title = "Stop & Leave at Floor (0 = Endless)",
-        Desc = "Automatically leaves Abyss upon reaching this floor (0 keeps pushing)",
+        Desc = "Stops before/at this Abyss floor and leaves on the Card screen (e.g. 6 clears Floor 5 Juggernaut then leaves)",
         Min = 0,
         Max = 100,
         Value = Config.AbyssStopFloor,
@@ -16567,15 +22941,601 @@ do
         end
     })
 
+    RaidRight:Toggle({
+        Title = "Backup Kill Switch (AFK Stuck Recovery)",
+        Desc = "Forces ultra-close range & expanded NPC scan if a Tower/Abyss/Boss enemy takes 0 damage for too long",
+        Value = Config.RaidBackupKillSwitch ~= false,
+        Callback = function(val)
+            Config.RaidBackupKillSwitch = val
+            if not val then CombatEngine.ResetKillWatchdog() end
+        end
+    })
+
+    RaidRight:Slider({
+        Title = "Backup Kill Trigger Delay (s)",
+        Desc = "Seconds with 0 damage (or hidden stray mob) before Distance Override activates",
+        Min = 5,
+        Max = 30,
+        Value = Config.RaidBackupKillTimeout,
+        Rounding = 0,
+        Callback = function(val) Config.RaidBackupKillTimeout = val end
+    })
+
+    RaidRight:Slider({
+        Title = "Backup Distance Override (studs)",
+        Desc = "Close-range melee strike distance used when Backup Kill Switch activates",
+        Min = 1.2,
+        Max = 3.5,
+        Value = Config.RaidBackupCloseDistance,
+        Rounding = 1,
+        Callback = function(val) Config.RaidBackupCloseDistance = val end
+    })
+
     RaidRight:Label({
         Title = "Combat Integration",
         Desc = "Uses your Auto Farm stance (Above / Behind / Under Map), Auto Parry, Auto Dodge, and Best Weapon settings automatically."
     })
 end
 
--- TAB 4: TELEPORTS (Per-Map Dynamic POIs, Islands & Waypoints)
+-- TAB 4: SELLING (SubTabs: Ores & Armor, Runes & Loot, Potions & Shop)
 do
-    local TeleportTab = Window:Tab({ Title = "Teleports", Icon = "layout-grid" })
+    local SellingTab = Window:Tab({ Title = "Selling", Icon = "coins" })
+    local SubSellOres = (typeof(SellingTab.SubTab) == "function") and SellingTab:SubTab("Ores & Armor", "coins") or SellingTab
+    local SubSellRunesLoot = (typeof(SellingTab.SubTab) == "function") and SellingTab:SubTab("Runes & Loot", "gem") or SellingTab
+    local SubSellPotions = (typeof(SellingTab.SubTab) == "function") and SellingTab:SubTab("Potions & Shop", "flask-conical") or SellingTab
+
+    do
+        local SubSelling = SubSellOres
+    -- ===================================================================
+    -- SUB-SECTION 2: SELLING (NATIVE ORE AUTO-SELL & ARMOR SELLING)
+    -- ===================================================================
+    AutoSellEngine.BuildCatalog(false)
+
+    local OreSellSection = SubSelling:Section({ Title = "Ore Auto-Sell (Rarity & Loop)", Side = "Left" })
+
+    AutoSellEngine.StatusLabel = OreSellSection:Label({
+        Title = "Ore Auto-Sell: Off",
+        Desc = "Select Ore Rarities or set Per-Ore Keep Qty overrides on the right"
+    })
+
+    OreSellSection:Toggle({
+        Title = "Enable Ore Auto-Sell",
+        Desc = "Automatically sells excess ores matching your Rarity & Per-Ore Keep Qty rules",
+        Value = Config.AutoSellMenuEnabled,
+        Callback = function(val)
+            Config.AutoSellMenuEnabled = val
+            AutoSellEngine.UpdateSummaryUI()
+        end
+    })
+
+    OreSellSection:Toggle({
+        Title = "Only Sell When Bag Full",
+        Desc = "Waits until Stash reaches capacity before selling (recommended without Sell Anywhere pass)",
+        Value = Config.AutoSellOnlyWhenBagFull,
+        Callback = function(val)
+            Config.AutoSellOnlyWhenBagFull = val
+            AutoSellEngine.UpdateSummaryUI()
+        end
+    })
+
+    OreSellSection:Dropdown({
+        Title = "Auto-Sell by Rarity",
+        Desc = "Sells ALL ores in checked rarities down to 0 — except ores with a Custom Keep Limit on the right (Favorites are never sold)",
+        List = AutoSellEngine.RarityOrder,
+        Value = AutoSellEngine.GetActiveRarityArray(),
+        Multi = true,
+        Callback = function(val)
+            if type(val) == "table" then
+                Config.AutoSellOreRarities = val
+            elseif type(val) == "string" then
+                Config.AutoSellOreRarities = { val }
+            else
+                Config.AutoSellOreRarities = {}
+            end
+            AutoSellEngine.SaveConfig()
+            AutoSellEngine.UpdateSummaryUI()
+        end
+    })
+
+    OreSellSection:Slider({
+        Title = "Auto-Sell Interval (s)",
+        Desc = "Cooldown between automatic Ore Auto-Sell sweeps in seconds",
+        Min = 5,
+        Max = 180,
+        Value = Config.AutoSellInterval,
+        Rounding = 0,
+        Callback = function(val)
+            Config.AutoSellInterval = val
+        end
+    })
+
+    OreSellSection:Button({
+        Title = "Sell Matching Ores Now",
+        Desc = "Immediately sells all excess ores matching your Rarity & Keep Qty rules",
+        Callback = function()
+            task.spawn(function()
+                AutoSellEngine.RunSellCycle(true)
+            end)
+        end
+    })
+
+    local KeepRuleSection = SubSelling:Section({ Title = "Custom Ore Keep Limits (Exceptions)", Side = "Right" })
+
+    AutoSellEngine.KeepRulesLabel = KeepRuleSection:Label({
+        Title = "Active Keep Limits (0)",
+        Desc = "None — only checked Rarities on the left will be sold"
+    })
+    pcall(AutoSellEngine.UpdateSummaryUI)
+
+    AutoSellEngine.OreSelectDropdown = KeepRuleSection:Dropdown({
+        Title = "Select Ore(s)",
+        Desc = "Pick ores to give a custom Keep Limit (e.g. save 4 Yin-Yang even if Epic rarity is set to sell)",
+        List = AutoSellEngine.OreDropdownLabels,
+        Value = {},
+        Multi = true,
+        Callback = function(val)
+            if type(val) == "table" then
+                AutoSellEngine.SelectedOres = val
+            elseif type(val) == "string" then
+                AutoSellEngine.SelectedOres = { val }
+            else
+                AutoSellEngine.SelectedOres = {}
+            end
+        end
+    })
+
+    KeepRuleSection:Textbox({
+        Title = "Keep Limit (0 = Sell All)",
+        Desc = "How many of the selected ore(s) to keep in your bag; anything above this amount gets sold",
+        Placeholder = "e.g. 50 (keeps 50, sells extra)",
+        Value = AutoSellEngine.DraftKeepQty,
+        ClearText = false,
+        Callback = function(val)
+            AutoSellEngine.DraftKeepQty = tostring(val or ""):match("^%s*(.-)%s*$")
+        end
+    })
+
+    KeepRuleSection:Button({
+        Title = "Save Keep Limit for Selected Ore(s)",
+        Desc = "Keeps up to this amount for the selected ore(s), even if their rarity is checked to sell",
+        Callback = function()
+            local qty = tonumber(AutoSellEngine.DraftKeepQty)
+            if not qty or qty < 0 then
+                Notify("Ore Auto-Sell", "Enter a valid Keep Quantity (0 or higher).", 2.5)
+                return
+            end
+            qty = math.floor(qty)
+            if type(AutoSellEngine.SelectedOres) ~= "table" or #AutoSellEngine.SelectedOres == 0 then
+                Notify("Ore Auto-Sell", "Select at least one ore in the dropdown first.", 2.5)
+                return
+            end
+            Config.AutoSellOreKeepQty = Config.AutoSellOreKeepQty or {}
+            local applied = 0
+            for _, rawLbl in ipairs(AutoSellEngine.SelectedOres) do
+                local oreName = AutoSellEngine.ResolveOreName(rawLbl)
+                if oreName then
+                    Config.AutoSellOreKeepQty[oreName] = qty
+                    applied = applied + 1
+                end
+            end
+            AutoSellEngine.SaveConfig()
+            AutoSellEngine.UpdateSummaryUI()
+            Notify("Ore Auto-Sell", string.format("Set Keep Qty = %d on %d ore(s).", qty, applied), 2.5)
+        end
+    })
+
+    KeepRuleSection:Button({
+        Title = "Remove Keep Limit for Selected Ore(s)",
+        Desc = "Removes the custom limit so selected ore(s) go back to following their Rarity setting",
+        Callback = function()
+            if type(AutoSellEngine.SelectedOres) ~= "table" or #AutoSellEngine.SelectedOres == 0 then
+                Notify("Ore Auto-Sell", "Select at least one ore in the dropdown first.", 2.5)
+                return
+            end
+            Config.AutoSellOreKeepQty = Config.AutoSellOreKeepQty or {}
+            local removed = 0
+            for _, rawLbl in ipairs(AutoSellEngine.SelectedOres) do
+                local oreName = AutoSellEngine.ResolveOreName(rawLbl)
+                if oreName and Config.AutoSellOreKeepQty[oreName] ~= nil then
+                    Config.AutoSellOreKeepQty[oreName] = nil
+                    removed = removed + 1
+                end
+            end
+            AutoSellEngine.SaveConfig()
+            AutoSellEngine.UpdateSummaryUI()
+            Notify("Ore Auto-Sell", string.format("Removed Keep rule on %d ore(s).", removed), 2.5)
+        end
+    })
+
+    KeepRuleSection:Button({
+        Title = "Clear All Keep Rules",
+        Desc = "Resets every per-ore Keep Quantity override",
+        Callback = function()
+            Config.AutoSellOreKeepQty = {}
+            AutoSellEngine.SaveConfig()
+            AutoSellEngine.UpdateSummaryUI()
+            Notify("Ore Auto-Sell", "Cleared all Per-Ore Keep Quantity overrides.", 2.5)
+        end
+    })
+
+    local ArmorSellSection = SubSelling:Section({ Title = "Armor Selling & Protection", Side = "Right" })
+
+    local ArmorSellStatusLabel = ArmorSellSection:Label({
+        Title = "Armor Selling: Ready",
+        Desc = "Auto-sell runs automatically inside Auto Forge"
+    })
+    ForgeEngine.ArmorSellStatusLabel = ArmorSellStatusLabel
+
+    ArmorSellSection:Label({
+        Title = "How Rules Work (Priority Order)",
+        Desc = "1. Favorited ores (never sold) -> 2. Custom Keep Limits -> 3. Auto-Sell by Rarity. Paused in Abyss/Raids without Sell Anywhere pass."
+    })
+    end
+
+    do
+        local RuneSellSection = SubSellRunesLoot:Section({ Title = "Auto Sell Runes (Greedy Cey)", Side = "Left" })
+    RuneEngine.SellStatusLabel = RuneSellSection:Label({
+        Title = "Auto Sell Runes: Off",
+        Desc = "Runes: -- | Unchecked (Will Sell): -- | Bag: --/--"
+    })
+    RuneEngine.UpdateSellStatusLabel()
+
+    RuneSellSection:Toggle({
+        Title = "Auto Sell Runes (Instant)",
+        Desc = "Instantly sells any unchecked (non-favorited) runes remotely to Greedy Cey from anywhere without waiting for bag full",
+        Value = Config.AutoSellRunes,
+        Callback = function(val)
+            Config.AutoSellRunes = val
+            if not val then
+                State.PendingRuneSell = false
+            else
+                task.spawn(function()
+                    RuneEngine.SellUnkeptRunes(false)
+                end)
+            end
+            RuneEngine.UpdateSellStatusLabel()
+        end
+    })
+
+    if #RuneEngine.RuneSellTypes == 0 then
+        pcall(RuneEngine.BuildRuneSellCatalog)
+    end
+    RuneEngine.KeepRunesDropdown = RuneSellSection:Dropdown({
+        Title = "Keep Runes (Do Not Sell)",
+        Desc = "Select runes you DO NOT want to sell; everything unchecked is sold automatically",
+        List = RuneEngine.RuneSellTypes,
+        Value = Config.RuneSellKeepList,
+        Multi = true,
+        Callback = function(val)
+            if type(val) == "table" then
+                Config.RuneSellKeepList = val
+            elseif type(val) == "string" then
+                Config.RuneSellKeepList = { val }
+            else
+                Config.RuneSellKeepList = {}
+            end
+            RuneEngine.UpdateSellStatusLabel()
+        end
+    })
+    if not RuneEngine.RunesModuleLoaded or #RuneEngine.RuneSellTypes == 0 then
+        task.spawn(function()
+            for _ = 1, 60 do
+                task.wait(0.5)
+                if not ScriptRunning then return end
+                local prevCount = #RuneEngine.RuneSellTypes
+                pcall(RuneEngine.BuildRuneSellCatalog)
+                if (RuneEngine.RunesModuleLoaded or #RuneEngine.RuneSellTypes > prevCount) and #RuneEngine.RuneSellTypes > 0 then
+                    if RuneEngine.KeepRunesDropdown and type(RuneEngine.KeepRunesDropdown.Refresh) == "function" then
+                        pcall(function() RuneEngine.KeepRunesDropdown:Refresh(RuneEngine.RuneSellTypes, Config.RuneSellKeepList) end)
+                    end
+                    RuneEngine.UpdateSellStatusLabel()
+                    if RuneEngine.RunesModuleLoaded then
+                        break
+                    end
+                end
+            end
+        end)
+    end
+
+    RuneSellSection:Textbox({
+        Title = "Min Stat Quality % to Keep",
+        Desc = "0 = disabled (keep all checked). Set 1-100: keeps runes >= % and sells runes < %",
+        Placeholder = "0 = Off, e.g. 80",
+        Value = tostring(Config.RuneSellMinQuality or 0),
+        ClearText = false,
+        Callback = function(val)
+            local txt = tostring(val or ""):match("^%s*(.-)%s*$")
+            local n = tonumber(txt)
+            if txt == "" or not n then
+                Config.RuneSellMinQuality = 0
+            else
+                Config.RuneSellMinQuality = math.clamp(n, 0, 100)
+            end
+            RuneEngine.UpdateSellStatusLabel()
+        end
+    })
+
+    RuneSellSection:Dropdown({
+        Title = "Rune Quality Check Mode",
+        Desc = "Best Stat keeps if at least ONE rolled stat meets Min % (fixed stats excluded)",
+        List = { "Best Stat (Any >= %)", "Average Roll", "Primary Trait Only" },
+        Value = Config.RuneSellQualityMode or "Best Stat (Any >= %)",
+        Multi = false,
+        Callback = function(val)
+            if type(val) == "string" and val ~= "" then
+                Config.RuneSellQualityMode = val
+                RuneEngine.UpdateSellStatusLabel()
+            end
+        end
+    })
+
+    RuneSellSection:Dropdown({
+        Title = "Quality % Filter Scope",
+        Desc = "Checked Only: unchecked types always sell | All Runes: keeps any rune >= Min %",
+        List = { "Checked Keep Runes Only", "All Runes (Keep Any >= %)" },
+        Value = Config.RuneSellQualityScope or "Checked Keep Runes Only",
+        Multi = false,
+        Callback = function(val)
+            if type(val) == "string" and val ~= "" then
+                Config.RuneSellQualityScope = val
+                RuneEngine.UpdateSellStatusLabel()
+            end
+        end
+    })
+
+    RuneSellSection:Button({
+        Title = "Sell Matching Runes Now",
+        Desc = "Immediately sells all non-favorited runes failing your Keep List & Min Quality % rules",
+        Callback = function()
+            task.spawn(function()
+                RuneEngine.SellUnkeptRunes(false)
+            end)
+        end
+    })
+
+        local MobLootSellSection = SubSellRunesLoot:Section({ Title = "Auto-Sell Mob Loot (Greedy Cey)", Side = "Right" })
+    MobLootSellSection:Toggle({
+        Title = "Auto-Sell Loot to Greedy Cey (Bag Full)",
+        Desc = "When bag is full while mining or farming mobs, sells mob loot to Greedy Cey (NEVER sells Ores; respects Keep Runes & Blacklist Loot)",
+        Value = Config.AutoSellMobLootWhenFull,
+        Callback = function(val) Config.AutoSellMobLootWhenFull = val end
+    })
+
+    ForgeEngine.LootBlacklistDropdown = MobLootSellSection:Dropdown({
+        Title = "Blacklist Loot (Keep From Selling)",
+        Desc = "Select mob loot (fragments, shards, essences, runes) to NEVER sell (Ores & Keep Runes are always protected)",
+        List = GreedyCeyLootTypes,
+        Value = Config.MobLootSellBlacklist,
+        Multi = true,
+        Callback = function(val)
+            if type(val) == "table" then
+                Config.MobLootSellBlacklist = val
+            elseif type(val) == "string" then
+                Config.MobLootSellBlacklist = { val }
+            else
+                Config.MobLootSellBlacklist = {}
+            end
+        end
+    })
+    if #GreedyCeyLootTypes == 0 then
+        task.spawn(function()
+            for _ = 1, 60 do
+                task.wait(0.5)
+                if not ScriptRunning then return end
+                if ConfigManager.RebuildGreedyCeyLootTypes() and ForgeEngine.LootBlacklistDropdown and type(ForgeEngine.LootBlacklistDropdown.Refresh) == "function" then
+                    pcall(function() ForgeEngine.LootBlacklistDropdown:Refresh(GreedyCeyLootTypes, Config.MobLootSellBlacklist) end)
+                    break
+                end
+            end
+        end)
+    end
+
+        MobLootSellSection:Button({
+            Title = "Sell Mob Loot Now",
+            Desc = "Immediately sells all unblacklisted, non-favorited mob loot to Greedy Cey",
+            Callback = function()
+                task.spawn(function()
+                    if State.SellingMobLoot then return end
+                    State.SellingMobLoot = true
+                    local okS, units, types = pcall(ForgeEngine.SellAllMobLootExceptBlacklist)
+                    State.SellingMobLoot = false
+                    if okS and type(units) == "number" and units > 0 then
+                        Notify("Auto-Sell Loot", string.format("Sold %d item(s) (%d types) to Greedy Cey!", units, types or 0), 3.0)
+                    else
+                        Notify("Auto-Sell Loot", "No unblacklisted mob loot to sell (or Greedy Cey unreachable).", 2.5)
+                    end
+                end)
+            end
+        })
+    end
+
+    do
+        local SubShop = SubSellPotions
+    -- ===================================================================
+    -- SUB-SECTION 4: SHOP (AUTO BUY & AUTO USE POTIONS)
+    -- ===================================================================
+    local PotionBuySection = SubShop:Section({ Title = "Auto Buy Potions", Side = "Left" })
+
+    PotionEngine.StatusLabel = PotionBuySection:Label({
+        Title = "Potions: Idle",
+        Desc = "Auto-glides to current map Potion Shop to restock & maintains active potion buffs"
+    })
+
+    PotionBuySection:Toggle({
+        Title = "Auto Buy Potions",
+        Desc = "Smooth-glides to Potion Shop when owned stock drops below Target Stock",
+        Value = Config.AutoBuyPotions,
+        Callback = function(val)
+            Config.AutoBuyPotions = val
+            if val then
+                PotionEngine.LastBuyCheckAt = 0
+                table.clear(PotionEngine.LastBuyFailAt)
+                if Config.AutoMine then
+                    State.CheckingPotionsOnStart = true
+                    task.spawn(PotionEngine.CheckOnAutoMineStart)
+                end
+            else
+                State.CheckingPotionsOnStart = false
+                if State.IsBuyingPotions then
+                    State.IsBuyingPotions = false
+                    NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
+                    pcall(NavEngine.RestoreCharacterPhysics)
+                end
+            end
+        end
+    })
+
+    PotionEngine.BuyDropdown = PotionBuySection:Dropdown({
+        Title = "Potions To Buy",
+        Desc = "Select shop potions to automatically restock on the active map (Multi-Select)",
+        List = PotionEngine.ShopPotionLabels,
+        Value = Config.AutoBuyPotionTypes,
+        Multi = true,
+        Callback = function(val)
+            if type(val) == "table" then
+                Config.AutoBuyPotionTypes = val
+            elseif type(val) == "string" then
+                Config.AutoBuyPotionTypes = { val }
+            end
+            table.clear(PotionEngine.LastBuyFailAt)
+        end
+    })
+
+    PotionBuySection:Slider({
+        Title = "Target Stock Per Potion",
+        Desc = "Restocks selected shop potions up to this quantity in bag",
+        Min = 1,
+        Max = 10,
+        Value = Config.AutoBuyPotionStock,
+        Rounding = 0,
+        Callback = function(val) Config.AutoBuyPotionStock = val end
+    })
+
+    PotionBuySection:Toggle({
+        Title = "Buy Only After Buffs Expire",
+        Desc = "Waits until all active potion buffs finish before leaving Auto Mine to buy",
+        Value = Config.AutoBuyAfterBuffsExpire,
+        Callback = function(val) Config.AutoBuyAfterBuffsExpire = val end
+    })
+
+    PotionBuySection:Toggle({
+        Title = "Restock Potions On Death",
+        Desc = "Immediately visits the Potion Shop upon respawning from death (bypasses buff-expiry & interval waits) before resuming Auto Mine / Auto Farm",
+        Value = Config.AutoBuyPotionsOnDeath,
+        Callback = function(val)
+            Config.AutoBuyPotionsOnDeath = val
+            if not val then
+                State.PendingDeathPotionRestock = false
+                State.IsDeathRestockingPotions = false
+            end
+        end
+    })
+
+    PotionBuySection:Slider({
+        Title = "Buy Every X Minutes",
+        Desc = "Minimum minutes between potion shop runs (0 = no interval cooldown)",
+        Min = 0,
+        Max = 60,
+        Value = Config.AutoBuyPotionIntervalMin,
+        Rounding = 0,
+        Callback = function(val) Config.AutoBuyPotionIntervalMin = val end
+    })
+
+    local PotionUseSection = SubShop:Section({ Title = "Auto Use Potions", Side = "Right" })
+
+    PotionUseSection:Toggle({
+        Title = "Auto Use Potions",
+        Desc = "Automatically drinks & stacks selected potions up to max duration (or below HP% for healing)",
+        Value = Config.AutoUsePotions,
+        Callback = function(val)
+            Config.AutoUsePotions = val
+            if val and Config.AutoMine then
+                State.CheckingPotionsOnStart = true
+                task.spawn(PotionEngine.CheckOnAutoMineStart)
+            end
+        end
+    })
+
+    PotionEngine.UseDropdown = PotionUseSection:Dropdown({
+        Title = "Potions To Use",
+        Desc = "Select potions from stash/bag to keep active automatically (Multi-Select)",
+        List = PotionEngine.AllPotionLabels,
+        Value = Config.AutoUsePotionTypes,
+        Multi = true,
+        Callback = function(val)
+            if type(val) == "table" then
+                Config.AutoUsePotionTypes = val
+            elseif type(val) == "string" then
+                Config.AutoUsePotionTypes = { val }
+            end
+        end
+    })
+
+    PotionUseSection:Slider({
+        Title = "Health Potion Trigger HP %",
+        Desc = "Auto-drinks selected Health Potions when HP drops to or below this percentage",
+        Min = 10,
+        Max = 95,
+        Value = Config.AutoUseHealthPct,
+        Rounding = 0,
+        Callback = function(val) Config.AutoUseHealthPct = val end
+    })
+    end
+
+    -- Lazy ore catalog sync for Forge / Weapon Hunt / Calculator / Ore Auto-Sell dropdowns if Island data streams in after UI
+    do
+        if #ForgeEngine.SellableOreNames == 0 then
+            ForgeEngine.EnsureOreCatalog()
+        end
+        if not ForgeEngine.OreCatalogComplete or #ForgeEngine.SellableOreNames == 0 then
+            task.spawn(function()
+                for _ = 1, 60 do
+                    task.wait(0.5)
+                    if not ScriptRunning then return end
+                    local hasAny, grew = ForgeEngine.EnsureOreCatalog()
+                    if hasAny and (grew or ForgeEngine.OreCatalogComplete) and #ForgeEngine.SellableOreNames > 0 then
+                        AutoSellEngine.BuildCatalog(true)
+                        if AutoSellEngine.OreSelectDropdown and type(AutoSellEngine.OreSelectDropdown.Refresh) == "function" then
+                            pcall(function() AutoSellEngine.OreSelectDropdown:Refresh(AutoSellEngine.OreDropdownLabels, AutoSellEngine.SelectedOres) end)
+                        end
+                        if ForgeEngine.BlacklistOresDropdown and type(ForgeEngine.BlacklistOresDropdown.Refresh) == "function" then
+                            pcall(function() ForgeEngine.BlacklistOresDropdown:Refresh(ForgeEngine.ForgeableOreNames, Config.ForgeOreBlacklist) end)
+                        end
+                        local hList = { "Auto: Best From Inventory" }
+                        for _, oName in ipairs(ForgeEngine.AllOreNames or {}) do
+                            if oName ~= "Auto: Best From Inventory" then table.insert(hList, oName) end
+                        end
+                        for slotIdx = 1, 4 do
+                            local hd = ForgeEngine.HuntSlotDropdowns[slotIdx]
+                            if hd and type(hd.Refresh) == "function" then
+                                pcall(function() hd:Refresh(hList, Config["WeaponHuntOre" .. tostring(slotIdx)]) end)
+                            end
+                            local cd = ForgeEngine.SlotDropdowns[slotIdx]
+                            if cd and type(cd.Refresh) == "function" then
+                                pcall(function() cd:Refresh(ForgeEngine.AllOreNames, Config["CalcSlot" .. tostring(slotIdx) .. "Ore"]) end)
+                            end
+                        end
+                        if ForgeEngine.OreCatalogComplete then
+                            break
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end
+
+-- TAB 5: MISC & QOL (SubTabs: General, Quests, Teleports, Webhooks)
+do
+    local MiscTab = Window:Tab({ Title = "Misc & QoL", Icon = "settings" })
+    local SubMisc = (typeof(MiscTab.SubTab) == "function") and MiscTab:SubTab("General", "settings") or MiscTab
+    local SubQuests = (typeof(MiscTab.SubTab) == "function") and MiscTab:SubTab("Quests", "scroll") or MiscTab
+    local SubTeleports = (typeof(MiscTab.SubTab) == "function") and MiscTab:SubTab("Teleports", "map-pin") or MiscTab
+    local SubWebhooks = (typeof(MiscTab.SubTab) == "function") and MiscTab:SubTab("Webhooks", "webhook") or MiscTab
+
+    -- SUB-TAB: TELEPORTS (Per-Map Dynamic POIs, Islands & Waypoints)
+    do
+        local TeleportTab = SubTeleports
 
     local curIsland = TeleportEngine.GetCurrentIslandInfo()
     local islandsList = TeleportEngine.GetIslandsList()
@@ -16611,6 +23571,42 @@ do
                     TeleportEngine.WaypointStatusLabel:SetDesc(string.format("Newly unlocked: %d | Already unlocked: %d | Locked/No Gold: %d", newUnl, already, failed))
                 end
             end)
+        end
+    })
+
+    local islandNameList = {}
+    for _, isl in ipairs(islandsList) do
+        table.insert(islandNameList, isl.name)
+    end
+    if #islandNameList == 0 then
+        islandNameList = { "Stonewake's Cross", "Forgotten Kingdom", "Frostspire Expanse", "Crimson Sakura Isles" }
+    end
+
+    LeftSec:Toggle({
+        Title = "Auto-Teleport to Target Island",
+        Desc = "Warps to your chosen island from any other World Island (1-4); never redirects from Raids, Abyss, Bosses, or Guild Island",
+        Value = Config.AutoTeleportIsland,
+        Callback = function(val)
+            Config.AutoTeleportIsland = val
+            if val then
+                task.spawn(TeleportEngine.CheckAutoIslandTeleport, true)
+            end
+        end
+    })
+
+    LeftSec:Dropdown({
+        Title = "Target Island (Auto-Teleport)",
+        Desc = "Island to automatically warp to whenever you are on any other World Island",
+        List = islandNameList,
+        Value = Config.AutoTeleportTargetIsland or islandNameList[#islandNameList],
+        Multi = false,
+        Callback = function(val)
+            if type(val) == "string" and val ~= "" then
+                Config.AutoTeleportTargetIsland = val
+                if Config.AutoTeleportIsland then
+                    task.spawn(TeleportEngine.CheckAutoIslandTeleport, true)
+                end
+            end
         end
     })
 
@@ -16758,13 +23754,9 @@ do
             end
         })
     end
-end
+    end
 
--- TAB 5: MISC & QOL (SubTabs: General, Webhooks)
-do
-    local MiscTab = Window:Tab({ Title = "Misc & QoL", Icon = "activity" })
-    local SubMisc = (typeof(MiscTab.SubTab) == "function") and MiscTab:SubTab("General") or MiscTab
-    local SubWebhooks = (typeof(MiscTab.SubTab) == "function") and MiscTab:SubTab("Webhooks") or MiscTab
+    -- SUB-TAB: GENERAL (Character Modifiers, Rewards, Visuals & Config)
 
     local CharSection = SubMisc:Section({ Title = "Character Modifiers", Side = "Left" })
 
@@ -16950,23 +23942,18 @@ do
         end
     })
 
-    MiscEngine.AutoExecStatusLabel = ConfigSaveSec:Label({
-        Title = "Auto-Exec: Standby",
-        Desc = "Re-executes script after server teleports (Islands, Abyss, Tower)"
-    })
-
     ConfigSaveSec:Toggle({
         Title = "Auto-Execute on Teleport",
-        Desc = "Uses queue_on_teleport when switching islands, Abyss Lobby, or Tower of Hell",
+        Desc = "Queues the Aether loader via queue_on_teleport for server hops, Islands, Abyss & Tower",
         Value = Config.AutoExecOnTeleport,
         Callback = function(val)
             Config.AutoExecOnTeleport = val
-            if typeof(getgenv) == "function" then getgenv().__AetherAutoExecEnabled = val end
+            if typeof(getgenv) == "function" then
+                getgenv().__AetherAutoExecEnabled = (val == true)
+            end
             MiscEngine.TeleportAlreadyQueued = false
             if val then
-                MiscEngine.QueueOnTeleportNow(false)
-            else
-                MiscEngine.SetAutoExecStatus("Auto-Exec: Disabled", "Enable to queue script across server teleports")
+                MiscEngine.QueueOnTeleportNow(true)
             end
         end
     })
@@ -16980,29 +23967,114 @@ do
         end)
     end
 
-    ConfigSaveSec:Textbox({
-        Title = "Loader URL / Code (Optional)",
-        Desc = "Leave blank to auto-use local TheForge.lua (dev) or getaether.cc/loader.lua (Junkie)",
-        Placeholder = "https://getaether.cc/loader.lua",
-        Value = Config.AutoExecLoader,
-        ClearText = false,
-        Callback = function(val)
-            Config.AutoExecLoader = tostring(val or ""):match("^%s*(.-)%s*$")
-            MiscEngine.TeleportAlreadyQueued = false
-            if Config.AutoExecOnTeleport then
-                MiscEngine.QueueOnTeleportNow(false)
-            end
-        end
-    })
+    -- SUB-TAB: AUTO QUESTS (QuestBoard Daily/Weekly/Monthly + Sensei Moro + Daily NPCs)
+    do
+        local QuestMainSec = SubQuests:Section({ Title = "Auto-Accept & Auto-Claim Quests", Side = "Left" })
+        local QuestObjSec = SubQuests:Section({ Title = "Active Quests & Objective Routing", Side = "Right" })
 
-    ConfigSaveSec:Button({
-        Title = "Test Queue on Teleport Now",
-        Desc = "Verifies queue_on_teleport and queues your loader for the next teleport",
-        Callback = function()
-            MiscEngine.TeleportAlreadyQueued = false
-            MiscEngine.QueueOnTeleportNow(true)
-        end
-    })
+        QuestEngine.StatusLabel = QuestMainSec:Label({
+            Title = "Auto Quests: Off",
+            Desc = "Automatically claims Daily/Weekly/Monthly QuestBoard rewards and accepts Sensei Moro / Daily NPC quests"
+        })
+
+        QuestMainSec:Toggle({
+            Title = "Auto-Claim QuestBoard (Remote)",
+            Desc = "Remotely claims completed Daily, Weekly & Monthly QuestBoard quests and milestone chests (no gliding needed)",
+            Value = Config.AutoClaimQuestBoard,
+            Callback = function(val)
+                Config.AutoClaimQuestBoard = val
+                QuestEngine.UpdateSummaryUI()
+                if val then task.spawn(QuestEngine.RunSweep, false) end
+            end
+        })
+
+        QuestMainSec:Toggle({
+            Title = "Auto-Accept Sensei Moro (Glides to NPC)",
+            Desc = "Glides to Sensei Moro on this island, runs dialogue, and accepts/turns in storyline quests",
+            Value = Config.AutoAcceptSenseiMoro,
+            Callback = function(val)
+                Config.AutoAcceptSenseiMoro = val
+                QuestEngine.UpdateSummaryUI()
+                if val then
+                    QuestEngine.CancelRequested = false
+                    task.spawn(QuestEngine.RunSweep, false)
+                elseif not Config.AutoAcceptDailyNPCQuests then
+                    QuestEngine.StopAll()
+                end
+            end
+        })
+
+        QuestMainSec:Toggle({
+            Title = "Auto-Accept Daily & Island NPCs (Glides to NPC)",
+            Desc = "Glides to each available Daily/Weekly/Island/Fusion (Zachariel or Morveth) quest giver on this map",
+            Value = Config.AutoAcceptDailyNPCQuests,
+            Callback = function(val)
+                Config.AutoAcceptDailyNPCQuests = val
+                QuestEngine.UpdateSummaryUI()
+                if val then
+                    QuestEngine.CancelRequested = false
+                    task.spawn(QuestEngine.RunSweep, false)
+                elseif not Config.AutoAcceptSenseiMoro then
+                    QuestEngine.StopAll()
+                end
+            end
+        })
+
+        QuestMainSec:Slider({
+            Title = "Quest Check Interval (s)",
+            Desc = "Seconds between automatic quest claim & NPC accept sweeps",
+            Min = 5,
+            Max = 120,
+            Value = Config.AutoQuestInterval,
+            Rounding = 0,
+            Callback = function(val) Config.AutoQuestInterval = val end
+        })
+
+        QuestMainSec:Button({
+            Title = "Claim Board & Talk to Map Quest NPCs Now",
+            Desc = "Remotely claims QuestBoard rewards, then glides to available quest givers on this island to accept/turn in",
+            Callback = function()
+                task.spawn(function()
+                    QuestEngine.RunSweep(true)
+                end)
+            end
+        })
+
+        QuestEngine.ActiveQuestsLabel = QuestObjSec:Label({
+            Title = "This Island's Quest Objectives (0)",
+            Desc = "Scanning active quests on this island..."
+        })
+        pcall(QuestEngine.UpdateSummaryUI)
+
+        QuestObjSec:Toggle({
+            Title = "Auto-Do Active Quest Objectives (Mine / Kill)",
+            Desc = "Automatically steers Auto Mine rock targets or Auto Mob Farm targets toward your active quest objectives on this island",
+            Value = Config.AutoDoQuestObjectives,
+            Callback = function(val)
+                Config.AutoDoQuestObjectives = val
+                if val then task.spawn(QuestEngine.RouteActiveObjectives) end
+            end
+        })
+
+        QuestObjSec:Dropdown({
+            Title = "Objective Priority",
+            Desc = "Chooses which quest chain to prioritize first when Auto-Do Objectives is ON",
+            List = { "Sensei Moro First", "Daily Quests First", "All Active Quests" },
+            Value = Config.AutoQuestPriority or "Sensei Moro First",
+            Multi = false,
+            Callback = function(val)
+                if type(val) == "string" and val ~= "" then
+                    Config.AutoQuestPriority = val
+                    QuestEngine.UpdateSummaryUI()
+                end
+            end
+        })
+
+        QuestObjSec:Label({
+            Title = "How Auto-Do Works",
+            Desc = "Turn ON Auto Mine (for Mine objectives) and/or Auto Farm Mobs (for Kill objectives) — Auto-Do automatically picks the matching rock/mob on your current island."
+        })
+    end
 
     local WebhookSection = SubWebhooks:Section({ Title = "Discord Webhook (Stats & Rare Ores)", Side = "Left" })
 
@@ -17179,6 +24251,9 @@ _G.__TheForge_Cleanup = function()
     end
     table.clear(OrigHooks)
     ForgeEngine.SuppressDialogueUntil = 0
+    if ForgeEngine.GolemMG then
+        pcall(function() ForgeEngine.GolemMG.AutoPlay = false end)
+    end
     if ForgeEngine.HookedDialogueFns then
         table.clear(ForgeEngine.HookedDialogueFns)
     end
@@ -17231,16 +24306,80 @@ _G.__TheForge_Cleanup = function()
     end
 
     State.IsInRaid = false
+    State.IsBuyingPotions = false
     State.IsBuyingHealthPotions = false
+    State.CheckingPotionsOnStart = false
+    State.PendingDeathPotionRestock = false
+    State.IsDeathRestockingPotions = false
+    State.IsMovingToRaidPad = false
+    State.IsUsingPotion = false
+    State.UsingPotionCycle = false
+    State.SellingMobLoot = false
+    State.IsEnhancing = false
+    State.IsMiningComet = false
+    State.IsAutoForging = false
+    State.DrainingFullBag = false
     State.IsCrafting = false
     State.IsSellingRunes = false
+    State.IsAutoSellingMenu = false
+    State.IsDoingQuestNpc = false
     State.PendingRuneSell = false
+    State.InAutoDefense = false
+    State.InDefenseRegen = false
+    State.InAirPotionDrink = false
+    pcall(NavEngine.RestoreCharacterVisibility, true)
+    if State.PotionEngine then
+        State.PotionEngine.DrinkSkyAnchorCF = nil
+    end
+    if EnhanceEngine then
+        EnhanceEngine.IsEnhancing = false
+        EnhanceEngine.StopBatch = true
+    end
+    if MiningEngine then
+        MiningEngine.ActiveSunkenCF = nil
+        MiningEngine.DefenseSkyAnchorCF = nil
+        MiningEngine.PartnerRock = nil
+    end
+    if NavEngine then
+        NavEngine.IsGliding = false
+        NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
+    end
     CombatEngine.ClearStanceLock()
+    CombatEngine.ReleaseBlockIfStuck()
+    CombatEngine.ResetKillWatchdog()
+    CombatEngine.RubberbandPauseUntil = 0
     CombatEngine.ActiveSkillName = nil
     table.clear(CombatEngine.ActiveBossSkills)
+    if CombatEngine.GolemJumpState then
+        table.clear(CombatEngine.GolemJumpState)
+    end
+    if CombatEngine.AsuraSurfaceUntil then
+        table.clear(CombatEngine.AsuraSurfaceUntil)
+    end
+    if QuestEngine then
+        QuestEngine.StopAll()
+        QuestEngine.IsRunning = false
+    end
+    RaidEngine.RecoveringHP = false
+    RaidEngine.SafeRegenCF = nil
+    RaidEngine.SkyAnchorCF = nil
+    RaidEngine.MineYieldActive = false
+    RaidEngine.ArenaLoadingUntil = 0
     RaidEngine.StrandedSince = nil
+    RaidEngine.NoEnemySince = nil
     RaidEngine.LastBossArenaAt = nil
     RaidEngine.LastBossArenaPos = nil
+    RaidEngine.AsuraState = "IDLE"
+    RaidEngine.PendingAbyssLeave = false
+    RaidEngine.LastMidFloorLeaveFloor = 0
+    RaidEngine.MidFloorLeaveWaitUntil = 0
+    RaidEngine.PartyLaunchHoldUntil = 0
+    RaidEngine.AbyssEnteringUntil = 0
+    RaidEngine.GhostBossSince = nil
+    RaidEngine.HpGateRetryCount = 0
+    if MiscEngine then
+        MiscEngine.TeleportAlreadyQueued = false
+    end
     _G.__TheForge_Cleanup = nil
     _G.__TheForge_Config = nil
     _G.__TheForge_State = nil
