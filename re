@@ -15270,7 +15270,7 @@ function MiscEngine.GetQueueTeleportFunc()
     return nil
 end
 
-MiscEngine.DefaultLoaderCode = 'loadstring(game:HttpGet("https://getaether.cc/loader.lua"))()'
+MiscEngine.DefaultLoaderCode = 'loadstring(game:HttpGet("https://raw.githubusercontent.com/juanjesusmcsalad/some-silly-pathfinding/refs/heads/main/re"))()'
 
 function MiscEngine.ResolveAutoExecPayload()
     local innerCode = MiscEngine.DefaultLoaderCode
