@@ -411,6 +411,7 @@ local Config = {
     AutoAttackMob = true,
     AutoBlock = false,
     AutoParry = true, -- Automatically parries incoming mob & boss attacks via ParryIndicator + animations
+    AutoParryBossesOnly = false, -- When true, only Auto-Parries & dodges Boss / Mini-Boss attacks (saves stamina vs small mobs)
     AutoParryRange = 18.0, -- Max distance in studs to trigger Auto-Parry
     ParryHoldDuration = 0.35, -- Seconds to hold block during parry window before releasing
     AutoParryEquipWeapon = false, -- If true, forces weapon equip when an enemy attacks even outside combat
@@ -3463,6 +3464,42 @@ function CombatEngine.IsKitingMob(mob)
     return lower:find("abyssal watcher", 1, true) ~= nil or lower:find("watcher", 1, true) ~= nil
 end
 
+-- Official Boss & Mini-Boss detector (matches game's RaidTraits.IsBoss attributes + known island/raid/guild/abyss bosses)
+function CombatEngine.IsBossMob(mob)
+    if typeof(mob) ~= "Instance" or not mob.Parent then return false end
+    if mob:GetAttribute("IsBoss") == true
+        or mob:GetAttribute("BossShield") ~= nil
+        or mob:GetAttribute("IsMiniBoss") == true
+        or mob:GetAttribute("MiniBoss") == true
+        or mob:GetAttribute("WorldBoss") == true
+        or mob:GetAttribute("GuildBoss") == true
+        or mob:GetAttribute("BossName") ~= nil
+        or mob:GetAttribute("ShieldActive") ~= nil then
+        return true
+    end
+    local raw = tostring(mob:GetAttribute("EnemyType") or mob:GetAttribute("EnemyName") or mob:GetAttribute("Name") or mob.Name):lower()
+    if raw:find("asura", 1, true)
+        or raw:find("incarnate", 1, true)
+        or raw:find("behemoth", 1, true)
+        or raw:find("goblin king", 1, true)
+        or raw:find("skeleton king", 1, true)
+        or raw:find("queen spider", 1, true)
+        or raw:find("hellbringer", 1, true)
+        or raw:find("spirit golem", 1, true)
+        or raw:find("crystal golem", 1, true)
+        or raw:find("warlord oni", 1, true)
+        or raw:find("hellflame oni", 1, true)
+        or raw:find("yeti", 1, true)
+        or raw:find("cthulhu", 1, true)
+        or raw:find("chuthlu", 1, true)
+        or raw:find("abyss juggernaut", 1, true)
+        or raw:find("boss", 1, true)
+        or raw:match("^golem%d*$") then
+        return true
+    end
+    return false
+end
+
 -- Detects if a boss/enemy currently has an active immunity shield (e.g. Galaxite Behemoth BehemothImmune, Skeleton King ShieldActive)
 function CombatEngine.IsBossShielded(mob)
     if not mob or not mob.Parent then return false end
@@ -3836,6 +3873,7 @@ function CombatEngine.TriggerParry(attacker, isUnparryable)
         end
     end
     if not ScriptRunning or not Config.AutoParry or State.IsAutoForging or State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsEnhancing or State.IsUsingPotion or State.UsingPotionCycle or State.InDefenseRegen or State.InAirPotionDrink or (RaidEngine and (RaidEngine.RecoveringHP or RaidEngine.AsuraState == "HEALING")) then return false end
+    if Config.AutoParryBossesOnly and attacker and not CombatEngine.IsBossMob(attacker) then return false end
     if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return false end
 
     local aHrp = attacker and attacker:FindFirstChild("HumanoidRootPart")
@@ -4027,6 +4065,7 @@ end
 -- Unified deduplicated signal handlers called by BOTH Tier 2 (raw EffectService.RE.Event) and Tier 1 (module hooks)
 function CombatEngine.OnParryIndicator(attacker, isParryable)
     if not ScriptRunning or not Config.AutoParry or typeof(attacker) ~= "Instance" or attacker == State.Character then return end
+    if Config.AutoParryBossesOnly and not CombatEngine.IsBossMob(attacker) then return end
     local now = os.clock()
     if (now - (CombatEngine.LastParryIndEventByMob[attacker] or 0)) < 0.045 then
         return
@@ -4092,6 +4131,7 @@ end
 
 function CombatEngine.OnBomberCharge(bomberMob, stage)
     if not ScriptRunning or not Config.AutoParry or not Config.AutoDodgeUnparryable or typeof(bomberMob) ~= "Instance" then return end
+    if Config.AutoParryBossesOnly and not CombatEngine.IsBossMob(bomberMob) then return end
     if not tonumber(stage) or stage < 4 then return end
     local now = os.clock()
     if (now - (CombatEngine.LastBomberEventByMob[bomberMob] or 0)) < 0.08 then
@@ -4170,7 +4210,7 @@ task.spawn(function()
                 for _, entry in ipairs(nearList) do
                     local m = entry.model
                     local mSt = m:FindFirstChild("Status")
-                    if not (mSt and (mSt:FindFirstChild("Stun") or mSt:FindFirstChild("Parried"))) then
+                    if (not Config.AutoParryBossesOnly or CombatEngine.IsBossMob(m)) and not (mSt and (mSt:FindFirstChild("Stun") or mSt:FindFirstChild("Parried"))) then
                         local hum = m:FindFirstChildOfClass("Humanoid")
                         local animator = hum and hum:FindFirstChildOfClass("Animator")
                         if animator then
@@ -11415,8 +11455,9 @@ function CombatEngine.GetMobStrengthScore(mob)
         CombatEngine.MobStrengthCache = cache
     end
 
-    local species = tostring(mob.Name):gsub("%d+$", ""):gsub("^%s+", ""):gsub("%s+$", "")
-    local cached = CombatEngine.MobStrengthCache[species]
+    local rawName = tostring(mob:GetAttribute("EnemyType") or mob:GetAttribute("EnemyName") or mob:GetAttribute("Name") or mob.Name)
+    local species = rawName:gsub("%s*%[?Lv%.?%s*%d+%]?", ""):gsub("%d+$", ""):gsub("^%s+", ""):gsub("%s+$", "")
+    local cached = CombatEngine.MobStrengthCache[species] or CombatEngine.MobStrengthCache[rawName]
     if cached and cached > 0 then
         return cached
     end
@@ -11445,6 +11486,11 @@ function CombatEngine.FindClosestMob()
                     local dist = (mHRP.Position - hrpPos).Magnitude
                     if dist <= maxScan and (not MiningEngine or MiningEngine.IsPositionZoneUnlocked(mHRP.Position, misc)) then
                         local score = useStrength and CombatEngine.GetMobStrengthScore(mob) or 0
+                        -- Strongly prefer finishing an already-damaged target mob right beside us instead of abandoning it!
+                        local mHum = mob:FindFirstChildOfClass("Humanoid")
+                        if dist <= 28.0 and mHum and mHum.MaxHealth > 0 and mHum.Health > 0 and mHum.Health < (mHum.MaxHealth - 1.0) then
+                            score = score + 1e9
+                        end
                         if CombatEngine.IsBossShielded(mob) then
                             if score > bestShieldedScore or (score == bestShieldedScore and dist < bestShieldedDist) then
                                 bestShieldedScore = score
@@ -12107,6 +12153,14 @@ function CombatEngine.EngageTargetMob(mob, opts)
             if State.Humanoid then State.Humanoid.AutoRotate = true end
             local navOk = NavEngine.NavigateTo(targetCFrame)
             if not navOk then
+                local transitInterrupted = State.IsBuyingPotions or State.IsBuyingHealthPotions or State.CheckingPotionsOnStart
+                    or State.IsDeathRestockingPotions or State.IsUsingPotion or State.UsingPotionCycle or State.InAirPotionDrink
+                    or State.IsMiningComet or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting
+                    or State.SellingMobLoot or State.IsAutoSellingMenu or State.IsDoingQuestNpc
+                    or os.clock() < (CombatEngine.RubberbandPauseUntil or 0)
+                if transitInterrupted then
+                    return true, 0.12
+                end
                 if State.Humanoid and State.Humanoid.Health > 0 and (not opts or opts.blacklistOnFail ~= false) then
                     CombatEngine.Blacklist[mob] = os.clock() + 6.0
                     State.TargetMob = nil
@@ -12178,6 +12232,14 @@ function CombatEngine.EngageTargetMob(mob, opts)
 
         local navOk = NavEngine.NavigateTo(targetCFrame)
         if not navOk then
+            local transitInterrupted = State.IsBuyingPotions or State.IsBuyingHealthPotions or State.CheckingPotionsOnStart
+                or State.IsDeathRestockingPotions or State.IsUsingPotion or State.UsingPotionCycle or State.InAirPotionDrink
+                or State.IsMiningComet or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting
+                or State.SellingMobLoot or State.IsAutoSellingMenu or State.IsDoingQuestNpc
+                or os.clock() < (CombatEngine.RubberbandPauseUntil or 0)
+            if transitInterrupted then
+                return true, 0.12
+            end
             if State.Humanoid and State.Humanoid.Health > 0 and (not opts or opts.blacklistOnFail ~= false) then
                 CombatEngine.Blacklist[mob] = os.clock() + 6.0
                 State.TargetMob = nil
@@ -12362,25 +12424,8 @@ task.spawn(function()
             local mob = State.TargetMob
             local isMobAlive = mob and mob.Parent and mob:IsDescendantOf(workspace)
             local hum = isMobAlive and mob:FindFirstChildOfClass("Humanoid")
-            if isMobAlive and hum and hum.Health > 0 and CombatEngine.IsBossShielded(mob) then
-                local addMob = CombatEngine.FindClosestMob()
-                if addMob and addMob ~= mob and not CombatEngine.IsBossShielded(addMob) then
-                    mob = addMob
-                    State.TargetMob = addMob
-                    State.LastFarmedMob = addMob
-                end
-            elseif isMobAlive and hum and hum.Health > 0 and Config.PrioritizeStrongestMob ~= false then
-                local hpPctNow = (hum.MaxHealth > 0) and (hum.Health / hum.MaxHealth) or 1
-                if hpPctNow > 0.25 then
-                    local betterMob = CombatEngine.FindClosestMob()
-                    if betterMob and betterMob ~= mob and not CombatEngine.IsBossShielded(betterMob)
-                        and CombatEngine.GetMobStrengthScore(betterMob) > CombatEngine.GetMobStrengthScore(mob) then
-                        mob = betterMob
-                        State.TargetMob = betterMob
-                        State.LastFarmedMob = betterMob
-                    end
-                end
-            elseif not isMobAlive or not hum or hum.Health <= 0 or not CombatEngine.MatchesTargetMob(mob) then
+            local targetInvalid = (not isMobAlive) or (not hum) or (hum.Health <= 0) or (not CombatEngine.MatchesTargetMob(mob))
+            if targetInvalid then
                 if not Config.AutoMine then
                     if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
                     if State.Humanoid and not State.Humanoid.AutoRotate then State.Humanoid.AutoRotate = true end
@@ -12392,6 +12437,31 @@ task.spawn(function()
                 if mob then
                     State.TargetMob = mob
                     State.LastFarmedMob = mob
+                    CombatEngine.LastTargetSwitchAt = os.clock()
+                end
+            elseif CombatEngine.IsBossShielded(mob) then
+                local addMob = CombatEngine.FindClosestMob()
+                if addMob and addMob ~= mob and not CombatEngine.IsBossShielded(addMob) then
+                    mob = addMob
+                    State.TargetMob = addMob
+                    State.LastFarmedMob = addMob
+                    CombatEngine.LastTargetSwitchAt = os.clock()
+                end
+            elseif Config.PrioritizeStrongestMob ~= false then
+                -- NEVER abandon a mob you've already damaged! Only swap to a strictly higher-tier species while still untouched (>=98% HP)
+                local hpPctNow = (hum.MaxHealth > 0) and (hum.Health / hum.MaxHealth) or 1
+                if hpPctNow >= 0.98 and (os.clock() - (CombatEngine.LastTargetSwitchAt or 0)) >= 4.0 then
+                    local betterMob = CombatEngine.FindClosestMob()
+                    if betterMob and betterMob ~= mob and not CombatEngine.IsBossShielded(betterMob) then
+                        local curScore = CombatEngine.GetMobStrengthScore(mob)
+                        local betterScore = CombatEngine.GetMobStrengthScore(betterMob)
+                        if betterScore > (curScore * 1.15) then
+                            mob = betterMob
+                            State.TargetMob = betterMob
+                            State.LastFarmedMob = betterMob
+                            CombatEngine.LastTargetSwitchAt = os.clock()
+                        end
+                    end
                 end
             end
 
@@ -12413,9 +12483,14 @@ task.spawn(function()
                 if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
                 if State.Humanoid and not State.Humanoid.AutoRotate then State.Humanoid.AutoRotate = true end
             end
-            -- Preserve LastFarmedMob if dead while AutoMobFarm + ResumeLastMobAfterDeath are ON so respawn returns straight to it!
+            -- Only wipe TargetMob when AutoMobFarm is actually OFF (or dead without ResumeLastMobAfterDeath); preserve during brief potion/sell pauses!
             local isDeadResuming = Config.AutoMobFarm and Config.ResumeLastMobAfterDeath and State.Humanoid and State.Humanoid.Health <= 0
-            if not isDeadResuming then
+            local tempPaused = Config.AutoMobFarm and State.Humanoid and State.Humanoid.Health > 0 and (
+                State.IsBuyingPotions or State.IsBuyingHealthPotions or State.CheckingPotionsOnStart or State.IsDeathRestockingPotions
+                or State.IsUsingPotion or State.UsingPotionCycle or State.InAirPotionDrink
+                or State.SellingMobLoot or State.IsMiningComet or State.IsAutoSellingMenu
+            )
+            if not isDeadResuming and not tempPaused then
                 State.TargetMob = nil
                 State.CurrentMob = nil
                 if not Config.AutoMobFarm then
@@ -22507,6 +22582,18 @@ do
         Callback = function(val)
             Config.AutoParry = val
             if not val then
+                CombatEngine.ReleaseBlockIfStuck()
+            end
+        end
+    })
+
+    ParrySettingsSection:Toggle({
+        Title = "Only Auto Parry Bosses",
+        Desc = "Only parries & dodges Boss / Mini-Boss attacks (ignores normal mobs so you don't waste stamina)",
+        Value = Config.AutoParryBossesOnly,
+        Callback = function(val)
+            Config.AutoParryBossesOnly = val
+            if val then
                 CombatEngine.ReleaseBlockIfStuck()
             end
         end
