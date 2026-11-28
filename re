@@ -446,8 +446,13 @@ local Config = {
     -- Abyss & Raid Automation
     AutoRaid = false,
     RaidMode = "Abyss", -- "Abyss", "Tower Of Hell", or current island world boss
-    AutoAsuraToTower = false, -- Farms Asura until AsuraTargetTickets is met, then runs Tower Of Hell
-    AsuraTargetTickets = 5, -- Raid Tickets threshold before switching from Asura to Tower Of Hell
+    AutoAsuraToTower = false, -- Farms Asura until AsuraTargetTickets is met, then burns ALL tickets in Tower Of Hell before returning to Asura
+    AsuraTargetTickets = 5, -- Raid Tickets threshold (1-5 max) before switching from Asura to Tower Of Hell
+    AutoAsuraTowerSpending = false, -- Persisted hysteresis state: stays in Tower Of Hell until tickets hit 0 before farming Asura again
+    MultiWorldTicketFarm = false, -- Automatically travels across Worlds 2, 3, and 4 to farm selected bosses for Raid Tickets, then auto-runs W4 Tower Of Hell
+    TicketFarmBosses = { "Asura's Incarnate (W4 - 100% Ticket)", "Golem (W3 - 33% Ticket)" }, -- Multi-select W2/W3/W4 bosses to farm
+    TicketFarmWaitForSpawn = true, -- Wait on current world when a local selected boss spawns within TicketFarmMaxWaitSec instead of hopping worlds
+    TicketFarmMaxWaitSec = 60, -- Max respawn cooldown (seconds) to wait for a local boss before hopping worlds (default: 60s)
     RaidTier = 1, -- Difficulty tier (1-15) for Tower of Hell / tiered raids
     RaidAutoCreateStart = true, -- Automatically create party & start run when idle in lobby
     AutoPickAbyssCards = true,
@@ -462,7 +467,11 @@ local Config = {
     RaidFallbackEnterHP = 35, -- Retreat & pop Health Potions when HP% drops to or below this
     RaidFallbackResumeHP = 85, -- Return to combat once HP% recovers to this threshold
     RaidAutoBuyHealthPots = true, -- Buys Health Potions in Lobby/Island before entering run if below target stock
+    RaidAutoUseHealthPots = true, -- Automatically drinks best owned Health Potion (III/II/I) when HP drops below Retreat Below HP % during Combat/Raid
     RaidHealthPotStock = 5, -- Target Health Potion count to keep before starting a Raid / Abyss run
+    CombatAutoBuyDamagePots = false, -- Combat QoL: buys Damage Potion II/I automatically when Auto Mob Farm or Auto Raid is ON (independent of Potions & Shop)
+    CombatAutoUseDamagePots = false, -- Combat QoL: drinks & stacks Damage Potion II/I safely mid-air when Auto Mob Farm or Auto Raid is ON (independent of Potions & Shop)
+    CombatDamagePotStock = 5, -- Target Damage Potion count to keep for Combat / Raid / Abyss runs
     AutoMineYieldToBoss = false, -- OFF by default: when ON alongside AutoMine + AutoRaid, mines while boss is on cooldown and pauses to fight when spawned
     GuildBossAutoLeaveAfterKill = false, -- Automatically leaves Guild Island after Guild Boss is defeated & chest is claimed
     RaidBackupKillSwitch = true, -- AFK Backup Kill Switch: forces close-range distance override when an NPC takes 0 damage for timeout
@@ -4844,20 +4853,115 @@ function MiningEngine.IsRockMineable(rock, misc, ignoreOrePeek)
         end
     end
 
+    -- Always enforce Pickaxe Power check so we never waste swings on a rock our pickaxe cannot damage
+    local playerPower = MiningEngine.GetPlayerPickaxePower()
+    local reqDamage = MiningEngine.GetRockRequiredPower(rock)
+    if reqDamage > playerPower then
+        return false -- Equipped pickaxe cannot damage this rock tier!
+    end
+
     local hasSpecific = MiningEngine.HasSpecificTargetSelected()
     if not hasSpecific or ignoreOrePeek then
-        -- Filter by RequiredDamage and skip 10k HP Lucky Blocks when mining "All" or backup-clearing
-        local playerPower = MiningEngine.GetPlayerPickaxePower()
-        local reqDamage = rock:GetAttribute("RequiredDamage") or 0
-        if reqDamage > playerPower then
-            return false -- Equipped pickaxe cannot damage this rock tier!
-        end
+        -- Skip 10k HP Lucky Blocks when mining "All" or backup-clearing unless specifically chosen
         if rock.Name == "Lucky Block" then
             return false
         end
     end
 
     return true
+end
+
+function MiningEngine.GetRockRequiredPower(rockOrName)
+    if not MiningEngine.RockReqPowerCache then
+        local cache = {}
+        local okR, RockData = pcall(function() return safeRequire(ReplicatedStorage.Shared.Data.Rock) end)
+        if okR and type(RockData) == "table" then
+            for k, entry in pairs(RockData) do
+                if type(entry) == "table" then
+                    cache[tostring(k)] = tonumber(entry.RequiredDamage or entry.MinDamage) or 0
+                end
+            end
+        end
+        MiningEngine.RockReqPowerCache = cache
+    end
+
+    if typeof(rockOrName) == "Instance" then
+        local attr = tonumber(rockOrName:GetAttribute("RequiredDamage"))
+        if attr and attr > 0 then return attr end
+        return MiningEngine.RockReqPowerCache[tostring(rockOrName.Name)] or 0
+    elseif type(rockOrName) == "string" and rockOrName ~= "" then
+        local cached = MiningEngine.RockReqPowerCache[rockOrName]
+        if cached ~= nil then return cached end
+        local rocksFolder = workspace:FindFirstChild("Rocks")
+        if rocksFolder then
+            for _, d in ipairs(rocksFolder:GetDescendants()) do
+                if d:IsA("Model") and d.Name == rockOrName then
+                    local attr = tonumber(d:GetAttribute("RequiredDamage"))
+                    if attr then
+                        MiningEngine.RockReqPowerCache[rockOrName] = attr
+                        return attr
+                    end
+                end
+            end
+        end
+    end
+    return 0
+end
+
+function MiningEngine.ValidateSelectedRockPower(targets, notifyUser)
+    targets = targets or Config.MineTargets
+    local playerPower, pickName = MiningEngine.GetPlayerPickaxePower()
+    local validSet = ConfigManager and ConfigManager.ValidRockSet
+    local specificNames = {}
+    local seen = {}
+    if type(targets) == "table" then
+        for k, v in pairs(targets) do
+            local name = (type(k) == "number") and tostring(v) or (v and tostring(k))
+            if name and name ~= "All" and name ~= "" and (not validSet or validSet[name]) and not seen[name] then
+                seen[name] = true
+                table.insert(specificNames, name)
+            end
+        end
+    elseif type(targets) == "string" and targets ~= "All" and targets ~= "" then
+        table.insert(specificNames, targets)
+    end
+
+    if #specificNames == 0 then
+        return true, {}, playerPower, pickName
+    end
+
+    local tooStrong = {}
+    local canMineCount = 0
+    for _, rName in ipairs(specificNames) do
+        local req = MiningEngine.GetRockRequiredPower(rName)
+        if req > playerPower then
+            table.insert(tooStrong, { name = rName, req = req })
+        else
+            canMineCount = canMineCount + 1
+        end
+    end
+
+    if notifyUser and #tooStrong > 0 then
+        if #tooStrong == 1 then
+            Notify(
+                "Pickaxe Not Strong Enough",
+                string.format("Your %s (Power %d) cannot mine %s — needs Power %d!", tostring(pickName or "Pickaxe"), math.floor(playerPower), tooStrong[1].name, math.ceil(tooStrong[1].req)),
+                5.0
+            )
+        else
+            local parts = {}
+            for _, item in ipairs(tooStrong) do
+                table.insert(parts, string.format("%s (Needs %d)", item.name, math.ceil(item.req)))
+            end
+            Notify(
+                "Pickaxe Not Strong Enough",
+                string.format("Your %s (Power %d) cannot mine: %s", tostring(pickName or "Pickaxe"), math.floor(playerPower), table.concat(parts, ", ")),
+                5.5
+            )
+        end
+    end
+
+    return (canMineCount > 0), tooStrong, playerPower, pickName
 end
 
 function MiningEngine.GetOtherPlayersData()
@@ -5326,7 +5430,9 @@ function MiningEngine.FindBestRock()
     local savedCF = (Config.StayAtSavedPos and MiningEngine.GetSavedSpotCFrame()) or nil
     local scanOrigin = savedCF and savedCF.Position or hrpPos
     local misc = MiningEngine.GetMiscDialogues()
-    local useStrength = (Config.PrioritizeStrongestRock ~= false)
+    -- When set to "All", ALWAYS prioritize the strongest rock our pickaxe can mine
+    local hasSpecific = MiningEngine.HasSpecificTargetSelected()
+    local useStrength = (not hasSpecific) or (Config.PrioritizeStrongestRock ~= false)
     local maxScanDist = Config.StayAtSavedPos and 14.5 or (Config.MineDistance or 5000)
     local otherPlayers = Config.AvoidPlayerOccupiedRocks and MiningEngine.GetOtherPlayersData() or {}
 
@@ -6128,7 +6234,8 @@ task.spawn(function()
         end
         local raidLaunchHold = (Config.AutoRaid and RaidEngine and os.clock() < (RaidEngine.PartyLaunchHoldUntil or 0)) or false
         local inActiveRaid = State.IsInRaid or (RaidEngine and RaidEngine.GetActiveBossArena() ~= nil) or false
-        if Config.AutoMine and not inActiveRaid and not inAbyssLobby and not raidLaunchHold and not State.IsAutoForging and not State.DrainingFullBag and not State.IsCrafting and not State.IsBuyingPotions and not State.IsBuyingHealthPotions and not State.IsMovingToRaidPad and not State.IsEnhancing and not State.IsMiningComet and not State.CheckingPotionsOnStart and not State.IsUsingPotion and not State.UsingPotionCycle and not State.IsAutoSellingMenu and not State.IsDoingQuestNpc and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
+        local blockedByNonYieldRaid = Config.AutoRaid and not Config.AutoMineYieldToBoss
+        if Config.AutoMine and not blockedByNonYieldRaid and not inActiveRaid and not inAbyssLobby and not raidLaunchHold and not State.IsAutoForging and not State.DrainingFullBag and not State.IsCrafting and not State.IsBuyingPotions and not State.IsBuyingHealthPotions and not State.IsMovingToRaidPad and not State.IsEnhancing and not State.IsMiningComet and not State.CheckingPotionsOnStart and not State.IsDeathRestockingPotions and not State.IsUsingPotion and not State.UsingPotionCycle and not State.InAirPotionDrink and not State.InDefenseRegen and not State.IsAutoSellingMenu and not State.IsDoingQuestNpc and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
             -- MOB DEFENSE SAFETY: pause mining cleanly to kill nearby/attacking mobs without slowing down normal pickaxe swings
             if Config.MineKillMobsEnabled and MiningEngine.ClearMiningThreats() then
                 task.wait(0.08)
@@ -6296,6 +6403,13 @@ task.spawn(function()
                         MiningEngine.NoDamageSwings = 0
                     else
                         rock = nil
+                        if MiningEngine.HasSpecificTargetSelected() and (os.clock() - (MiningEngine.LastWeakPickNotifyAt or 0)) >= 15.0 then
+                            local canMineAny, tooStrong = MiningEngine.ValidateSelectedRockPower(Config.MineTargets, false)
+                            if not canMineAny and #tooStrong > 0 then
+                                MiningEngine.LastWeakPickNotifyAt = os.clock()
+                                MiningEngine.ValidateSelectedRockPower(Config.MineTargets, true)
+                            end
+                        end
                     end
                 end
             end
@@ -11808,11 +11922,22 @@ end
 -- Detects server rubberbands/wave teleports immediately (zero spam-teleport tug-of-war) and strictly clamps per-frame step delta.
 do
     local lastHeartbeatAt = os.clock()
+    CombatEngine.SlideLoopActive = false
+    function CombatEngine.IsYieldingToHigherPriority()
+        return State.IsBuyingPotions or State.IsBuyingHealthPotions or State.CheckingPotionsOnStart
+            or State.IsDeathRestockingPotions or State.IsUsingPotion or State.UsingPotionCycle
+            or State.InAirPotionDrink or State.InDefenseRegen or State.IsMiningComet
+            or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting
+            or State.SellingMobLoot or State.IsAutoSellingMenu or State.IsDoingQuestNpc
+            or State.IsMovingToRaidPad or State.IsEnhancing
+    end
+
     local function applyStanceLock()
         local now = os.clock()
         local dt = math.clamp(now - lastHeartbeatAt, 1 / 120, 0.05)
         lastHeartbeatAt = now
         if not ScriptRunning then return end
+        if CombatEngine.SlideLoopActive then return end
         if State.InDefenseRegen or State.InAirPotionDrink or (RaidEngine and (RaidEngine.RecoveringHP or RaidEngine.AsuraState == "HEALING")) then
             return
         end
@@ -11826,7 +11951,7 @@ do
             CombatEngine.ClearStanceLock()
             return
         end
-        if State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsEnhancing or State.IsMiningComet or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.SellingMobLoot or State.IsAutoSellingMenu or State.IsDoingQuestNpc then
+        if CombatEngine.IsYieldingToHigherPriority() then
             CombatEngine.ClearStanceLock()
             return
         end
@@ -12042,10 +12167,13 @@ function CombatEngine.EngageTargetMob(mob, opts)
                     local stepStart = os.clock()
                     local prevWritePos = curPos
                     local startHrp = State.HRP
+                    CombatEngine.SlideLoopActive = true
                     while ScriptRunning and State.HRP and State.HRP == startHrp and State.Humanoid and State.Humanoid.Health > 0 and mob.Parent and hum.Health > 0 and (os.clock() - stepStart) < 0.35 do
+                        if CombatEngine.IsYieldingToHigherPriority() then break end
                         local dt = RunService.Heartbeat:Wait()
                         if not State.HRP or State.HRP ~= startHrp or not State.Humanoid or State.Humanoid.Health <= 0 or not mob.Parent or hum.Health <= 0 then break end
                         if not Config.AutoMobFarm and not Config.AutoRaid and not State.InAutoDefense then break end
+                        if CombatEngine.IsYieldingToHigherPriority() then break end
                         local pNow = State.HRP.Position
                         if (pNow - prevWritePos).Magnitude > 7.5 then
                             CombatEngine.ClearStanceLock()
@@ -12069,6 +12197,10 @@ function CombatEngine.EngageTargetMob(mob, opts)
                         CombatEngine.ActiveStanceCF = nextCF
                         CombatEngine.LastStanceWritePos = nextPos
                         State.HRP.CFrame = nextCF
+                    end
+                    CombatEngine.SlideLoopActive = false
+                    if State.HRP and CombatEngine.ActiveStanceCF then
+                        CombatEngine.LastStanceWritePos = State.HRP.Position
                     end
                 else
                     CombatEngine.SetHoverStance(true)
@@ -12115,10 +12247,13 @@ function CombatEngine.EngageTargetMob(mob, opts)
                 local prevWritePos = pNow
                 local maxSlide = math.clamp((dClose / safeCombatSpeed) + 0.6, 0.8, 3.5)
                 local startHrp = State.HRP
+                CombatEngine.SlideLoopActive = true
                 while ScriptRunning and State.HRP and State.HRP == startHrp and State.Humanoid and State.Humanoid.Health > 0 and mob.Parent and hum.Health > 0 and (os.clock() - slideStart) < maxSlide do
                     if not Config.AutoMobFarm and not Config.AutoRaid and not State.InAutoDefense then break end
+                    if CombatEngine.IsYieldingToHigherPriority() then break end
                     local dt = RunService.Heartbeat:Wait()
                     if not State.HRP or State.HRP ~= startHrp or not State.Humanoid or State.Humanoid.Health <= 0 or not mob.Parent or hum.Health <= 0 then break end
+                    if CombatEngine.IsYieldingToHigherPriority() then break end
                     if State.Character then
                         for _, pt in ipairs(State.Character:GetDescendants()) do
                             if pt:IsA("BasePart") and pt.CanCollide then pt.CanCollide = false end
@@ -12148,6 +12283,7 @@ function CombatEngine.EngageTargetMob(mob, opts)
                         CombatEngine.TrySwingWeapon(mHRP)
                     end
                 end
+                CombatEngine.SlideLoopActive = false
                 if not Config.Noclip and not NavEngine.IsGliding then
                     pcall(NavEngine.RestoreCharacterPhysics)
                 end
@@ -12220,12 +12356,14 @@ function CombatEngine.EngageTargetMob(mob, opts)
             local prevWritePos = charPos
             CombatEngine.SetHoverStance(true)
             local startHrp = State.HRP
+            CombatEngine.SlideLoopActive = true
             while ScriptRunning and State.HRP and State.HRP == startHrp and State.Humanoid and State.Humanoid.Health > 0 and mob.Parent and hum.Health > 0 and (os.clock() - slideStart) < maxSlideTime do
-                if State.IsBuyingPotions or State.IsAutoForging or State.DrainingFullBag or State.IsCrafting or State.SellingMobLoot or State.IsAutoSellingMenu or State.IsDoingQuestNpc then break end
+                if CombatEngine.IsYieldingToHigherPriority() then break end
                 if not Config.AutoMobFarm and not Config.AutoRaid and not State.InAutoDefense then break end
                 if os.clock() < (CombatEngine.DodgeUntil or 0) or os.clock() < (CombatEngine.RubberbandPauseUntil or 0) then break end
                 local dt = RunService.Heartbeat:Wait()
                 if not State.HRP or State.HRP ~= startHrp or not State.Humanoid or State.Humanoid.Health <= 0 or not mob.Parent or hum.Health <= 0 then break end
+                if CombatEngine.IsYieldingToHigherPriority() then break end
                 if State.Character then
                     for _, pt in ipairs(State.Character:GetDescendants()) do
                         if pt:IsA("BasePart") and pt.CanCollide then pt.CanCollide = false end
@@ -12262,6 +12400,10 @@ function CombatEngine.EngageTargetMob(mob, opts)
                 if dMag <= 16.0 then
                     CombatEngine.TrySwingWeapon(mHRP)
                 end
+            end
+            CombatEngine.SlideLoopActive = false
+            if State.HRP and CombatEngine.ActiveStanceCF then
+                CombatEngine.LastStanceWritePos = State.HRP.Position
             end
             if not Config.Noclip and not NavEngine.IsGliding then
                 pcall(NavEngine.RestoreCharacterPhysics)
@@ -12368,10 +12510,13 @@ function CombatEngine.EngageTargetMob(mob, opts)
                 local prevWritePos = charPos
                 local maxDur = math.clamp((dBehind / safeCombatSpeed) + 0.35, 0.25, 1.4)
                 local startHrp = State.HRP
+                CombatEngine.SlideLoopActive = true
                 while ScriptRunning and State.HRP and State.HRP == startHrp and State.Humanoid and State.Humanoid.Health > 0 and mob.Parent and hum.Health > 0 and (os.clock() - bStart) < maxDur do
+                    if CombatEngine.IsYieldingToHigherPriority() then break end
                     local dt = RunService.Heartbeat:Wait()
                     if not State.HRP or State.HRP ~= startHrp or not State.Humanoid or State.Humanoid.Health <= 0 or not mob.Parent or hum.Health <= 0 then break end
                     if not Config.AutoMobFarm and not Config.AutoRaid and not State.InAutoDefense then break end
+                    if CombatEngine.IsYieldingToHigherPriority() then break end
                     local cNow = State.HRP.Position
                     if (cNow - prevWritePos).Magnitude > 7.5 then
                         CombatEngine.RubberbandPauseUntil = os.clock() + 0.65
@@ -12400,6 +12545,7 @@ function CombatEngine.EngageTargetMob(mob, opts)
                         CombatEngine.TrySwingWeapon(mHRP)
                     end
                 end
+                CombatEngine.SlideLoopActive = false
             end
             if isKitingTarget and State.Humanoid then
                 pcall(function() State.Humanoid:MoveTo(mHRP.Position) end)
@@ -12427,7 +12573,19 @@ end
 task.spawn(function()
     while ScriptRunning do
         local loopDelay = 0.14
-        local raidActive = Config.AutoRaid and (State.IsInRaid or (game.PlaceId == 84980181568016) or workspace:GetAttribute("AbyssRun") == true or workspace:FindFirstChild("RaidLevels") ~= nil or (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.RecoveringHP or RaidEngine.GetActiveBossArena() ~= nil)))
+        local raidActive = Config.AutoRaid and (
+            State.IsInRaid
+            or (game.PlaceId == 84980181568016)
+            or workspace:GetAttribute("AbyssRun") == true
+            or workspace:FindFirstChild("RaidLevels") ~= nil
+            or (RaidEngine and (
+                RaidEngine.IsInActiveRun()
+                or RaidEngine.RecoveringHP
+                or RaidEngine.GetActiveBossArena() ~= nil
+                or (RaidEngine.ShouldPauseMiningForRaid and RaidEngine.ShouldPauseMiningForRaid())
+                or (RaidEngine.IsBusyForShop and RaidEngine.IsBusyForShop())
+            ))
+        )
         local cometPausedMob = Config.PrioritizeCometRocks and MiningEngine and MiningEngine.ShouldInterruptFarmForComet and MiningEngine.ShouldInterruptFarmForComet()
         if cometPausedMob and not raidActive then
             CombatEngine.ClearStanceLock()
@@ -12435,7 +12593,7 @@ task.spawn(function()
             continue
         end
         local inAbyssLobby = (RaidEngine and type(RaidEngine.IsInAbyssLobby) == "function" and RaidEngine.IsInAbyssLobby()) or false
-        if Config.AutoMobFarm and not raidActive and not inAbyssLobby and not State.CheckingPotionsOnStart and not State.IsDeathRestockingPotions and not State.IsAutoForging and not State.DrainingFullBag and not State.IsCrafting and not State.IsBuyingPotions and not State.IsBuyingHealthPotions and not State.IsMovingToRaidPad and not State.IsEnhancing and not State.IsMiningComet and not State.IsAutoSellingMenu and not State.IsDoingQuestNpc and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
+        if Config.AutoMobFarm and not Config.AutoMine and not raidActive and not inAbyssLobby and not CombatEngine.IsYieldingToHigherPriority() and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
             -- Auto-Sell Mob Loot to Greedy Cey -> Auto-Sell Unchecked Runes when bag hits capacity
             if (Config.AutoSellMobLootWhenFull or Config.AutoSellRunes) and (os.clock() - (State.LastMobLootSellAttempt or 0)) >= 6.0 then
                 local used, cap, isFull = ForgeEngine.GetStashCapacityStatus()
@@ -12521,7 +12679,8 @@ task.spawn(function()
             end
         elseif not raidActive then
             CombatEngine.LastEngagedMob = nil
-            if not Config.AutoMine and not State.IsAutoForging and not State.IsMiningComet then
+            local skyPinned = State.InAirPotionDrink or State.InDefenseRegen or (RaidEngine and RaidEngine.SkyAnchorCF ~= nil)
+            if not Config.AutoMine and not State.IsAutoForging and not State.IsMiningComet and not skyPinned then
                 CombatEngine.ClearStanceLock()
                 if State.HRP and State.HRP.Anchored then State.HRP.Anchored = false end
                 if State.Humanoid and not State.Humanoid.AutoRotate then State.Humanoid.AutoRotate = true end
@@ -12826,7 +12985,7 @@ function RaidEngine.IsNearActiveBossMob(maxDist)
             local mHrp = mob:FindFirstChild("HumanoidRootPart") or mob.PrimaryPart
             if hum and hum.Health > 0 and mHrp and (mHrp.Position - myPos).Magnitude <= maxDist then
                 local lname = string.lower(mob.Name)
-                if mob:GetAttribute("IsBoss") == true or lname:find("asura", 1, true) or lname:find("boss", 1, true) or lname:find("incarnate", 1, true) or lname:find("behemoth", 1, true) then
+                if (CombatEngine and CombatEngine.IsBossMob and CombatEngine.IsBossMob(mob)) or mob:GetAttribute("IsBoss") == true or lname:find("asura", 1, true) or lname:find("boss", 1, true) or lname:find("incarnate", 1, true) or lname:find("behemoth", 1, true) or lname:find("goblin king", 1, true) or lname:find("skeleton king", 1, true) or lname:match("^golem%d*$") then
                     return true
                 end
             end
@@ -12865,19 +13024,402 @@ function RaidEngine.FormatModeLabel(mode)
     return norm
 end
 
+-- Multi-World Boss Catalog for Worlds 2, 3, and 4 (sorted by ticket farming efficiency)
+-- Note: Regular Raid Tickets only drop from 2 bosses: Asura's Incarnate (W4, 100%) and Golem (W3, 33%) — plus Skeleton King during Haunted Night event (W2, 20%).
+-- Goblin King (W2, 10m) drops Essences only and is optional for W2 boss rotation.
+RaidEngine.TicketBossCatalog = {
+    {
+        label = "Asura's Incarnate (W4 - 100% Ticket)",
+        bossKey = "Asura's Incarnate",
+        islandName = "Crimson Sakura Isles",
+        worldIndex = 4,
+        placeId = 74414241680540,
+        dropsTicket = true,
+        priority = 1,
+    },
+    {
+        label = "Golem (W3 - 33% Ticket)",
+        bossKey = "Golem",
+        islandName = "Frostspire Expanse",
+        worldIndex = 3,
+        placeId = 131884594917121,
+        dropsTicket = true,
+        priority = 2,
+    },
+    {
+        label = "Skeleton King (W2 - Haunted Night Event)",
+        bossKey = "Skeleton King",
+        islandName = "Forgotten Kingdom",
+        worldIndex = 2,
+        placeId = 129009554587176,
+        dropsTicket = true,
+        worldEvent = "Haunted Night",
+        priority = 3,
+    },
+    {
+        label = "Goblin King (W2 - Essences Only)",
+        bossKey = "Goblin King",
+        islandName = "Forgotten Kingdom",
+        worldIndex = 2,
+        placeId = 129009554587176,
+        dropsTicket = false,
+        priority = 4,
+    },
+}
+
+RaidEngine.TicketBossOptions = {
+    "Asura's Incarnate (W4 - 100% Ticket)",
+    "Golem (W3 - 33% Ticket)",
+    "Skeleton King (W2 - Haunted Night Event)",
+    "Goblin King (W2 - Essences Only)",
+}
+
+function RaidEngine.IsWorldEventActive(eventName)
+    if type(eventName) ~= "string" or eventName == "" then return true end
+    local want = eventName:lower()
+    local active = false
+    pcall(function()
+        local activeId = workspace:GetAttribute("ActiveEventId") or workspace:GetAttribute("ConfigActiveEventId")
+        local curEvt = workspace:GetAttribute("CurrentWorldEvent") or workspace:GetAttribute("WorldEvent")
+        if type(curEvt) == "string" and curEvt:lower():find(want, 1, true) then
+            active = true
+            return
+        end
+        -- Check Boss pad visibility on current island if already in W2
+        if want:find("haunted", 1, true) and RaidEngine.FindPartyPadForMode("Skeleton King") ~= nil then
+            active = true
+            return
+        end
+        local weFolder = ReplicatedStorage:FindFirstChild("Shared") and ReplicatedStorage.Shared:FindFirstChild("Data") and ReplicatedStorage.Shared.Data:FindFirstChild("WorldEvents")
+        local evMod = weFolder and weFolder:FindFirstChild("Events")
+        if evMod and activeId then
+            local evData = safeRequire(evMod)
+            if type(evData) == "table" then
+                local entry = evData[activeId] or evData[tostring(activeId)]
+                if type(entry) == "table" and tostring(entry.Name or entry.DisplayName or ""):lower():find(want, 1, true) then
+                    active = true
+                end
+            end
+        end
+    end)
+    return active
+end
+
+function RaidEngine.GetSelectedTicketBosses()
+    local selectedMap = {}
+    local raw = Config.TicketFarmBosses
+    if type(raw) == "table" then
+        for k, v in pairs(raw) do
+            if type(k) == "number" and type(v) == "string" then
+                selectedMap[v] = true
+            elseif v == true and type(k) == "string" then
+                selectedMap[k] = true
+            end
+        end
+    elseif type(raw) == "string" and raw ~= "" then
+        selectedMap[raw] = true
+    end
+
+    local unlockedByPlace = {}
+    if TeleportEngine and type(TeleportEngine.GetIslandsList) == "function" then
+        for _, isl in ipairs(TeleportEngine.GetIslandsList()) do
+            unlockedByPlace[isl.placeId] = (isl.unlocked == true)
+        end
+    end
+
+    local result = {}
+    for _, entry in ipairs(RaidEngine.TicketBossCatalog) do
+        if selectedMap[entry.label] or selectedMap[entry.bossKey] then
+            if unlockedByPlace[entry.placeId] ~= false then
+                table.insert(result, entry)
+            end
+        end
+    end
+    if #result == 0 then
+        -- Fallback to Asura's Incarnate if selection was emptied
+        table.insert(result, RaidEngine.TicketBossCatalog[1])
+    end
+    return result
+end
+
+function RaidEngine.GetBossEffectiveWait(bossKey)
+    local bInfo = RaidEngine.GetBossWindowInfo(bossKey)
+    local localCd = math.max(0, ((RaidEngine.BossCooldownUntil and RaidEngine.BossCooldownUntil[bossKey]) or 0) - os.clock())
+    if not bInfo then
+        return true, localCd, false, nil
+    end
+    if bInfo.eventClosed then
+        return false, math.huge, true, bInfo
+    end
+    if bInfo.open and localCd <= 0.5 then
+        return true, 0, false, bInfo
+    end
+    local rem = math.max(tonumber(bInfo.remainingSec) or 0, localCd)
+    return false, rem, false, bInfo
+end
+
+-- Evaluates the continuous Multi-World Ticket Farm + World 4 Tower Of Hell workflow
+function RaidEngine.EvaluateMultiWorldTicketPlan()
+    local targetTickets = math.clamp(math.floor(tonumber(Config.AsuraTargetTickets) or 5), 1, 5)
+    local tickets = RaidEngine.GetRaidTicketCount()
+    local inRaidPlace = RaidEngine.RaidPlaceSet[game.PlaceId] == true or workspace:FindFirstChild("RaidLevels") ~= nil
+    local inWorld4 = (game.PlaceId == 74414241680540)
+
+    -- 1. BURN PHASE: Target tickets met (or already burning tickets down to 0) -> World 4 Tower Of Hell!
+    if inRaidPlace then
+        local wantSpend = tickets >= 1
+        if Config.AutoAsuraTowerSpending ~= wantSpend then
+            Config.AutoAsuraTowerSpending = wantSpend
+            if ConfigManager and ConfigManager.ScheduleSave then ConfigManager.ScheduleSave(0.05) end
+        end
+        return {
+            action = "ENTER_TOWER",
+            mode = "Tower Of Hell",
+            tickets = tickets,
+            targetTickets = targetTickets,
+            reason = string.format("In Tower (%d ticket%s left)", tickets, tickets == 1 and "" or "s"),
+        }
+    end
+
+    if tickets >= targetTickets or (Config.AutoAsuraTowerSpending and tickets >= 1) then
+        if not Config.AutoAsuraTowerSpending then
+            Config.AutoAsuraTowerSpending = true
+            if ConfigManager and ConfigManager.ScheduleSave then ConfigManager.ScheduleSave(0.05) end
+        end
+        if inWorld4 then
+            return {
+                action = "ENTER_TOWER",
+                mode = "Tower Of Hell",
+                tickets = tickets,
+                targetTickets = targetTickets,
+                reason = string.format("Burning %d/%d Tickets -> Tower Of Hell", tickets, targetTickets),
+            }
+        else
+            return {
+                action = "HOP_WORLD",
+                mode = "Tower Of Hell",
+                targetBoss = "Tower Of Hell",
+                targetIsland = "Crimson Sakura Isles",
+                targetPlaceId = 74414241680540,
+                waitSec = 0,
+                tickets = tickets,
+                targetTickets = targetTickets,
+                reason = string.format("Tickets ready (%d/%d) -> Traveling to W4 Tower Of Hell", tickets, targetTickets),
+            }
+        end
+    end
+
+    -- 2. FARM PHASE: Tickets exhausted (0) or below target -> clear burn flag & evaluate W2/W3/W4 bosses
+    if Config.AutoAsuraTowerSpending then
+        Config.AutoAsuraTowerSpending = false
+        if ConfigManager and ConfigManager.ScheduleSave then ConfigManager.ScheduleSave(0.05) end
+    end
+
+    local selected = RaidEngine.GetSelectedTicketBosses()
+    local waitEnabled = (Config.TicketFarmWaitForSpawn ~= false)
+    local maxWaitSec = math.clamp(tonumber(Config.TicketFarmMaxWaitSec) or 60, 0, 300)
+
+    local localOpen, localSoonest, remoteOpen, overallSoonest = nil, nil, nil, nil
+    for _, entry in ipairs(selected) do
+        local isOpen, remSec, eventClosed = RaidEngine.GetBossEffectiveWait(entry.bossKey)
+        if not eventClosed then
+            local isHere = (entry.placeId == game.PlaceId)
+            local rec = { entry = entry, isOpen = isOpen, remSec = remSec, isHere = isHere }
+            if isHere then
+                if isOpen and (not localOpen or entry.priority < localOpen.entry.priority) then
+                    localOpen = rec
+                end
+                if not isOpen and (not localSoonest or remSec < localSoonest.remSec or (remSec == localSoonest.remSec and entry.priority < localSoonest.entry.priority)) then
+                    localSoonest = rec
+                end
+            else
+                if isOpen and (not remoteOpen or entry.priority < remoteOpen.entry.priority) then
+                    remoteOpen = rec
+                end
+            end
+            if not overallSoonest or remSec < overallSoonest.remSec or (remSec == overallSoonest.remSec and entry.priority < overallSoonest.entry.priority) then
+                overallSoonest = rec
+            end
+        end
+    end
+
+    -- Priority 1: Fight an open selected boss already on our current world (0 hop overhead)
+    if localOpen then
+        return {
+            action = "FIGHT_LOCAL",
+            mode = localOpen.entry.bossKey,
+            targetBoss = localOpen.entry.bossKey,
+            targetIsland = localOpen.entry.islandName,
+            waitSec = 0,
+            tickets = tickets,
+            targetTickets = targetTickets,
+            reason = string.format("Fighting %s (W%d) [%d/%d Tickets]", localOpen.entry.bossKey, localOpen.entry.worldIndex, tickets, targetTickets),
+        }
+    end
+
+    -- Priority 2: Wait on current world if Wait-for-Spawn is enabled and a local boss is within MaxWaitSec (default 60s)
+    if waitEnabled and localSoonest and localSoonest.remSec <= maxWaitSec then
+        return {
+            action = "WAIT_LOCAL",
+            mode = localSoonest.entry.bossKey,
+            targetBoss = localSoonest.entry.bossKey,
+            targetIsland = localSoonest.entry.islandName,
+            waitSec = localSoonest.remSec,
+            tickets = tickets,
+            targetTickets = targetTickets,
+            reason = string.format("Waiting for %s (%ds <= %ds) [%d/%d Tickets]", localSoonest.entry.bossKey, math.ceil(localSoonest.remSec), math.floor(maxWaitSec), tickets, targetTickets),
+        }
+    end
+
+    -- Priority 3: Travel to another world where a selected boss is currently OPEN (Asura > Golem > W2)
+    if remoteOpen then
+        return {
+            action = "HOP_WORLD",
+            mode = remoteOpen.entry.bossKey,
+            targetBoss = remoteOpen.entry.bossKey,
+            targetIsland = remoteOpen.entry.islandName,
+            targetPlaceId = remoteOpen.entry.placeId,
+            waitSec = 0,
+            tickets = tickets,
+            targetTickets = targetTickets,
+            reason = string.format("%s OPEN in W%d -> Traveling [%d/%d Tickets]", remoteOpen.entry.bossKey, remoteOpen.entry.worldIndex, tickets, targetTickets),
+        }
+    end
+
+    -- Priority 4: All selected bosses are on cooldown -> go to whichever boss is about to come off cooldown soonest!
+    if overallSoonest then
+        if overallSoonest.isHere then
+            return {
+                action = "WAIT_LOCAL",
+                mode = overallSoonest.entry.bossKey,
+                targetBoss = overallSoonest.entry.bossKey,
+                targetIsland = overallSoonest.entry.islandName,
+                waitSec = overallSoonest.remSec,
+                tickets = tickets,
+                targetTickets = targetTickets,
+                reason = string.format("All on CD -> Waiting here for %s (%ds) [%d/%d Tickets]", overallSoonest.entry.bossKey, math.ceil(overallSoonest.remSec), tickets, targetTickets),
+            }
+        else
+            return {
+                action = "HOP_WORLD",
+                mode = overallSoonest.entry.bossKey,
+                targetBoss = overallSoonest.entry.bossKey,
+                targetIsland = overallSoonest.entry.islandName,
+                targetPlaceId = overallSoonest.entry.placeId,
+                waitSec = overallSoonest.remSec,
+                tickets = tickets,
+                targetTickets = targetTickets,
+                reason = string.format("All on CD -> Traveling to W%d for %s (%ds) [%d/%d Tickets]", overallSoonest.entry.worldIndex, overallSoonest.entry.bossKey, math.ceil(overallSoonest.remSec), tickets, targetTickets),
+            }
+        end
+    end
+
+    return {
+        action = "WAIT_LOCAL",
+        mode = "Asura's Incarnate",
+        waitSec = 60,
+        tickets = tickets,
+        targetTickets = targetTickets,
+        reason = string.format("No open selected bosses [%d/%d Tickets]", tickets, targetTickets),
+    }
+end
+
+function RaidEngine.ExecuteMultiWorldHop(plan)
+    if not plan or not plan.targetIsland or plan.targetPlaceId == game.PlaceId then return false end
+    local now = os.clock()
+    -- Wait 2.0s after leaving a Boss Arena so server RaidTicket drops finish replicating before hopping worlds!
+    if RaidEngine.LastBossArenaAt and (now - RaidEngine.LastBossArenaAt) < 2.0 then
+        RaidEngine.StatusText = "Settling boss loot before world hop..."
+        return false
+    end
+    -- Anti-spam hop cooldown (20s)
+    if (now - (RaidEngine.LastWorldHopAt or 0)) < 20.0 then
+        RaidEngine.StatusText = string.format("World hop cooldown (%ds) -> %s", math.ceil(20.0 - (now - (RaidEngine.LastWorldHopAt or 0))), tostring(plan.targetIsland))
+        return false
+    end
+    if not TeleportEngine or type(TeleportEngine.TeleportToIsland) ~= "function" then
+        return false
+    end
+
+    RaidEngine.LastWorldHopAt = now
+    RaidEngine.StatusText = plan.reason or ("Traveling to " .. tostring(plan.targetIsland) .. "...")
+    if not Config.AutoExecOnTeleport and (now - (RaidEngine.LastAutoExecWarnAt or 0)) >= 45.0 then
+        RaidEngine.LastAutoExecWarnAt = now
+        RaidEngine.Notify("Multi-World Ticket Farm", "Tip: Enable 'Auto-Execute on Teleport' in Settings so the script reloads after hopping worlds!", 5.0)
+    end
+
+    -- Flush config synchronously BEFORE teleporting so burn phase & target settings persist across worlds
+    if ConfigManager and type(ConfigManager.Save) == "function" then
+        pcall(ConfigManager.Save)
+    end
+    if Config.AutoExecOnTeleport and MiscEngine and type(MiscEngine.QueueOnTeleportNow) == "function" then
+        pcall(MiscEngine.QueueOnTeleportNow, false)
+    end
+    if CombatEngine then CombatEngine.ClearStanceLock() end
+    if MiningEngine and MiningEngine.SafeUnanchor then MiningEngine.SafeUnanchor() end
+    RaidEngine.Notify("Multi-World Ticket Farm", tostring(plan.reason or ("Traveling to " .. tostring(plan.targetIsland))), 3.5)
+    local ok = TeleportEngine.TeleportToIsland(plan.targetIsland)
+    if not ok then
+        RaidEngine.LastWorldHopAt = now - 12.0 -- retry in ~8s if portal RPC was busy
+    end
+    return ok
+end
+
+function RaidEngine.UpdateMultiWorldStatusLabel(plan)
+    if not RaidEngine.MultiWorldStatusLabel then return end
+    local p = plan or RaidEngine.EvaluateMultiWorldTicketPlan()
+    local parts = {}
+    for _, entry in ipairs(RaidEngine.GetSelectedTicketBosses()) do
+        local isOpen, remSec, evClosed = RaidEngine.GetBossEffectiveWait(entry.bossKey)
+        local short = entry.bossKey == "Asura's Incarnate" and "Asura" or entry.bossKey
+        if evClosed then
+            table.insert(parts, string.format("W%d %s: Closed", entry.worldIndex, short))
+        elseif isOpen then
+            table.insert(parts, string.format("W%d %s: OPEN", entry.worldIndex, short))
+        else
+            table.insert(parts, string.format("W%d %s: %ds", entry.worldIndex, short, math.ceil(remSec)))
+        end
+    end
+    pcall(function()
+        RaidEngine.MultiWorldStatusLabel:SetTitle(string.format("Tickets: %d/%d | %s", p.tickets or 0, p.targetTickets or 5, tostring(p.reason or "Idle")))
+        RaidEngine.MultiWorldStatusLabel:SetDesc(table.concat(parts, " • "))
+    end)
+end
+
 function RaidEngine.ResolveEffectiveMode()
+    if Config.MultiWorldTicketFarm then
+        local plan = RaidEngine.EvaluateMultiWorldTicketPlan()
+        return plan.mode or "Asura's Incarnate", plan.tickets, plan.targetTickets, plan
+    end
     if not Config.AutoAsuraToTower then
         return RaidEngine.NormalizeMode(Config.RaidMode or "Abyss")
     end
-    if RaidEngine.RaidPlaceSet[game.PlaceId] or workspace:FindFirstChild("RaidLevels") ~= nil then
-        return "Tower Of Hell"
-    end
-    local targetTickets = math.max(1, math.floor(tonumber(Config.AsuraTargetTickets) or 5))
+    local targetTickets = math.clamp(math.floor(tonumber(Config.AsuraTargetTickets) or 5), 1, 5)
     local tickets = RaidEngine.GetRaidTicketCount()
-    if tickets >= targetTickets then
+    if RaidEngine.RaidPlaceSet[game.PlaceId] or workspace:FindFirstChild("RaidLevels") ~= nil then
+        local wantSpend = tickets >= 1
+        if Config.AutoAsuraTowerSpending ~= wantSpend then
+            Config.AutoAsuraTowerSpending = wantSpend
+            if ConfigManager and ConfigManager.ScheduleSave then ConfigManager.ScheduleSave(0.05) end
+        end
         return "Tower Of Hell", tickets, targetTickets
     end
-    return "Asura's Incarnate", tickets, targetTickets
+    if tickets >= targetTickets then
+        if not Config.AutoAsuraTowerSpending then
+            Config.AutoAsuraTowerSpending = true
+            if ConfigManager and ConfigManager.ScheduleSave then ConfigManager.ScheduleSave(0.05) end
+        end
+        return "Tower Of Hell", tickets, targetTickets
+    elseif Config.AutoAsuraTowerSpending and tickets >= 1 then
+        -- Hysteresis burn phase: keep spending all remaining tickets (4 -> 3 -> 2 -> 1) in Tower Of Hell before returning to Asura!
+        return "Tower Of Hell", tickets, targetTickets
+    else
+        if Config.AutoAsuraTowerSpending then
+            Config.AutoAsuraTowerSpending = false
+            if ConfigManager and ConfigManager.ScheduleSave then ConfigManager.ScheduleSave(0.05) end
+        end
+        return "Asura's Incarnate", tickets, targetTickets
+    end
 end
 
 function RaidEngine.GetBossWindowInfo(mode)
@@ -12890,6 +13432,11 @@ function RaidEngine.GetBossWindowInfo(mode)
         if type(cfg) == "table" then
             local TimeUtil = safeRequire(ReplicatedStorage.Shared.Utils.TimeUtil)
             local open, rem, eventClosed, alreadyKilled = true, 0, false, false
+            if type(cfg.WorldEvent) == "string" and cfg.WorldEvent ~= "" then
+                if not RaidEngine.IsWorldEventActive(cfg.WorldEvent) then
+                    eventClosed = true
+                end
+            end
             if TimeUtil and cfg.SpawnInterval then
                 local tStart, tRem = TimeUtil.GetTimeUntilNextInterval(cfg.SpawnInterval)
                 local elapsed = TimeUtil.GetUTC() - tStart
@@ -12903,12 +13450,13 @@ function RaidEngine.GetBossWindowInfo(mode)
                         alreadyKilled = true
                     end
                 end
-                open = windowOpen and (not alreadyKilled)
-                rem = (alreadyKilled or not windowOpen)
-                    and math.max(0, tonumber(tRem) or math.max(0, (tStart + cfg.SpawnInterval) - TimeUtil.GetUTC()))
-                    or math.max(0, dur - elapsed)
+                open = windowOpen and (not alreadyKilled) and (not eventClosed)
+                rem = eventClosed and 999999
+                    or ((alreadyKilled or not windowOpen)
+                        and math.max(0, tonumber(tRem) or math.max(0, (tStart + cfg.SpawnInterval) - TimeUtil.GetUTC()))
+                        or math.max(0, dur - elapsed))
             end
-            info = { isBoss = true, open = open and not eventClosed, alreadyKilled = alreadyKilled, remainingSec = rem, cfg = cfg }
+            info = { isBoss = true, open = open and not eventClosed, eventClosed = eventClosed, alreadyKilled = alreadyKilled, remainingSec = rem, cfg = cfg }
         end
     end)
     return info
@@ -12992,10 +13540,11 @@ function RaidEngine.IsInActiveRun()
 end
 
 function RaidEngine.IsAsuraYieldSupported()
-    if Config.AutoAsuraToTower then
+    if Config.AutoAsuraToTower or Config.MultiWorldTicketFarm then
         return true
     end
-    return RaidEngine.NormalizeMode(Config.RaidMode) == "Asura's Incarnate"
+    local norm = RaidEngine.NormalizeMode(Config.RaidMode)
+    return norm == "Asura's Incarnate" or norm == "Golem" or norm == "Goblin King" or norm == "Skeleton King"
 end
 
 function RaidEngine.ShouldPauseMiningForRaid()
@@ -13015,6 +13564,10 @@ function RaidEngine.ShouldPauseMiningForRaid()
         return true
     end
     if Config.RaidAutoCreateStart then
+        if Config.MultiWorldTicketFarm then
+            local plan = RaidEngine.EvaluateMultiWorldTicketPlan()
+            return plan.action == "FIGHT_LOCAL" or plan.action == "ENTER_TOWER" or plan.action == "HOP_WORLD"
+        end
         local effMode = select(1, RaidEngine.ResolveEffectiveMode())
         local bossInfo = RaidEngine.GetBossWindowInfo(effMode)
         local onCd = os.clock() < ((RaidEngine.BossCooldownUntil and RaidEngine.BossCooldownUntil[effMode]) or 0)
@@ -13037,6 +13590,10 @@ function RaidEngine.IsBusyForShop()
     if RaidEngine.StrandedSince ~= nil or os.clock() < (RaidEngine.ArenaLoadingUntil or 0) then return true end
     if RaidEngine.LastPartyActivateAt and (os.clock() - RaidEngine.LastPartyActivateAt) < 15.0 then return true end
     if not Config.AutoRaid or not Config.RaidAutoCreateStart then return false end
+    if Config.MultiWorldTicketFarm then
+        local plan = RaidEngine.EvaluateMultiWorldTicketPlan()
+        return plan.action == "FIGHT_LOCAL" or plan.action == "ENTER_TOWER" or plan.action == "HOP_WORLD"
+    end
     local effMode = select(1, RaidEngine.ResolveEffectiveMode())
     if effMode == "Tower Of Hell" then
         return RaidEngine.GetRaidTicketCount() >= 1
@@ -13756,14 +14313,27 @@ function RaidEngine.CreateAndStartParty(mode, tier, activateNow, isAuto)
 
     if RaidEngine.IsInActiveRun() then return false, "Already in Run" end
 
-    local function runPreRunHealthPotGate()
-        if not Config.RaidAutoBuyHealthPots then return "ok", nil end
+    local function runPreRunCombatPotRestock(kind)
         local pe = State.PotionEngine
-        if not pe or type(pe.EnsureHealthPotionsStock) ~= "function" then return "ok", nil end
-        local targetHpStock = math.clamp(math.floor(tonumber(Config.RaidHealthPotStock) or 5), 1, 10)
-        local ownedHp = (type(pe.GetTotalHealthPotionsOwned) == "function") and pe.GetTotalHealthPotionsOwned() or 0
-        if ownedHp >= targetHpStock then
-            RaidEngine.HpGateRetryCount = 0
+        if not pe then return "ok", nil end
+        local isDmg = (kind == "damage")
+        if isDmg then
+            if not Config.CombatAutoBuyDamagePots then return "ok", nil end
+            if type(pe.EnsureDamagePotionsStock) ~= "function" then return "ok", nil end
+        else
+            if not Config.RaidAutoBuyHealthPots then return "ok", nil end
+            if type(pe.EnsureHealthPotionsStock) ~= "function" then return "ok", nil end
+        end
+
+        local targetStock = math.clamp(math.floor(tonumber(isDmg and Config.CombatDamagePotStock or Config.RaidHealthPotStock) or 5), 1, 10)
+        local countFn = isDmg and pe.GetTotalDamagePotionsOwned or pe.GetTotalHealthPotionsOwned
+        local ensureFn = isDmg and pe.EnsureDamagePotionsStock or pe.EnsureHealthPotionsStock
+        local label = isDmg and "Damage Potions" or "Health Potions"
+        local retryKey = isDmg and "DmgGateRetryCount" or "HpGateRetryCount"
+
+        local owned = (type(countFn) == "function") and countFn() or 0
+        if owned >= targetStock then
+            RaidEngine[retryKey] = 0
             return "ok", nil
         end
 
@@ -13773,40 +14343,47 @@ function RaidEngine.CreateAndStartParty(mode, tier, activateNow, isAuto)
             or RaidEngine.IsNearActiveBossMob(450)
             or os.clock() < (RaidEngine.ArenaLoadingUntil or 0)
             or sinceArena < 1.5 then
-            return "wait", "Settling before Health Potion restock..."
+            return "wait", "Settling before " .. label .. " restock..."
         end
 
-        RaidEngine.StatusText = string.format("Restocking Health Potions (%d/%d)...", ownedHp, targetHpStock)
-        local bought, reason = pe.EnsureHealthPotionsStock(targetHpStock, false)
-        local nowOwned = (type(pe.GetTotalHealthPotionsOwned) == "function") and pe.GetTotalHealthPotionsOwned() or (ownedHp + (bought or 0))
-        if nowOwned >= targetHpStock then
-            RaidEngine.HpGateRetryCount = 0
+        RaidEngine.StatusText = string.format("Restocking %s (%d/%d)...", label, owned, targetStock)
+        local bought, reason = ensureFn(targetStock, false)
+        local nowOwned = (type(countFn) == "function") and countFn() or (owned + (bought or 0))
+        if nowOwned >= targetStock then
+            RaidEngine[retryKey] = 0
             if bought > 0 then
-                RaidEngine.StatusText = string.format("Restocked Health Potions (%d/%d)", nowOwned, targetHpStock)
+                RaidEngine.StatusText = string.format("Restocked %s (%d/%d)", label, nowOwned, targetStock)
                 task.wait(0.2)
                 if isAuto and (not Config.AutoRaid or not Config.RaidAutoCreateStart) then
                     return "stop", "Stopped"
                 end
             end
             return "ok", nil
-        elseif reason == "no_gold" or reason == "stash_full" then
-            RaidEngine.HpGateRetryCount = 0
+        elseif reason == "no_gold" or reason == "stash_full" or reason == "no_stand" then
+            RaidEngine[retryKey] = 0
             return "ok", nil
         elseif reason == "busy" or reason == "settling" or reason == "cooldown" then
-            return "wait", "Waiting to restock Health Potions..."
-        elseif (RaidEngine.HpGateRetryCount or 0) < 3 then
-            -- Never walk into Asura/Tower/Abyss/Guild half-stocked if a partial purchase or glide interrupt left us below targetHpStock!
-            RaidEngine.HpGateRetryCount = (RaidEngine.HpGateRetryCount or 0) + 1
-            return "wait", string.format("Topping up Health Potions (%d/%d)...", nowOwned, targetHpStock)
+            return "wait", "Waiting to restock " .. label .. "..."
+        elseif (RaidEngine[retryKey] or 0) < 3 then
+            RaidEngine[retryKey] = (RaidEngine[retryKey] or 0) + 1
+            return "wait", string.format("Topping up %s (%d/%d)...", label, nowOwned, targetStock)
         end
-        RaidEngine.HpGateRetryCount = 0
+        RaidEngine[retryKey] = 0
+        return "ok", nil
+    end
+
+    local function runPreRunHealthPotGate()
+        local s1, m1 = runPreRunCombatPotRestock("health")
+        if s1 ~= "ok" then return s1, m1 end
+        local s2, m2 = runPreRunCombatPotRestock("damage")
+        if s2 ~= "ok" then return s2, m2 end
         return "ok", nil
     end
 
     -- Guild Boss (Fallen Guardian / Rotating Guild Golem Boss on Guild Island)
     if mode == "Guild Boss" then
         if not RaidEngine.IsInGuildIsland() then
-            -- Restock Health Potions on Main Island BEFORE traveling to Guild Island
+            -- Restock Health & Damage Potions on Main Island BEFORE traveling to Guild Island
             local gateState, gateMsg = runPreRunHealthPotGate()
             if gateState == "wait" or gateState == "stop" then
                 return false, gateMsg
@@ -13868,6 +14445,13 @@ function RaidEngine.CreateAndStartParty(mode, tier, activateNow, isAuto)
     end
 
     if mode == "Abyss" and not RaidEngine.IsInAbyssLobby() then
+        -- Restock Damage Potions on Main Island before entering Abyss Lobby (since Abyss Lobby only sells Health/Abyss pots)
+        if Config.CombatAutoBuyDamagePots then
+            local dmgState, dmgMsg = runPreRunCombatPotRestock("damage")
+            if dmgState == "wait" or dmgState == "stop" then
+                return false, dmgMsg
+            end
+        end
         -- Enter Abyss Lobby FIRST — once inside Abyss Lobby, runPreRunHealthPotGate() buys directly from the Abyss Lobby potion stand!
         if Remotes.AbyssEnter and (now - (RaidEngine.LastEnterAttempt or 0)) >= 5.0 then
             RaidEngine.LastEnterAttempt = now
@@ -14226,10 +14810,17 @@ do
                 local inTowerPlace = RaidEngine.RaidPlaceSet and RaidEngine.RaidPlaceSet[game.PlaceId] == true
                 local hpCount = (pe and type(pe.GetTotalHealthPotionsOwned) == "function") and pe.GetTotalHealthPotionsOwned() or 1
                 local targetHpStock = math.clamp(math.floor(tonumber(Config.RaidHealthPotStock) or 5), 1, 10)
+                local dmgCount = (pe and type(pe.GetTotalDamagePotionsOwned) == "function") and pe.GetTotalDamagePotionsOwned() or 1
+                local targetDmgStock = math.clamp(math.floor(tonumber(Config.CombatDamagePotStock) or 5), 1, 10)
                 local pd = State.PlayerData or ResolvePlayerData()
                 local curGold = (pd and pd.Data and tonumber(pd.Data.Gold)) or 0
-                -- In Tower of Hell / Abyss sub-place (no shop inside), return to Island whenever below Target Health Potion Stock
-                local needIslandRestock = inTowerPlace and Config.RaidAutoBuyHealthPots and (hpCount < targetHpStock) and curGold >= 350
+                -- In Tower of Hell / Abyss sub-place (no shop inside), return to Island whenever below target Health or Damage Potion stock
+                local needHpRestock = inTowerPlace and Config.RaidAutoBuyHealthPots and (hpCount < targetHpStock) and curGold >= 350
+                local needDmgRestock = inTowerPlace and Config.CombatAutoBuyDamagePots and (dmgCount < targetDmgStock) and curGold >= 250
+                local needIslandRestock = needHpRestock or needDmgRestock
+                local restockSummary = (needHpRestock and needDmgRestock)
+                    and string.format("Health %d/%d & Damage %d/%d", hpCount, targetHpStock, dmgCount, targetDmgStock)
+                    or (needDmgRestock and string.format("Damage Potions %d/%d", dmgCount, targetDmgStock) or string.format("Health Potions %d/%d", hpCount, targetHpStock))
 
                 local function goToIslandWithQueue()
                     if Config.AutoExecOnTeleport and MiscEngine and type(MiscEngine.QueueOnTeleportNow) == "function" then
@@ -14238,24 +14829,31 @@ do
                     pcall(function() return Remotes.RaidGoToIsland:InvokeServer() end)
                 end
 
-                if Config.AutoAsuraToTower then
+                if Config.AutoAsuraToTower or Config.MultiWorldTicketFarm then
                     local tCount = RaidEngine.GetRaidTicketCount()
+                    local wantSpend = tCount >= 1
+                    if Config.AutoAsuraTowerSpending ~= wantSpend then
+                        Config.AutoAsuraTowerSpending = wantSpend
+                        if ConfigManager and ConfigManager.ScheduleSave then ConfigManager.ScheduleSave(0.05) end
+                    end
                     if needIslandRestock and Config.AutoExecOnTeleport and Remotes.RaidGoToIsland then
                         goToIslandWithQueue()
-                        RaidEngine.Notify("Auto Raid", string.format("Health Potions %d/%d -> Returning to Island to restock!", hpCount, targetHpStock), 3.5)
-                    elseif tCount >= 1 and Config.AutoRaidRetry and not noRetry and isLeader and Remotes.RaidRetry then
+                        RaidEngine.Notify("Auto Raid", string.format("%s -> Returning to Island to restock (%d ticket%s left for Tower)!", restockSummary, tCount, tCount == 1 and "" or "s"), 3.5)
+                    elseif tCount >= 1 and not noRetry and isLeader and Remotes.RaidRetry then
                         if needIslandRestock then
-                            RaidEngine.Notify("Auto Raid", string.format("Health Potions %d/%d (enable Auto-Execute on Teleport to restock on Island)", hpCount, targetHpStock), 3.5)
+                            RaidEngine.Notify("Auto Raid", string.format("%s (enable Auto-Execute on Teleport to restock on Island)", restockSummary), 3.5)
                         end
                         pcall(function() return Remotes.RaidRetry:InvokeServer() end)
-                        RaidEngine.Notify("Auto Raid", string.format("Run ended (%d ticket%s left) -> Retrying Tower!", tCount, tCount == 1 and "" or "s"), 3.0)
+                        RaidEngine.Notify("Auto Raid", string.format("Run ended (%d ticket%s left) -> Spending remaining tickets in Tower!", tCount, tCount == 1 and "" or "s"), 3.0)
                     elseif Remotes.RaidGoToIsland then
+                        Config.AutoAsuraTowerSpending = false
+                        if ConfigManager and ConfigManager.ScheduleSave then ConfigManager.ScheduleSave(0.05) end
                         goToIslandWithQueue()
-                        RaidEngine.Notify("Auto Raid", "Out of Raid Tickets -> Returning to Island to farm Asura!", 3.0)
+                        RaidEngine.Notify("Auto Raid", "All Raid Tickets spent (0 left) -> Returning to Island to farm Boss Tickets!", 3.0)
                     end
                 elseif needIslandRestock and Config.AutoExecOnTeleport and Remotes.RaidGoToIsland then
                     goToIslandWithQueue()
-                    RaidEngine.Notify("Auto Raid", string.format("Health Potions %d/%d -> Returning to Island to restock!", hpCount, targetHpStock), 3.5)
+                    RaidEngine.Notify("Auto Raid", string.format("%s -> Returning to Island to restock!", restockSummary), 3.5)
                 elseif Config.AutoRaidRetry and not noRetry and isLeader and Remotes.RaidRetry then
                     if needIslandRestock then
                         RaidEngine.Notify("Auto Raid", string.format("Health Potions %d/%d (enable Auto-Execute on Teleport to restock on Island)", hpCount, targetHpStock), 3.5)
@@ -14517,7 +15115,7 @@ function RaidEngine.StepAsuraBossArena(activeArena)
         end
 
         -- Drink Health Potion WITHOUT re-equipping Weapon while still in HEALING state!
-        if PE and type(PE.UseBestHealthPotion) == "function" then
+        if Config.RaidAutoUseHealthPots ~= false and PE and type(PE.UseBestHealthPotion) == "function" then
             PE.UseBestHealthPotion(true)
         end
         local nowVisHeal = os.clock()
@@ -14906,7 +15504,7 @@ task.spawn(function()
                                 end
                             end
 
-                            if PE and type(PE.UseBestHealthPotion) == "function" then
+                            if Config.RaidAutoUseHealthPots ~= false and PE and type(PE.UseBestHealthPotion) == "function" then
                                 PE.UseBestHealthPotion(true)
                             end
                             task.wait(0.25)
@@ -14916,6 +15514,12 @@ task.spawn(function()
                         if RaidEngine.RecoveringHP or RaidEngine.SkyAnchorCF then
                             RaidEngine.ClearHealAnchor(true)
                         end
+                    end
+
+                    -- 3b. Yield cleanly if PotionEngine is mid-air drinking (Damage/Health/Buff potion)
+                    if State.InAirPotionDrink or State.IsUsingPotion or State.UsingPotionCycle then
+                        task.wait(0.12)
+                        continue
                     end
 
                     -- 4. Fight nearest Raid / Abyss / Guild Boss enemy (with AFK Backup Kill Switch & Expanded Detection)
@@ -15030,25 +15634,65 @@ task.spawn(function()
                 CombatEngine.LastEngagedMob = nil
                 if State.IsInRaid then State.IsInRaid = false end
                 if Config.RaidAutoCreateStart and not State.IsAutoForging and not State.IsCrafting and not State.IsBuyingPotions and not State.IsEnhancing then
-                    local effMode, curTickets, targetTickets = RaidEngine.ResolveEffectiveMode()
-                    if RaidEngine.NormalizeMode(Config.RaidMode) ~= effMode then
-                        Config.RaidMode = effMode
-                        if RaidEngine.ModeDropdown and RaidEngine.ModeDropdown.SetValue then
-                            pcall(function() RaidEngine.ModeDropdown:SetValue(RaidEngine.FormatModeLabel(effMode), true) end)
+                    local effMode, curTickets, targetTickets, mwPlan = RaidEngine.ResolveEffectiveMode()
+                    if Config.MultiWorldTicketFarm and mwPlan then
+                        RaidEngine.UpdateMultiWorldStatusLabel(mwPlan)
+                        if mwPlan.action == "HOP_WORLD" then
+                            RaidEngine.ExecuteMultiWorldHop(mwPlan)
+                            loopDelay = 1.5
+                        elseif mwPlan.action == "WAIT_LOCAL" then
+                            RaidEngine.StatusText = mwPlan.reason or string.format("Waiting for %s...", tostring(effMode))
+                            -- Pre-restock Health & Damage Potions while waiting on boss cooldown (when not yielding to AutoMine)
+                            if not (Config.AutoMine and Config.AutoMineYieldToBoss) and State.PotionEngine then
+                                if Config.RaidAutoBuyHealthPots and type(State.PotionEngine.EnsureHealthPotionsStock) == "function" then
+                                    local targetHpStock = math.clamp(math.floor(tonumber(Config.RaidHealthPotStock) or 5), 1, 10)
+                                    if State.PotionEngine.GetTotalHealthPotionsOwned() < targetHpStock then
+                                        pcall(State.PotionEngine.EnsureHealthPotionsStock, targetHpStock, false)
+                                    end
+                                end
+                                if Config.CombatAutoBuyDamagePots and type(State.PotionEngine.EnsureDamagePotionsStock) == "function" then
+                                    local targetDmgStock = math.clamp(math.floor(tonumber(Config.CombatDamagePotStock) or 5), 1, 10)
+                                    if State.PotionEngine.GetTotalDamagePotionsOwned() < targetDmgStock then
+                                        pcall(State.PotionEngine.EnsureDamagePotionsStock, targetDmgStock, false)
+                                    end
+                                end
+                            end
+                            loopDelay = 1.2
+                        else
+                            if RaidEngine.NormalizeMode(Config.RaidMode) ~= effMode then
+                                Config.RaidMode = effMode
+                                if RaidEngine.ModeDropdown and RaidEngine.ModeDropdown.SetValue then
+                                    pcall(function() RaidEngine.ModeDropdown:SetValue(RaidEngine.FormatModeLabel(effMode), true) end)
+                                end
+                            end
+                            local _, msg = RaidEngine.CreateAndStartParty(effMode, Config.RaidTier, true, true)
+                            RaidEngine.LastPartyMsg = msg or RaidEngine.LastPartyMsg
+                            RaidEngine.StatusText = tostring(mwPlan.reason or effMode) .. " | " .. tostring(msg or "Preparing...")
+                            loopDelay = 1.2
                         end
-                    end
-                    local _, msg = RaidEngine.CreateAndStartParty(effMode, Config.RaidTier, true, true)
-                    RaidEngine.LastPartyMsg = msg or RaidEngine.LastPartyMsg
-                    if Config.AutoAsuraToTower then
-                        local prefix = (effMode == "Tower Of Hell")
-                            and string.format("Tickets %d/%d -> Tower", curTickets or 0, targetTickets or 5)
-                            or string.format("Asura (%d/%d Tickets)", curTickets or 0, targetTickets or 5)
-                        RaidEngine.StatusText = prefix .. " | " .. tostring(msg or "Preparing...")
                     else
-                        RaidEngine.StatusText = msg or (inLobby and "In Abyss Lobby (Auto-Starting...)" or "On Island (Auto-Entering...)")
+                        if RaidEngine.NormalizeMode(Config.RaidMode) ~= effMode then
+                            Config.RaidMode = effMode
+                            if RaidEngine.ModeDropdown and RaidEngine.ModeDropdown.SetValue then
+                                pcall(function() RaidEngine.ModeDropdown:SetValue(RaidEngine.FormatModeLabel(effMode), true) end)
+                            end
+                        end
+                        local _, msg = RaidEngine.CreateAndStartParty(effMode, Config.RaidTier, true, true)
+                        RaidEngine.LastPartyMsg = msg or RaidEngine.LastPartyMsg
+                        if Config.AutoAsuraToTower then
+                            local prefix = (effMode == "Tower Of Hell")
+                                and string.format("Burning Tickets (%d left) -> Tower", curTickets or 0)
+                                or string.format("Asura (%d/%d Tickets)", curTickets or 0, targetTickets or 5)
+                            RaidEngine.StatusText = prefix .. " | " .. tostring(msg or "Preparing...")
+                        else
+                            RaidEngine.StatusText = msg or (inLobby and "In Abyss Lobby (Auto-Starting...)" or "On Island (Auto-Entering...)")
+                        end
+                        loopDelay = 1.2
                     end
-                    loopDelay = 1.2
                 else
+                    if Config.MultiWorldTicketFarm then
+                        pcall(RaidEngine.UpdateMultiWorldStatusLabel)
+                    end
                     RaidEngine.StatusText = inLobby and "In Abyss Lobby (Standby)" or "Idle on Island"
                     loopDelay = 0.75
                 end
@@ -16747,7 +17391,9 @@ function PotionEngine.UsePotion(potionId, allowDuringShop, skipRestoreTool)
     end
 
     local now = os.clock()
-    if (now - (PotionEngine.LastUseAttempt[potionId] or 0)) < 8.0 then
+    local potInfo = PotionEngine.IdToData and PotionEngine.IdToData[potionId]
+    local retryCd = (potInfo and potInfo.isHealth) and 2.5 or 8.0
+    if (now - (PotionEngine.LastUseAttempt[potionId] or 0)) < retryCd then
         return false
     end
     if PotionEngine.GetOwnedCount(potionId) <= 0 then
@@ -17101,8 +17747,150 @@ function PotionEngine.GetEffectiveShopPrice(basePrice, pdData)
     return p
 end
 
-function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
-    targetStock = math.clamp(math.floor(tonumber(targetStock) or 5), 1, 10)
+function PotionEngine.GetTotalDamagePotionsOwned()
+    local total = 0
+    for _, id in ipairs({ "AttackDamagePotion2", "AttackDamagePotion1" }) do
+        total = total + PotionEngine.GetOwnedCount(id)
+    end
+    return total
+end
+
+function PotionEngine.GetActiveDamageBuffRemaining()
+    return math.max(
+        PotionEngine.GetActiveRemaining("AttackDamagePotion2"),
+        PotionEngine.GetActiveRemaining("AttackDamagePotion1")
+    )
+end
+
+function PotionEngine.GetBestOwnedDamagePotionId()
+    for _, id in ipairs({ "AttackDamagePotion2", "AttackDamagePotion1" }) do
+        if PotionEngine.GetOwnedCount(id) > 0 then
+            return id
+        end
+    end
+    return nil
+end
+
+function PotionEngine.NeedsCombatDamageDrink()
+    if not (Config.AutoMobFarm or Config.AutoRaid) or not Config.CombatAutoUseDamagePots then return false end
+    if not State.Humanoid or State.Humanoid.Health <= 0 then return false end
+    local bestId = PotionEngine.GetBestOwnedDamagePotionId()
+    if not bestId then return false end
+    local info = PotionEngine.IdToData[bestId]
+    if not info then return false end
+    if (os.clock() - (PotionEngine.LastUseAttempt[bestId] or 0)) < 8.0 then return false end
+    local dur = math.max(1, tonumber(info.duration) or 60)
+    local maxDur = math.max(dur, tonumber(info.maxDuration) or 150)
+    local stackCutoff = math.max(5.0, (maxDur - dur) + 5.0)
+    return PotionEngine.GetActiveDamageBuffRemaining() <= stackCutoff
+end
+
+function PotionEngine.RunCombatDamageUseCycle(allowDuringShop, skipRestoreTool)
+    if not State.Character or not State.Humanoid or State.Humanoid.Health <= 0 then return 0 end
+    if State.IsAutoForging or (not allowDuringShop and State.IsBuyingPotions) or State.DrainingFullBag or State.UsingPotionCycle or State.IsUsingPotion then return 0 end
+    if CombatEngine and CombatEngine.IsBlockingOrParrying() then return 0 end
+    if not PotionEngine.NeedsCombatDamageDrink() then return 0 end
+
+    State.UsingPotionCycle = true
+    local usedCount = 0
+    local liftedIntoAir = false
+    pcall(function()
+        local alreadyInSky = (RaidEngine and RaidEngine.SkyAnchorCF ~= nil)
+            or (MiningEngine and MiningEngine.DefenseSkyAnchorCF ~= nil)
+        local inSafeLobby = RaidEngine and type(RaidEngine.IsInAbyssLobby) == "function" and RaidEngine.IsInAbyssLobby()
+        if not allowDuringShop and not State.IsBuyingPotions and not alreadyInSky and not inSafeLobby then
+            liftedIntoAir = PotionEngine.RiseToSafeAirForDrink()
+        end
+
+        for _ = 1, 6 do
+            if not ScriptRunning or not Config.CombatAutoUseDamagePots or not (Config.AutoMobFarm or Config.AutoRaid) then break end
+            local bestId = PotionEngine.GetBestOwnedDamagePotionId()
+            if not bestId then break end
+            local info = PotionEngine.IdToData[bestId]
+            local dur = math.max(1, tonumber(info and info.duration) or 60)
+            local maxDur = math.max(dur, tonumber(info and info.maxDuration) or 150)
+            local stackCutoff = math.max(5.0, (maxDur - dur) + 5.0)
+            if PotionEngine.GetActiveDamageBuffRemaining() > stackCutoff then break end
+            if not PotionEngine.UsePotion(bestId, allowDuringShop, true) then break end
+            usedCount = usedCount + 1
+            task.wait(0.25)
+        end
+
+        if liftedIntoAir then
+            PotionEngine.ReleaseAirDrink(true)
+            liftedIntoAir = false
+            pcall(NavEngine.TouchSolidGroundBriefly, 0.06)
+        end
+
+        if usedCount > 0 and not skipRestoreTool and not State.InDefenseRegen and not (RaidEngine and RaidEngine.RecoveringHP) then
+            PotionEngine.RestoreFarmingTool()
+        end
+    end)
+    if liftedIntoAir or State.InAirPotionDrink then
+        PotionEngine.ReleaseAirDrink(true)
+    end
+    State.UsingPotionCycle = false
+    return usedCount
+end
+
+function PotionEngine.RunCombatHealthUseCycle()
+    if not (Config.AutoMobFarm or Config.AutoRaid) or not Config.RaidAutoUseHealthPots then return 0 end
+    if not State.Character or not State.Humanoid or State.Humanoid.Health <= 0 then return 0 end
+    if State.IsAutoForging or State.IsBuyingPotions or State.DrainingFullBag or State.UsingPotionCycle or State.IsUsingPotion then return 0 end
+    if State.InDefenseRegen or (RaidEngine and RaidEngine.RecoveringHP) then return 0 end
+    if CombatEngine and CombatEngine.IsBlockingOrParrying() then return 0 end
+    local hpPct = (State.Humanoid.Health / math.max(1, State.Humanoid.MaxHealth)) * 100
+    local threshold = tonumber(Config.RaidFallbackEnterHP) or 35
+    if hpPct > threshold then return 0 end
+    if PotionEngine.GetTotalHealthPotionsOwned() <= 0 then return 0 end
+
+    local readyId = nil
+    for _, id in ipairs({ "HealthPotion3", "HealthPotion2", "HealthPotion1" }) do
+        if PotionEngine.GetOwnedCount(id) > 0 and PotionEngine.GetActiveRemaining(id) <= 0.5 and (os.clock() - (PotionEngine.LastUseAttempt[id] or 0)) >= 3.0 then
+            readyId = id
+            break
+        end
+    end
+    if not readyId then return 0 end
+
+    State.UsingPotionCycle = true
+    local usedCount = 0
+    local liftedIntoAir = false
+    pcall(function()
+        local alreadyInSky = (RaidEngine and RaidEngine.SkyAnchorCF ~= nil)
+            or (MiningEngine and MiningEngine.DefenseSkyAnchorCF ~= nil)
+        local inSafeLobby = RaidEngine and type(RaidEngine.IsInAbyssLobby) == "function" and RaidEngine.IsInAbyssLobby()
+        if not alreadyInSky and not inSafeLobby then
+            liftedIntoAir = PotionEngine.RiseToSafeAirForDrink()
+        end
+        if PotionEngine.UsePotion(readyId, true, true) then
+            usedCount = 1
+            task.wait(0.25)
+        end
+        if liftedIntoAir then
+            PotionEngine.ReleaseAirDrink(true)
+            liftedIntoAir = false
+            pcall(NavEngine.TouchSolidGroundBriefly, 0.06)
+        end
+        if usedCount > 0 and not State.InDefenseRegen and not (RaidEngine and RaidEngine.RecoveringHP) then
+            PotionEngine.RestoreFarmingTool()
+        end
+    end)
+    if liftedIntoAir or State.InAirPotionDrink then
+        PotionEngine.ReleaseAirDrink(true)
+    end
+    State.UsingPotionCycle = false
+    return usedCount
+end
+
+function PotionEngine.EnsureCombatPotionFamilyStock(opts)
+    local ids = opts.ids
+    local label = opts.label or "Combat Potions"
+    local shortLabel = opts.shortLabel or "Combat Pots"
+    local countFn = opts.countFn
+    local isManual = opts.isManual == true
+    local targetStock = math.clamp(math.floor(tonumber(opts.targetStock) or 5), 1, 10)
+
     if State.IsBuyingHealthPotions then return 0, "busy" end
     if State.IsInRaid then return 0, "settling" end
     if RaidEngine and (
@@ -17117,15 +17905,16 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
     end
     if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return 0, "settling" end
     if not Remotes.Purchase then return 0, "failed" end
-    local ownedTotal = PotionEngine.GetTotalHealthPotionsOwned()
+    local ownedTotal = countFn()
     local needed = targetStock - ownedTotal
     if needed <= 0 then return 0, "ok" end
 
-    local function notifyHealthPotSkip(title, desc)
+    local skipNotifyKey = opts.skipNotifyKey or "LastHealthPotSkipNotifyAt"
+    local function notifyPotSkip(title, desc)
         PotionEngine.SetStatus(title, desc)
         local now = os.clock()
-        if isManual or (now - (PotionEngine.LastHealthPotSkipNotifyAt or 0)) >= 45.0 then
-            PotionEngine.LastHealthPotSkipNotifyAt = now
+        if isManual or (now - (PotionEngine[skipNotifyKey] or 0)) >= 45.0 then
+            PotionEngine[skipNotifyKey] = now
             local uiLib = Library or (typeof(getgenv) == "function" and getgenv().Library) or _G.Library
             if uiLib and type(uiLib.Notify) == "function" then
                 pcall(function()
@@ -17135,16 +17924,15 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
         end
     end
 
-    -- Check Stash capacity so we clamp purchase quantity instead of getting rejected by the server
     local remainingStashCap = 999
     if ForgeEngine and type(ForgeEngine.GetStashCapacityStatus) == "function" then
         local okSt, used, cap = pcall(ForgeEngine.GetStashCapacityStatus)
         if okSt and type(used) == "number" and type(cap) == "number" and cap > 0 then
             remainingStashCap = math.max(0, cap - used)
             if remainingStashCap <= 0 then
-                notifyHealthPotSkip(
-                    "Health Pots: Stash Full",
-                    string.format("Stash is full (%d/%d) — cannot buy Health Potions before run", used, cap)
+                notifyPotSkip(
+                    shortLabel .. ": Stash Full",
+                    string.format("Stash is full (%d/%d) — cannot buy %s", used, cap, label)
                 )
                 return 0, "stash_full"
             end
@@ -17159,7 +17947,8 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
     local bestId, bestStand, bestInfo, bestQty = nil, nil, nil, 0
     local unaffordableInfo, unaffordablePrice = nil, nil
     local blockedByCooldown = false
-    for _, id in ipairs({ "HealthPotion3", "HealthPotion2", "HealthPotion1" }) do
+    local foundAnyStand = false
+    for _, id in ipairs(ids) do
         local info = PotionEngine.IdToData[id]
         local failUntil = PotionEngine.LastBuyFailAt[id] or 0
         if info and not isManual and os.clock() < failUntil then
@@ -17169,6 +17958,7 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
             if stand then
                 local standPosCheck = stand:IsA("Model") and stand:GetPivot().Position or stand.Position
                 if (State.HRP.Position - standPosCheck).Magnitude <= 2600 then
+                    foundAnyStand = true
                     local maxHold = tonumber(info.maxLimit) or 10
                     local qty = math.min(needed, remainingStashCap, math.max(0, maxHold - PotionEngine.GetOwnedCount(id)))
                     local effPrice = PotionEngine.GetEffectiveShopPrice(info.price or 0, pdData)
@@ -17190,8 +17980,8 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
     end
     if not bestId or bestQty <= 0 then
         if unaffordableInfo and unaffordablePrice then
-            notifyHealthPotSkip(
-                "Health Pots: Not Enough Gold",
+            notifyPotSkip(
+                shortLabel .. ": Not Enough Gold",
                 string.format("Need $%s for %s (Have $%s)", WebhookEngine and WebhookEngine.FormatNumber(unaffordablePrice) or tostring(unaffordablePrice), tostring(unaffordableInfo.name), WebhookEngine and WebhookEngine.FormatNumber(math.floor(gold)) or tostring(math.floor(gold)))
             )
             return 0, "no_gold"
@@ -17199,11 +17989,13 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
         if blockedByCooldown then
             return 0, "cooldown"
         end
+        if not foundAnyStand then
+            return 0, "no_stand"
+        end
         return 0, "failed"
     end
     local qty = bestQty
 
-    -- Wait briefly if Mining AutoBuyPotions is finishing a purchase; abort if still busy so glides NEVER overlap
     local waitT0 = os.clock()
     while State.IsBuyingPotions and (os.clock() - waitT0) < 8.0 do
         task.wait(0.2)
@@ -17216,7 +18008,6 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
     local bought = 0
     local buyReason = "failed"
     pcall(function()
-        -- Cleanly release any mining/combat lock or active glide so nothing fights the shop glide
         State.TargetRock = nil
         State.CurrentRock = nil
         State.TargetMob = nil
@@ -17247,13 +18038,12 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
                 break
             end
             if (State.HRP.Position - standPos).Magnitude > 2200 then
-                -- Zone changed (e.g. teleported to Abyss Lobby mid-check): abort and let next tick use the local stand
                 break
             end
             if RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.GetActiveBossArena() ~= nil or os.clock() < (RaidEngine.ArenaLoadingUntil or 0)) then
                 break
             end
-            PotionEngine.SetStatus("Buying " .. bestInfo.name .. " x" .. qty, "Restocking Health Potions before run...")
+            PotionEngine.SetStatus("Buying " .. bestInfo.name .. " x" .. qty, "Restocking " .. label .. "...")
             NavEngine.GlideTo(approachCF, Config.GlideSpeed or 55, true)
             if NavEngine and not Config.Noclip then
                 pcall(NavEngine.RestoreCharacterPhysics)
@@ -17267,11 +18057,9 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
                 break
             end
             if State.HRP and (State.HRP.Position - standPos).Magnitude > 14 and glideAttempt == 1 then
-                -- Recover cleanly if a server Anti-TP rollback interrupted the first cross-map glide
                 task.wait(0.70)
             end
         end
-        -- Recover cleanly if terrain/roof snagged the final approach (tightened to match server prompt radius)
         if State.HRP then
             local remDist = (State.HRP.Position - standPos).Magnitude
             if remDist > math.min(7.5, maxBuyDist) and remDist <= 38 then
@@ -17284,7 +18072,7 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
         end
         if State.HRP and (State.HRP.Position - standPos).Magnitude <= 14
             and not (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.GetActiveBossArena() ~= nil or (RaidEngine.IsNearActiveBossMob and RaidEngine.IsNearActiveBossMob(450)))) then
-            local startTotalOwned = PotionEngine.GetTotalHealthPotionsOwned()
+            local startTotalOwned = countFn()
             local startTierOwned = PotionEngine.GetOwnedCount(bestId)
             local maxHold = tonumber(bestInfo.maxLimit) or 10
             local targetTierOwned = math.min(maxHold, startTierOwned + qty)
@@ -17299,14 +18087,11 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
                 return PotionEngine.GetOwnedCount(bestId)
             end
 
-            -- 1. Try full batch purchase first
             local okBuy, res = pcall(function() return Remotes.Purchase:InvokeServer(bestId, qty) end)
             local curTierOwned = waitTierIncrement(startTierOwned, 0.50)
 
-            -- 2. Ground-truth verification: if Replica still shows fewer than targetTierOwned
-            -- (e.g. server rejected batch, only credited 1 per invoke, or hit brief debounce), loop right at the stand until full!
             local remainingToBuy = math.min(
-                math.max(0, targetStock - PotionEngine.GetTotalHealthPotionsOwned()),
+                math.max(0, targetStock - countFn()),
                 math.max(0, targetTierOwned - curTierOwned)
             )
             if remainingToBuy > 0 then
@@ -17318,12 +18103,11 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
                     end
                     curTierOwned = PotionEngine.GetOwnedCount(bestId)
                     remainingToBuy = math.min(
-                        math.max(0, targetStock - PotionEngine.GetTotalHealthPotionsOwned()),
+                        math.max(0, targetStock - countFn()),
                         math.max(0, targetTierOwned - curTierOwned)
                     )
                     if remainingToBuy <= 0 then break end
 
-                    -- Respect server purchase cooldown (0.30s normal, 0.50s after a rejection) so call #2 never gets dropped!
                     task.wait(consecFail > 0 and 0.50 or 0.30)
 
                     local preOwned = PotionEngine.GetOwnedCount(bestId)
@@ -17335,7 +18119,6 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
                         okBuy = true
                         res = resStep
                     elseif okStep and (resStep == true or (type(resStep) == "table" and resStep.Success)) then
-                        -- Server returned Success but Replica lagged slightly; wait a moment and re-check
                         task.wait(0.25)
                         if PotionEngine.GetOwnedCount(bestId) > preOwned then
                             consecFail = 0
@@ -17351,31 +18134,55 @@ function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
                 end
             end
 
-            local finalTotalOwned = PotionEngine.GetTotalHealthPotionsOwned()
+            local finalTotalOwned = countFn()
             local actualBought = math.max(0, finalTotalOwned - startTotalOwned)
             if actualBought > 0 or (okBuy and (res == true or (type(res) == "table" and res.Success))) then
                 bought = actualBought > 0 and actualBought or qty
                 buyReason = (finalTotalOwned >= targetStock) and "ok" or "partial"
-                PotionEngine.SetStatus("Restocked " .. bestInfo.name .. " x" .. bought, "Owned Health Pots: " .. tostring(finalTotalOwned))
+                PotionEngine.SetStatus("Restocked " .. bestInfo.name .. " x" .. bought, "Owned " .. shortLabel .. ": " .. tostring(finalTotalOwned))
                 local uiLib = Library or (typeof(getgenv) == "function" and getgenv().Library) or _G.Library
                 if uiLib and type(uiLib.Notify) == "function" then
                     pcall(function()
-                        uiLib:Notify({ Title = "Health Potions Bought", Desc = string.format("Purchased %s x%d (Total: %d/%d)", bestInfo.name, bought, finalTotalOwned, targetStock), Duration = 3 })
+                        uiLib:Notify({ Title = label .. " Bought", Desc = string.format("Purchased %s x%d (Total: %d/%d)", bestInfo.name, bought, finalTotalOwned, targetStock), Duration = 3 })
                     end)
                 end
             else
                 PotionEngine.LastBuyFailAt[bestId] = os.clock() + 10.0
                 local warnMsg = (type(res) == "table" and res.WarnMessage) or "Purchase rejected"
-                PotionEngine.SetStatus("Health Pot Buy Failed", tostring(warnMsg))
+                PotionEngine.SetStatus(shortLabel .. " Buy Failed", tostring(warnMsg))
             end
         else
             PotionEngine.LastBuyFailAt[bestId] = os.clock() + 8.0
             local dNow = State.HRP and (State.HRP.Position - standPos).Magnitude or 999
-            PotionEngine.SetStatus("Health Pot Stand Unreachable", string.format("Stopped %.1f studs away from %s", dNow, tostring(bestInfo.name)))
+            PotionEngine.SetStatus(shortLabel .. " Stand Unreachable", string.format("Stopped %.1f studs away from %s", dNow, tostring(bestInfo.name)))
         end
     end)
     State.IsBuyingHealthPotions = false
     return bought, buyReason
+end
+
+function PotionEngine.EnsureHealthPotionsStock(targetStock, isManual)
+    return PotionEngine.EnsureCombatPotionFamilyStock({
+        ids = { "HealthPotion3", "HealthPotion2", "HealthPotion1" },
+        label = "Health Potions",
+        shortLabel = "Health Pots",
+        skipNotifyKey = "LastHealthPotSkipNotifyAt",
+        targetStock = targetStock or Config.RaidHealthPotStock or 5,
+        isManual = isManual,
+        countFn = PotionEngine.GetTotalHealthPotionsOwned,
+    })
+end
+
+function PotionEngine.EnsureDamagePotionsStock(targetStock, isManual)
+    return PotionEngine.EnsureCombatPotionFamilyStock({
+        ids = { "AttackDamagePotion2", "AttackDamagePotion1" },
+        label = "Damage Potions",
+        shortLabel = "Damage Pots",
+        skipNotifyKey = "LastDamagePotSkipNotifyAt",
+        targetStock = targetStock or Config.CombatDamagePotStock or 5,
+        isManual = isManual,
+        countFn = PotionEngine.GetTotalDamagePotionsOwned,
+    })
 end
 
 function PotionEngine.HasBuyableSelectedOrder()
@@ -17538,13 +18345,30 @@ function PotionEngine.RunDeathRestockCycle()
     PotionEngine.RefreshWorldCatalog(false)
     table.clear(PotionEngine.LastBuyFailAt)
     PotionEngine.LastBuyCheckAt = os.clock()
-    if PotionEngine.HasBuyableSelectedOrder() then
+    local totalBought = 0
+    -- Also top up Combat Health & Damage Potions on death if Combat modes are active
+    if (Config.AutoMobFarm or Config.AutoRaid) then
+        if Config.RaidAutoBuyHealthPots and PotionEngine.GetTotalHealthPotionsOwned() < math.clamp(math.floor(tonumber(Config.RaidHealthPotStock) or 5), 1, 10) then
+            local okHp, boughtHp = pcall(PotionEngine.EnsureHealthPotionsStock, Config.RaidHealthPotStock or 5, false)
+            if okHp and tonumber(boughtHp) then totalBought = totalBought + tonumber(boughtHp) end
+        end
+        if Config.CombatAutoBuyDamagePots and PotionEngine.GetTotalDamagePotionsOwned() < math.clamp(math.floor(tonumber(Config.CombatDamagePotStock) or 5), 1, 10) then
+            local okDmg, boughtDmg = pcall(PotionEngine.EnsureDamagePotionsStock, Config.CombatDamagePotStock or 5, false)
+            if okDmg and tonumber(boughtDmg) then
+                totalBought = totalBought + tonumber(boughtDmg)
+                if tonumber(boughtDmg) > 0 and Config.CombatAutoUseDamagePots then
+                    pcall(PotionEngine.RunCombatDamageUseCycle, true, false)
+                end
+            end
+        end
+    end
+    if Config.AutoBuyPotions and PotionEngine.HasBuyableSelectedOrder() then
         PotionEngine.SetStatus("Death Restock", "Visiting Potion Shop before resuming...")
-        return PotionEngine.RunAutoBuyCycle(true)
+        return totalBought + (PotionEngine.RunAutoBuyCycle(true) or 0)
     elseif Config.AutoUsePotions then
         return PotionEngine.RunAutoUseCycle(true, false, false)
     end
-    return 0
+    return totalBought
 end
 
 -- Background Auto-Buy & Auto-Use Potions Loop (isolated from Auto Raid / Health Potion restocking)
@@ -17559,17 +18383,47 @@ task.spawn(function()
         if PotionEngine.LastAbyssState ~= inAbyss then
             PotionEngine.RefreshWorldCatalog(true)
         end
-        -- 1. Always allow drinking owned buff/health potions even during active Raid / Boss fights
-        if Config.AutoUsePotions and not State.IsAutoForging and not State.IsBuyingPotions and not State.IsBuyingHealthPotions and not State.IsMovingToRaidPad and not State.IsEnhancing then
-            pcall(PotionEngine.RunAutoUseCycle)
+        -- 1. Always allow drinking owned buff/health/combat potions even during active Raid / Boss / Mob fights
+        if not State.IsAutoForging and not State.IsBuyingPotions and not State.IsBuyingHealthPotions and not State.IsMovingToRaidPad and not State.IsEnhancing then
+            if Config.AutoUsePotions then
+                pcall(PotionEngine.RunAutoUseCycle)
+            end
+            if (Config.AutoMobFarm or Config.AutoRaid) then
+                if Config.RaidAutoUseHealthPots then
+                    pcall(PotionEngine.RunCombatHealthUseCycle)
+                end
+                if Config.CombatAutoUseDamagePots then
+                    pcall(PotionEngine.RunCombatDamageUseCycle, false, false)
+                end
+            end
         end
-        -- 2. Only block shop-glide AutoBuyPotions while RaidEngine, Comet mining, or Mob Defense / Air Regen is actively running
+        -- 2. Only block shop-glide AutoBuy while RaidEngine, Comet mining, or Mob Defense / Air Regen is actively running
         local raidBusyForShop = (RaidEngine and RaidEngine.IsBusyForShop and RaidEngine.IsBusyForShop())
             or State.IsInRaid or State.IsBuyingHealthPotions or State.IsMovingToRaidPad or State.IsEnhancing
             or State.InAutoDefense or State.InDefenseRegen or State.IsMiningComet
         if raidBusyForShop then
             task.wait(1.0)
             continue
+        end
+        -- 2b. Combat QoL Auto-Buy Damage & Health Potions (independent of Potions & Shop mining selection!)
+        if (Config.AutoMobFarm or Config.AutoRaid) then
+            if Config.CombatAutoBuyDamagePots then
+                local targetDmgStock = math.clamp(math.floor(tonumber(Config.CombatDamagePotStock) or 5), 1, 10)
+                local ownedDmg = PotionEngine.GetTotalDamagePotionsOwned()
+                local dmgRem = PotionEngine.GetActiveDamageBuffRemaining()
+                if ownedDmg <= 0 or (dmgRem <= 10 and ownedDmg < targetDmgStock) then
+                    local okBuyDmg, boughtDmg = pcall(PotionEngine.EnsureDamagePotionsStock, targetDmgStock, false)
+                    if okBuyDmg and (tonumber(boughtDmg) or 0) > 0 and Config.CombatAutoUseDamagePots and PotionEngine.GetTotalDamagePotionsOwned() > 0 then
+                        pcall(PotionEngine.RunCombatDamageUseCycle, true, false)
+                    end
+                end
+            end
+            if Config.AutoMobFarm and Config.RaidAutoBuyHealthPots and Config.RaidAutoUseHealthPots then
+                local targetHpStock = math.clamp(math.floor(tonumber(Config.RaidHealthPotStock) or 5), 1, 10)
+                if PotionEngine.GetTotalHealthPotionsOwned() <= 0 then
+                    pcall(PotionEngine.EnsureHealthPotionsStock, targetHpStock, false)
+                end
+            end
         end
         -- 3. Restock immediately if any selected buff is missing + 0 owned, or when interval/buff conditions pass
         if Config.AutoBuyPotions then
@@ -17726,6 +18580,8 @@ end
 
 function TeleportEngine.CheckAutoIslandTeleport(isManual)
     if not Config.AutoTeleportIsland then return false end
+    -- Gate 0: Never fight Multi-World Ticket Farm when it is hopping between W2/W3/W4
+    if Config.AutoRaid and Config.MultiWorldTicketFarm then return false end
     local targetName = tostring(Config.AutoTeleportTargetIsland or "")
     if targetName == "" then return false end
 
@@ -19347,6 +20203,117 @@ function EnhanceEngine.RefreshPreview()
     end
 end
 
+function EnhanceEngine.GetOutsideStallCFrame()
+    local prox = workspace:FindFirstChild("Proximity")
+    local npc = prox and prox:FindFirstChild("Enhancer")
+    if not npc then
+        for _, root in ipairs({ prox, workspace:FindFirstChild("NPCs") }) do
+            if root then
+                for _, ch in ipairs(root:GetChildren()) do
+                    if string.lower(ch.Name):find("enhanc", 1, true) and (ch:IsA("Model") or ch:IsA("BasePart")) then
+                        npc = ch
+                        break
+                    end
+                end
+            end
+            if npc then break end
+        end
+    end
+    if not npc then return nil, nil end
+
+    local cf = npc:IsA("Model") and npc:GetPivot() or npc.CFrame
+    local npcPos = cf.Position
+    local standOff = (NavEngine and NavEngine.GetCharacterStandOffset and NavEngine.GetCharacterStandOffset()) or 3.35
+    local fwd = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+    if fwd.Magnitude < 0.05 then
+        fwd = Vector3.new(0, 0, 1)
+    else
+        fwd = fwd.Unit
+    end
+
+    local function evalSpot(dirVec, dist)
+        local cx = npcPos.X + dirVec.X * dist
+        local cz = npcPos.Z + dirVec.Z * dist
+        local floorY = nil
+        if NavEngine and type(NavEngine.RaycastSolidFloor) == "function" then
+            -- Start raycast at NPC torso height + 3.5 so we land on open ground outside the stall, never on a stall roof
+            local hit = NavEngine.RaycastSolidFloor(Vector3.new(cx, npcPos.Y + 3.5, cz), Vector3.new(0, -16, 0))
+            if hit and hit.Position.Y <= (npcPos.Y + 1.8) then
+                floorY = hit.Position.Y
+            end
+        end
+        if floorY then
+            local standPos = Vector3.new(cx, floorY + standOff, cz)
+            local lookAt = Vector3.new(npcPos.X, standPos.Y, npcPos.Z)
+            return NavEngine.SafeLookAt(standPos, lookAt, CFrame.new(standPos))
+        end
+        return nil
+    end
+
+    -- 1. Preferred: stand cleanly outside in front of the Enhancer stall (8.0 - 10.0 studs forward, well within CloseDistance=20)
+    for _, d in ipairs({ 8.0, 9.5, 6.5, 11.0 }) do
+        local spot = evalSpot(fwd, d)
+        if spot then return spot, npcPos end
+    end
+
+    -- 2. Fallback: probe 8 radial directions around the stall if another island's stall faces differently
+    for angleDeg = 0, 315, 45 do
+        local rad = math.rad(angleDeg)
+        local dir = Vector3.new(math.cos(rad), 0, math.sin(rad))
+        local spot = evalSpot(dir, 8.0)
+        if spot then return spot, npcPos end
+    end
+
+    local fallbackPos = npcPos + fwd * 8.0
+    return NavEngine.SafeLookAt(fallbackPos, Vector3.new(npcPos.X, fallbackPos.Y, npcPos.Z), CFrame.new(fallbackPos)), npcPos
+end
+
+function EnhanceEngine.EnsureAtEnhancerStall()
+    if Config.EnhanceAutoGlide == false then return true end
+    local raidActive = Config.AutoRaid and (State.IsInRaid or (RaidEngine and (RaidEngine.IsInActiveRun() or RaidEngine.GetActiveBossArena() ~= nil)))
+    if raidActive then return false end
+    if not State.HRP or not State.Humanoid or State.Humanoid.Health <= 0 then return false end
+
+    local stallCF, npcPos = EnhanceEngine.GetOutsideStallCFrame()
+    if not stallCF or not npcPos then return true end
+
+    local distToNpc = (State.HRP.Position - npcPos).Magnitude
+    local distToSpot = (State.HRP.Position - stallCF.Position).Magnitude
+    if distToNpc > 2600 then return false end
+    -- Already standing cleanly outside the stall (within server CloseDistance=20 and not standing on top of NPC)
+    if distToSpot <= 5.5 and distToNpc <= 15.0 then
+        return true
+    end
+
+    State.IsEnhancing = true
+    pcall(function()
+        EnhanceEngine.SetStatus("Moving to Enhancer Stall", "Gliding outside the Enhancing stall...")
+        if CombatEngine then
+            CombatEngine.ClearStanceLock()
+            CombatEngine.LastEngagedMob = nil
+        end
+        if State.HRP and State.HRP.Anchored then
+            if MiningEngine and MiningEngine.SafeUnanchor then
+                MiningEngine.SafeUnanchor()
+            else
+                State.HRP.Anchored = false
+            end
+        end
+        if State.Humanoid then State.Humanoid.AutoRotate = true end
+        NavEngine.GlideTo(stallCF, Config.GlideSpeed or 55, true)
+        if NavEngine and not Config.Noclip then
+            pcall(NavEngine.RestoreCharacterPhysics)
+        end
+        if State.HRP then
+            State.HRP.AssemblyLinearVelocity = Vector3.zero
+            State.HRP.AssemblyAngularVelocity = Vector3.zero
+        end
+        task.wait(0.15)
+    end)
+    State.IsEnhancing = false
+    return State.HRP ~= nil and (State.HRP.Position - npcPos).Magnitude <= 19.5
+end
+
 function EnhanceEngine.EnhanceOnce(isManual)
     if EnhanceEngine.IsEnhancing or State.IsAutoForging or State.DrainingFullBag or State.IsBuyingPotions or State.IsBuyingHealthPotions then
         return false, "Busy"
@@ -19400,43 +20367,12 @@ function EnhanceEngine.EnhanceOnce(isManual)
             return
         end
 
+        -- Bring player cleanly outside the Enhancing stall before enhancing (no dialogue / NPC interaction needed)
+        EnhanceEngine.EnsureAtEnhancerStall()
+
         local okEnh, res = pcall(function()
             return Remotes.EnhanceEquipment:InvokeServer(eq.GUID, picks, seal)
         end)
-
-        -- If server enforces Enhancer NPC proximity (CloseDistance = 20), glide there and retry once
-        if (not okEnh or type(res) ~= "table" or res.newLevel == nil) and Config.EnhanceAutoGlide then
-            local raidActive = Config.AutoRaid and (State.IsInRaid or (RaidEngine and RaidEngine.IsInActiveRun()))
-            if not raidActive and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
-                local prox = workspace:FindFirstChild("Proximity")
-                local npc = prox and prox:FindFirstChild("Enhancer")
-                if npc then
-                    local npcCF = TeleportEngine.GetInstanceCFrame(npc)
-                    if npcCF and (State.HRP.Position - npcCF.Position).Magnitude > 14 and (State.HRP.Position - npcCF.Position).Magnitude <= 2600 then
-                        State.IsEnhancing = true
-                        EnhanceEngine.SetStatus("Moving to Enhancer NPC", "Gliding within range to enhance...")
-                        if CombatEngine then CombatEngine.ClearStanceLock() end
-                        if State.HRP.Anchored then
-                            if MiningEngine and MiningEngine.SafeUnanchor then
-                                MiningEngine.SafeUnanchor()
-                            else
-                                State.HRP.Anchored = false
-                            end
-                        end
-                        if State.Humanoid then State.Humanoid.AutoRotate = true end
-                        NavEngine.GlideTo(npcCF, Config.GlideSpeed or 55, true)
-                        if NavEngine and not Config.Noclip then
-                            pcall(NavEngine.RestoreCharacterPhysics)
-                        end
-                        task.wait(0.15)
-                        okEnh, res = pcall(function()
-                            return Remotes.EnhanceEquipment:InvokeServer(eq.GUID, picks, seal)
-                        end)
-                        State.IsEnhancing = false
-                    end
-                end
-            end
-        end
 
         if okEnh and type(res) == "table" and res.newLevel ~= nil then
             local newLvl = tonumber(res.newLevel) or curLvl
@@ -19472,6 +20408,7 @@ function EnhanceEngine.EnhanceBatchToTarget()
         Notify("Auto Enhancer", "No weapon or armor found to enhance!", 3.0)
         return
     end
+    EnhanceEngine.EnsureAtEnhancerStall()
     local targetLvl = math.clamp(math.floor(tonumber(Config.EnhanceTargetLevel) or 9), 1, 9)
     for _ = 1, 60 do
         if not ScriptRunning or EnhanceEngine.StopBatch then break end
@@ -20850,7 +21787,7 @@ do
         -- 1. Asura & Boss Timers
         local asuraInfo = RaidEngine and RaidEngine.GetBossWindowInfo and RaidEngine.GetBossWindowInfo("Asura's Incarnate")
         local tickets = (RaidEngine and RaidEngine.GetRaidTicketCount and RaidEngine.GetRaidTicketCount()) or 0
-        local targetTix = math.max(1, math.floor(tonumber(Config.AsuraTargetTickets) or 5))
+        local targetTix = math.clamp(math.floor(tonumber(Config.AsuraTargetTickets) or 5), 1, 5)
         local asuraTitle = "Asura's Incarnate: Unknown"
         if asuraInfo then
             if asuraInfo.alreadyKilled then
@@ -20915,7 +21852,10 @@ do
         if Config.AutoMine then table.insert(modes, (RaidEngine and RaidEngine.MineYieldActive) and "Auto Mine (Paused)" or "Auto Mine") end
         if Config.AutoMineYieldToBoss then table.insert(modes, "Pause for Asura") end
         if Config.AutoMobFarm then table.insert(modes, "Auto Combat") end
-        if Config.AutoRaid then table.insert(modes, Config.AutoAsuraToTower and "Asura -> Tower" or "Auto Raid") end
+        if Config.AutoRaid then
+            local raidTag = Config.MultiWorldTicketFarm and "Multi-World Tickets" or (Config.AutoAsuraToTower and "Asura -> Tower" or "Auto Raid")
+            table.insert(modes, raidTag)
+        end
         if Config.AutoForgeArmor then table.insert(modes, "Auto Forge") end
         if Config.AutoEnhanceWeapon then table.insert(modes, "Auto Enhance") end
         if Config.AutoBuyPotions then table.insert(modes, "Auto Buy Pots") end
@@ -21065,13 +22005,32 @@ do
     -- ===================================================================
     local MainSection = SubMining:Section({ Title = "Auto Mine Settings", Side = "Left" })
 
-    MainSection:Toggle({
+    MiningEngine.AutoMineToggle = MainSection:Toggle({
         Title = "Enable Auto Mine",
-        Desc = "Automatically mines target rocks safely on the ground",
+        Desc = "Automatically mines target rocks (mutually exclusive with Auto Mob Farm; use Mob Defense to kill nearby mobs while mining)",
         Value = Config.AutoMine,
         Callback = function(val)
             Config.AutoMine = val
             if val then
+                if Config.AutoMobFarm then
+                    Config.AutoMobFarm = false
+                    State.TargetMob = nil
+                    State.CurrentMob = nil
+                    CombatEngine.ClearStanceLock()
+                    if CombatEngine.AutoMobFarmToggle and CombatEngine.AutoMobFarmToggle.SetValue then
+                        pcall(function() CombatEngine.AutoMobFarmToggle:SetValue(false, true) end)
+                    end
+                    Notify("Auto Mine", "Paused Auto Mob Farm to prevent conflict (use Mob Defense inside Mining to kill nearby mobs).", 4.0)
+                end
+                if Config.AutoRaid and not Config.AutoMineYieldToBoss then
+                    Config.AutoRaid = false
+                    if RaidEngine.AutoRaidToggle and RaidEngine.AutoRaidToggle.SetValue then
+                        pcall(function() RaidEngine.AutoRaidToggle:SetValue(false, true) end)
+                    end
+                    Notify("Auto Mine", "Paused Auto Raid to prevent conflict (enable 'Pause Auto Mine for Bosses' in Abyss / Raid to use both together).", 4.5)
+                end
+                MiningEngine.LastWeakPickNotifyAt = os.clock()
+                MiningEngine.ValidateSelectedRockPower(Config.MineTargets, true)
                 State.CheckingPotionsOnStart = true
                 task.spawn(PotionEngine.CheckOnAutoMineStart)
             else
@@ -21139,7 +22098,7 @@ do
 
     MainSection:Dropdown({
         Title = "Target Rock Types",
-        Desc = "Select one or multiple rock types from this world (or 'All')",
+        Desc = "Pick rock types (checks Pickaxe Power!) or 'All' to automatically mine the strongest rock your pickaxe can break",
         List = RockTypes,
         Value = Config.MineTargets,
         Multi = true,
@@ -21149,6 +22108,9 @@ do
             elseif type(val) == "string" then
                 Config.MineTargets = { val }
             end
+            -- Check Pickaxe Power against newly selected rock(s) and notify if pickaxe is too weak
+            MiningEngine.LastWeakPickNotifyAt = os.clock()
+            MiningEngine.ValidateSelectedRockPower(Config.MineTargets, true)
             -- Immediately drop current rock if it no longer matches the new selection so we go straight to the closest selected!
             if State.TargetRock and not MiningEngine.MatchesTargetRock(State.TargetRock.Name) then
                 State.TargetRock = nil
@@ -22165,7 +23127,7 @@ do
 
     EnhLeft:Toggle({
         Title = "Auto Enhance Equipment",
-        Desc = "Automatically enhances your target Weapon / Armors whenever you have enough Gold & Essences",
+        Desc = "Moves you outside the Enhancing stall (no dialogue needed) and enhances your target Weapon / Armors automatically",
         Value = Config.AutoEnhanceWeapon,
         Callback = function(val)
             Config.AutoEnhanceWeapon = val
@@ -22474,13 +23436,24 @@ do
     local MobSection = SubAutoFarm:Section({ Title = "Mob Hunting", Side = "Left" })
     local HitboxSection = SubAutoFarm:Section({ Title = "Position Sliders", Side = "Right" })
 
-    MobSection:Toggle({
+    CombatEngine.AutoMobFarmToggle = MobSection:Toggle({
         Title = "Auto Farm Mobs",
-        Desc = "Hunts selected enemies from your chosen attack position",
+        Desc = "Hunts selected enemies from your chosen attack position (mutually exclusive with Auto Mine; pauses automatically during active Raids/Bosses)",
         Value = Config.AutoMobFarm,
         Callback = function(val)
             Config.AutoMobFarm = val
-            if not val then
+            if val then
+                if Config.AutoMine then
+                    Config.AutoMine = false
+                    MiningEngine.ActiveSunkenCF = nil
+                    State.TargetRock = nil
+                    State.CurrentRock = nil
+                    if MiningEngine.AutoMineToggle and MiningEngine.AutoMineToggle.SetValue then
+                        pcall(function() MiningEngine.AutoMineToggle:SetValue(false, true) end)
+                    end
+                    Notify("Auto Mob Farm", "Paused Auto Mine to prevent tug-of-war conflict.", 3.5)
+                end
+            else
                 State.TargetMob = nil
                 State.CurrentMob = nil
                 State.LastFarmedMob = nil
@@ -22728,7 +23701,8 @@ do
     -- SUB-TAB 4: ABYSS / RAID AUTOMATION
     -- ===================================================================
     local RaidLeft = SubAbyss:Section({ Title = "Abyss & Raid Control", Side = "Left" })
-    local RaidRight = SubAbyss:Section({ Title = "Cards, Heal Orbs & Gates", Side = "Right" })
+    local RaidPotions = SubAbyss:Section({ Title = "Combat Potions (Health & Damage)", Side = "Right" })
+    local RaidRight = SubAbyss:Section({ Title = "Cards, Survival & Recovery", Side = "Right" })
 
     local initialAbyssInfo = RaidEngine.GetAbyssInfo()
     local initDesc = initialAbyssInfo
@@ -22759,11 +23733,22 @@ do
 
     raidAutoToggle = RaidLeft:Toggle({
         Title = "Enable Auto Raid / Abyss",
-        Desc = "Fights waves & Bosses (Asura), uses Auto Farm stance + Auto Parry, revives & retries",
+        Desc = "Fights waves & Bosses (Asura), uses Auto Farm stance + Auto Parry, revives & retries (enable 'Pause Auto Mine for Bosses' to combine with Auto Mine)",
         Value = Config.AutoRaid,
         Callback = function(val)
             Config.AutoRaid = val
-            if not val then
+            if val then
+                if Config.AutoMine and not Config.AutoMineYieldToBoss then
+                    Config.AutoMine = false
+                    MiningEngine.ActiveSunkenCF = nil
+                    State.TargetRock = nil
+                    State.CurrentRock = nil
+                    if MiningEngine.AutoMineToggle and MiningEngine.AutoMineToggle.SetValue then
+                        pcall(function() MiningEngine.AutoMineToggle:SetValue(false, true) end)
+                    end
+                    Notify("Auto Raid", "Paused Auto Mine to prevent conflict (enable 'Pause Auto Mine for Bosses' to mine between boss cooldowns).", 4.5)
+                end
+            else
                 State.IsInRaid = false
                 State.IsBuyingHealthPotions = false
                 State.IsMovingToRaidPad = false
@@ -22789,9 +23774,11 @@ do
         end
     })
 
+    RaidEngine.AutoRaidToggle = raidAutoToggle
+
     pauseMineToggle = RaidLeft:Toggle({
-        Title = "Pause Auto Mine for Asura Boss",
-        Desc = "Asura & Asura -> Tower: mines while Asura is on cooldown and pauses to fight when spawned (preserved across mode switches)",
+        Title = "Pause Auto Mine for Bosses / Multi-World",
+        Desc = "Asura, Asura -> Tower & Multi-World Ticket Farm: mines while bosses are on cooldown and pauses to fight/hop when ready",
         Value = Config.AutoMineYieldToBoss,
         Callback = function(val)
             Config.AutoMineYieldToBoss = val
@@ -22827,8 +23814,16 @@ do
         Callback = function(val)
             if Config.AutoAsuraToTower then
                 Config.AutoAsuraToTower = false
+                Config.AutoAsuraTowerSpending = false
                 if asuraTowerToggle and asuraTowerToggle.SetValue then
                     pcall(function() asuraTowerToggle:SetValue(false, true) end)
+                end
+            end
+            if Config.MultiWorldTicketFarm then
+                Config.MultiWorldTicketFarm = false
+                Config.AutoAsuraTowerSpending = false
+                if RaidEngine.MultiWorldToggle and RaidEngine.MultiWorldToggle.SetValue then
+                    pcall(function() RaidEngine.MultiWorldToggle:SetValue(false, true) end)
                 end
             end
             local norm = RaidEngine.NormalizeMode(val)
@@ -22841,11 +23836,21 @@ do
 
     asuraTowerToggle = RaidLeft:Toggle({
         Title = "Asura Until X Tickets -> Tower Of Hell",
-        Desc = "Farms Asura until Target Tickets is met, then runs Tower Of Hell until out of tickets (requires Enable Auto Raid ON)",
+        Desc = "Single-world (W4): farms Asura until Target Tickets is met, then spends ALL tickets in Tower Of Hell down to 0",
         Value = Config.AutoAsuraToTower,
         Callback = function(val)
             Config.AutoAsuraToTower = val
-            if val then
+            if not val then
+                if not Config.MultiWorldTicketFarm then
+                    Config.AutoAsuraTowerSpending = false
+                end
+            else
+                if Config.MultiWorldTicketFarm then
+                    Config.MultiWorldTicketFarm = false
+                    if RaidEngine.MultiWorldToggle and RaidEngine.MultiWorldToggle.SetValue then
+                        pcall(function() RaidEngine.MultiWorldToggle:SetValue(false, true) end)
+                    end
+                end
                 local effMode = RaidEngine.ResolveEffectiveMode()
                 Config.RaidMode = effMode
                 if RaidEngine.ModeDropdown and RaidEngine.ModeDropdown.SetValue then
@@ -22855,14 +23860,99 @@ do
         end
     })
 
+    RaidEngine.MultiWorldToggle = RaidLeft:Toggle({
+        Title = "Multi-World Ticket Farm (W2/W3/W4 -> Tower)",
+        Desc = "Auto-travels across Worlds 2, 3, and 4 to farm selected bosses until Target Tickets is met, then hops to W4 & burns ALL tickets in Tower Of Hell (enable Auto-Execute on Teleport!)",
+        Value = Config.MultiWorldTicketFarm,
+        Callback = function(val)
+            Config.MultiWorldTicketFarm = val
+            if not val then
+                RaidEngine.LastWorldHopAt = 0
+                if not Config.AutoAsuraToTower then
+                    Config.AutoAsuraTowerSpending = false
+                end
+            else
+                if Config.AutoAsuraToTower then
+                    Config.AutoAsuraToTower = false
+                    if asuraTowerToggle and asuraTowerToggle.SetValue then
+                        pcall(function() asuraTowerToggle:SetValue(false, true) end)
+                    end
+                end
+                if Config.AutoTeleportIsland then
+                    Config.AutoTeleportIsland = false
+                    if TeleportEngine and TeleportEngine.AutoTeleportToggle and TeleportEngine.AutoTeleportToggle.SetValue then
+                        pcall(function() TeleportEngine.AutoTeleportToggle:SetValue(false, true) end)
+                    end
+                    Notify("Multi-World Ticket Farm", "Paused Auto-Teleport to Target Island so Multi-World Ticket Farm can travel freely across W2/W3/W4.", 4.5)
+                end
+                pcall(RaidEngine.UpdateMultiWorldStatusLabel)
+            end
+        end
+    })
+
+    RaidEngine.MultiWorldStatusLabel = RaidLeft:Label({
+        Title = "Multi-World Planner: Standby",
+        Desc = "Raid Tickets only drop from 2 regular bosses: Asura's Incarnate (W4, 100%) & Golem (W3, 33%) — plus Skeleton King (W2 Haunted Night event)"
+    })
+    task.delay(1.0, function()
+        if ScriptRunning and RaidEngine and type(RaidEngine.UpdateMultiWorldStatusLabel) == "function" then
+            pcall(RaidEngine.UpdateMultiWorldStatusLabel)
+        end
+    end)
+
+    RaidLeft:Dropdown({
+        Title = "Ticket Farm Bosses (W2 / W3 / W4)",
+        Desc = "Note: Regular Raid Tickets ONLY drop from 2 bosses — Asura's Incarnate (W4, 100%) & Golem (W3, 33%) — plus Skeleton King (W2 Haunted Night event). Goblin King (W2) drops Essences only.",
+        List = RaidEngine.TicketBossOptions,
+        Value = Config.TicketFarmBosses,
+        Multi = true,
+        Callback = function(val)
+            if type(val) == "table" then
+                Config.TicketFarmBosses = val
+            elseif type(val) == "string" then
+                Config.TicketFarmBosses = { val }
+            else
+                Config.TicketFarmBosses = { "Asura's Incarnate (W4 - 100% Ticket)", "Golem (W3 - 33% Ticket)" }
+            end
+            pcall(RaidEngine.UpdateMultiWorldStatusLabel)
+        end
+    })
+
+    RaidLeft:Toggle({
+        Title = "Wait For Local Boss Respawn",
+        Desc = "Waits on your current world if a selected boss spawns within Max Wait Cooldown instead of hopping worlds (if all are on CD, travels to the soonest boss)",
+        Value = Config.TicketFarmWaitForSpawn,
+        Callback = function(val)
+            Config.TicketFarmWaitForSpawn = val
+            pcall(RaidEngine.UpdateMultiWorldStatusLabel)
+        end
+    })
+
+    RaidLeft:Slider({
+        Title = "Max Boss Wait Cooldown (s)",
+        Desc = "Waits on current world if a local selected boss spawns within this many seconds (default: 60s)",
+        Min = 0,
+        Max = 300,
+        Value = Config.TicketFarmMaxWaitSec,
+        Rounding = 0,
+        Callback = function(val)
+            Config.TicketFarmMaxWaitSec = math.clamp(math.floor(tonumber(val) or 60), 0, 300)
+            pcall(RaidEngine.UpdateMultiWorldStatusLabel)
+        end
+    })
+
+    Config.AsuraTargetTickets = math.clamp(math.floor(tonumber(Config.AsuraTargetTickets) or 5), 1, 5)
     RaidLeft:Slider({
         Title = "Target Tickets Before Tower Of Hell",
-        Desc = "Number of Raid Tickets to farm from Asura before switching to Tower Of Hell",
+        Desc = "Number of Raid Tickets to farm (max 5) before traveling to W4 and spending all of them in Tower Of Hell",
         Min = 1,
-        Max = 50,
+        Max = 5,
         Value = Config.AsuraTargetTickets,
         Rounding = 0,
-        Callback = function(val) Config.AsuraTargetTickets = val end
+        Callback = function(val)
+            Config.AsuraTargetTickets = math.clamp(math.floor(tonumber(val) or 5), 1, 5)
+            pcall(RaidEngine.UpdateMultiWorldStatusLabel)
+        end
     })
 
     RaidLeft:Slider({
@@ -22959,6 +24049,97 @@ do
         end
     })
 
+    -- COMBAT POTIONS SECTION (Health Potions -> Damage Potions, active for Mob Farm, Abyss, Raids & Bosses)
+    RaidPotions:Toggle({
+        Title = "Auto Buy Health Potions",
+        Desc = "Buys best local Health Potions (III/II/I) before runs, during waits, or when empty in Combat",
+        Value = Config.RaidAutoBuyHealthPots,
+        Callback = function(val) Config.RaidAutoBuyHealthPots = val end
+    })
+
+    RaidPotions:Toggle({
+        Title = "Auto Use Health Potions",
+        Desc = "Drinks best owned Health Potion (III/II/I) safely mid-air when HP drops below Retreat Below HP % (Raid & Mob Farm)",
+        Value = Config.RaidAutoUseHealthPots ~= false,
+        Callback = function(val) Config.RaidAutoUseHealthPots = val end
+    })
+
+    RaidPotions:Slider({
+        Title = "Target Health Potion Stock",
+        Desc = "Minimum Health Potions to carry for Combat / Abyss / Raid runs",
+        Min = 1,
+        Max = 10,
+        Value = Config.RaidHealthPotStock,
+        Rounding = 0,
+        Callback = function(val) Config.RaidHealthPotStock = val end
+    })
+
+    RaidPotions:Button({
+        Title = "Buy Health Potions Now",
+        Desc = "Glides to Health Potion III/II/I stand in Lobby/Island and restocks",
+        Callback = function()
+            task.spawn(function()
+                if RaidEngine.IsInActiveRun() then
+                    RaidEngine.Notify("Health Potions", "Wait until you are in Lobby or Island to buy potions!", 3.0)
+                    return
+                end
+                local PE = State.PotionEngine
+                if PE and type(PE.EnsureHealthPotionsStock) == "function" then
+                    local bought = PE.EnsureHealthPotionsStock(Config.RaidHealthPotStock or 5, true)
+                    local owned = PE.GetTotalHealthPotionsOwned()
+                    RaidEngine.Notify("Health Potions", string.format("Bought: %d | Total Owned: %d", bought, owned), 3.0)
+                end
+            end)
+        end
+    })
+
+    RaidPotions:Toggle({
+        Title = "Auto Buy Damage Potions",
+        Desc = "Buys Damage Potion II (W3/W4) or I (W1/W2) automatically when Auto Mob Farm or Auto Raid is ON (independent of Potions & Shop)",
+        Value = Config.CombatAutoBuyDamagePots,
+        Callback = function(val) Config.CombatAutoBuyDamagePots = val end
+    })
+
+    RaidPotions:Toggle({
+        Title = "Auto Use Damage Potions",
+        Desc = "Drinks & stacks Damage Potion II/I safely mid-air whenever Auto Mob Farm or Auto Raid is ON (keeps your Mining potion setup untouched!)",
+        Value = Config.CombatAutoUseDamagePots,
+        Callback = function(val) Config.CombatAutoUseDamagePots = val end
+    })
+
+    RaidPotions:Slider({
+        Title = "Target Damage Potion Stock",
+        Desc = "Minimum Damage Potions to carry for Combat / Abyss / Raid runs",
+        Min = 1,
+        Max = 10,
+        Value = Config.CombatDamagePotStock,
+        Rounding = 0,
+        Callback = function(val) Config.CombatDamagePotStock = val end
+    })
+
+    RaidPotions:Button({
+        Title = "Buy Damage Potions Now",
+        Desc = "Glides to Damage Potion II/I stand on Island and restocks",
+        Callback = function()
+            task.spawn(function()
+                if RaidEngine.IsInActiveRun() then
+                    RaidEngine.Notify("Damage Potions", "Wait until you are on an Island to buy Damage Potions!", 3.0)
+                    return
+                end
+                local PE = State.PotionEngine
+                if PE and type(PE.EnsureDamagePotionsStock) == "function" then
+                    local bought, reason = PE.EnsureDamagePotionsStock(Config.CombatDamagePotStock or 5, true)
+                    local owned = PE.GetTotalDamagePotionsOwned()
+                    if reason == "no_stand" then
+                        RaidEngine.Notify("Damage Potions", "No Damage Potion stand in this zone — return to Island first!", 3.0)
+                    else
+                        RaidEngine.Notify("Damage Potions", string.format("Bought: %d | Total Owned: %d", bought, owned), 3.0)
+                    end
+                end
+            end)
+        end
+    })
+
     RaidRight:Toggle({
         Title = "Auto Pick Abyss Cards",
         Desc = "Automatically scores & selects best card when Abyss offers choices",
@@ -23003,8 +24184,8 @@ do
     })
 
     RaidRight:Toggle({
-        Title = "Low-HP Fallback Regen (Zone Top + Pots)",
-        Desc = "Rises straight to the top of your current zone out of all enemy reach and drinks Health Potions",
+        Title = "Low-HP Fallback Retreat (Zone Top)",
+        Desc = "Rises straight to the top of your current zone out of all enemy reach when low HP",
         Value = Config.RaidLowHpFallback,
         Callback = function(val)
             Config.RaidLowHpFallback = val
@@ -23017,7 +24198,7 @@ do
 
     RaidRight:Slider({
         Title = "Retreat Below HP %",
-        Desc = "Rises to top of current zone & pops Health Potions at or below this HP %",
+        Desc = "Triggers Low-HP Retreat & Auto Use Health Potions at or below this HP %",
         Min = 10,
         Max = 75,
         Value = Config.RaidFallbackEnterHP,
@@ -23033,42 +24214,6 @@ do
         Value = Config.RaidFallbackResumeHP,
         Rounding = 0,
         Callback = function(val) Config.RaidFallbackResumeHP = val end
-    })
-
-    RaidRight:Toggle({
-        Title = "Auto Buy Health Potions Before Run",
-        Desc = "Buys Health Potions in Abyss Lobby / Island if below target stock before starting",
-        Value = Config.RaidAutoBuyHealthPots,
-        Callback = function(val) Config.RaidAutoBuyHealthPots = val end
-    })
-
-    RaidRight:Slider({
-        Title = "Target Health Potion Stock",
-        Desc = "Minimum Health Potions to carry before entering Abyss / Raid",
-        Min = 1,
-        Max = 10,
-        Value = Config.RaidHealthPotStock,
-        Rounding = 0,
-        Callback = function(val) Config.RaidHealthPotStock = val end
-    })
-
-    RaidRight:Button({
-        Title = "Buy Health Potions Now",
-        Desc = "Glides to Health Potion III/II/I stand in Lobby/Island and restocks",
-        Callback = function()
-            task.spawn(function()
-                if RaidEngine.IsInActiveRun() then
-                    RaidEngine.Notify("Health Potions", "Wait until you are in Lobby or Island to buy potions!", 3.0)
-                    return
-                end
-                local PE = State.PotionEngine
-                if PE and type(PE.EnsureHealthPotionsStock) == "function" then
-                    local bought = PE.EnsureHealthPotionsStock(Config.RaidHealthPotStock or 5, true)
-                    local owned = PE.GetTotalHealthPotionsOwned()
-                    RaidEngine.Notify("Health Potions", string.format("Bought: %d | Total Owned: %d", bought, owned), 3.0)
-                end
-            end)
-        end
     })
 
     RaidRight:Toggle({
@@ -23130,7 +24275,7 @@ do
 
     OreSellSection:Toggle({
         Title = "Enable Ore Auto-Sell",
-        Desc = "Automatically sells excess ores matching your Rarity & Per-Ore Keep Qty rules",
+        Desc = "Sells excess ores matching Rarity & Keep rules (Note: if using Auto Forge, uncheck rarities or set Keep Limits so ores aren't sold before forging)",
         Value = Config.AutoSellMenuEnabled,
         Callback = function(val)
             Config.AutoSellMenuEnabled = val
@@ -23493,7 +24638,7 @@ do
 
     PotionBuySection:Toggle({
         Title = "Auto Buy Potions",
-        Desc = "Smooth-glides to Potion Shop when owned stock drops below Target Stock",
+        Desc = "Smooth-glides to Potion Shop for selected potions (Combat Health & Damage Potions in Abyss / Raid run independently of this list)",
         Value = Config.AutoBuyPotions,
         Callback = function(val)
             Config.AutoBuyPotions = val
@@ -23575,7 +24720,7 @@ do
 
     PotionUseSection:Toggle({
         Title = "Auto Use Potions",
-        Desc = "Automatically drinks & stacks selected potions up to max duration (or below HP% for healing)",
+        Desc = "Auto-drinks & stacks selected potions (Combat Health & Damage Potions in Abyss / Raid run independently so you can keep Luck/Miner set here)",
         Value = Config.AutoUsePotions,
         Callback = function(val)
             Config.AutoUsePotions = val
@@ -23712,14 +24857,18 @@ do
         islandNameList = { "Stonewake's Cross", "Forgotten Kingdom", "Frostspire Expanse", "Crimson Sakura Isles" }
     end
 
-    LeftSec:Toggle({
+    TeleportEngine.AutoTeleportToggle = LeftSec:Toggle({
         Title = "Auto-Teleport to Target Island",
-        Desc = "Warps to your chosen island from any other World Island (1-4); never redirects from Raids, Abyss, Bosses, or Guild Island",
+        Desc = "Warps to your chosen island from any other World Island (1-4); pauses automatically while Multi-World Ticket Farm, Raids, Abyss, Bosses, or Guild Island are active",
         Value = Config.AutoTeleportIsland,
         Callback = function(val)
             Config.AutoTeleportIsland = val
             if val then
-                task.spawn(TeleportEngine.CheckAutoIslandTeleport, true)
+                if Config.AutoRaid and Config.MultiWorldTicketFarm then
+                    Notify("Auto-Teleport Island", "Note: paused automatically while Multi-World Ticket Farm is active so it can hop between W2/W3/W4.", 4.5)
+                else
+                    task.spawn(TeleportEngine.CheckAutoIslandTeleport, true)
+                end
             end
         end
     })
@@ -24474,6 +25623,7 @@ _G.__TheForge_Cleanup = function()
         NavEngine.IsGliding = false
         NavEngine.ActiveGlideId = (NavEngine.ActiveGlideId or 0) + 1
     end
+    CombatEngine.SlideLoopActive = false
     CombatEngine.ClearStanceLock()
     CombatEngine.ReleaseBlockIfStuck()
     CombatEngine.ResetKillWatchdog()
@@ -24507,6 +25657,9 @@ _G.__TheForge_Cleanup = function()
     RaidEngine.AbyssEnteringUntil = 0
     RaidEngine.GhostBossSince = nil
     RaidEngine.HpGateRetryCount = 0
+    RaidEngine.DmgGateRetryCount = 0
+    RaidEngine.LastWorldHopAt = 0
+    RaidEngine.LastMultiWorldPlan = nil
     if MiscEngine then
         MiscEngine.TeleportAlreadyQueued = false
     end
