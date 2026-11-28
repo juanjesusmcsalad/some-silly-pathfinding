@@ -6,9 +6,32 @@ if _G.__TheForge_Cleanup then
     pcall(_G.__TheForge_Cleanup)
 end
 
+-- Atomic monotonic execution epoch: guarantees overlapping / double-executed script instances (e.g. queue_on_teleport + manual run)
+-- immediately self-terminate and NEVER leave zombie EffectService/Parry listeners running in the background!
+_G.__TheForge_RunEpoch = (_G.__TheForge_RunEpoch or 0) + 1
+local MY_RUN_EPOCH = _G.__TheForge_RunEpoch
 local ScriptRunning = true
 local Connections = {}
 local OrigHooks = {}
+
+-- Register immediate early cleanup BEFORE any connections or hooks are created (extended at bottom once all engines exist)
+_G.__TheForge_Cleanup = function()
+    ScriptRunning = false
+    for _, conn in ipairs(Connections) do
+        if typeof(conn) == "RBXScriptConnection" and conn.Connected then
+            pcall(function() conn:Disconnect() end)
+        end
+    end
+    table.clear(Connections)
+    for _, hookData in pairs(OrigHooks) do
+        if hookData.target and hookData.method and hookData.orig then
+            pcall(function() hookfunction(hookData.target[hookData.method], hookData.orig) end)
+        elseif hookData.func and hookData.orig then
+            pcall(function() hookfunction(hookData.func, hookData.orig) end)
+        end
+    end
+    table.clear(OrigHooks)
+end
 
 -- Isolates game ModuleScript requires in a disposable child thread so the main UI thread never loses Plugin capability
 local function runIsolated(fn)
@@ -3464,13 +3487,13 @@ function CombatEngine.IsKitingMob(mob)
     return lower:find("abyssal watcher", 1, true) ~= nil or lower:find("watcher", 1, true) ~= nil
 end
 
--- Official Boss & Mini-Boss detector (matches game's RaidTraits.IsBoss attributes + known island/raid/guild/abyss bosses)
+-- Official Big Boss detector (matches true Bosses: RaidTraits.IsBoss server tags, Boss Arenas, every-10-wave/floor bosses, Guild Bosses, and true Boss-only species)
+-- Explicitly excludes regular wave mobs (Zombies, Skeletons, Yetis, Crystal/Spirit Golems on non-boss waves, Onis, Spiders, etc.) so Only Auto Parry Bosses saves stamina!
 function CombatEngine.IsBossMob(mob)
     if typeof(mob) ~= "Instance" or not mob.Parent then return false end
+    -- 1. Authoritative server boss attributes (exact RaidTraits.IsBoss check + world/guild boss flags)
     if mob:GetAttribute("IsBoss") == true
         or mob:GetAttribute("BossShield") ~= nil
-        or mob:GetAttribute("IsMiniBoss") == true
-        or mob:GetAttribute("MiniBoss") == true
         or mob:GetAttribute("WorldBoss") == true
         or mob:GetAttribute("GuildBoss") == true
         or mob:GetAttribute("BossName") ~= nil
@@ -3478,24 +3501,32 @@ function CombatEngine.IsBossMob(mob)
         return true
     end
     local raw = tostring(mob:GetAttribute("EnemyType") or mob:GetAttribute("EnemyName") or mob:GetAttribute("Name") or mob.Name):lower()
+    -- 2. True Big Boss-only species (never spawn as regular trash mobs)
     if raw:find("asura", 1, true)
         or raw:find("incarnate", 1, true)
         or raw:find("behemoth", 1, true)
         or raw:find("goblin king", 1, true)
         or raw:find("skeleton king", 1, true)
-        or raw:find("queen spider", 1, true)
-        or raw:find("hellbringer", 1, true)
-        or raw:find("spirit golem", 1, true)
-        or raw:find("crystal golem", 1, true)
-        or raw:find("warlord oni", 1, true)
-        or raw:find("hellflame oni", 1, true)
-        or raw:find("yeti", 1, true)
-        or raw:find("cthulhu", 1, true)
-        or raw:find("chuthlu", 1, true)
-        or raw:find("abyss juggernaut", 1, true)
         or raw:find("boss", 1, true)
         or raw:match("^golem%d*$") then
         return true
+    end
+    -- 3. Active Boss Arena / Abyss Boss Floor (every 10 floors) / Tower of Hell Boss Wave (every 10 waves, big HP boss)
+    if RaidEngine then
+        if type(RaidEngine.GetActiveBossArena) == "function" and RaidEngine.GetActiveBossArena() ~= nil then
+            return true
+        end
+        local fl = tonumber(RaidEngine.CurrentFloor) or 0
+        if fl > 0 and (fl % 10 == 0) then
+            return true
+        end
+        local wv = tonumber(RaidEngine.CurrentWave) or 0
+        if wv > 0 and (wv % 10 == 0) then
+            local mh = mob:FindFirstChildOfClass("Humanoid")
+            if mh and (tonumber(mh.MaxHealth) or 0) >= 20000 then
+                return true
+            end
+        end
     end
     return false
 end
@@ -3757,6 +3788,10 @@ do
     end)
     if okEff and effEvent and (effEvent:IsA("RemoteEvent") or effEvent:IsA("UnreliableRemoteEvent")) then
         trackConn(effEvent.OnClientEvent:Connect(function(modInst, methodName, arg1, arg2, ...)
+            if _G.__TheForge_RunEpoch ~= MY_RUN_EPOCH then
+                ScriptRunning = false
+                return
+            end
             if not ScriptRunning or typeof(modInst) ~= "Instance" then return end
             local effName = (modInst.Name == "Handler" and modInst.Parent) and modInst.Parent.Name or modInst.Name
             if effName == "ParryIndicator" and methodName == "effect" then
@@ -3871,6 +3906,10 @@ function CombatEngine.TriggerParry(attacker, isUnparryable)
             MiningEngine.LastDamagedAt = os.clock()
             MiningEngine.LastAttackerMob = attacker
         end
+    end
+    if _G.__TheForge_RunEpoch ~= MY_RUN_EPOCH then
+        ScriptRunning = false
+        return false
     end
     if not ScriptRunning or not Config.AutoParry or State.IsAutoForging or State.IsBuyingPotions or State.IsBuyingHealthPotions or State.IsEnhancing or State.IsUsingPotion or State.UsingPotionCycle or State.InDefenseRegen or State.InAirPotionDrink or (RaidEngine and (RaidEngine.RecoveringHP or RaidEngine.AsuraState == "HEALING")) then return false end
     if Config.AutoParryBossesOnly and attacker and not CombatEngine.IsBossMob(attacker) then return false end
@@ -4064,6 +4103,10 @@ end
 
 -- Unified deduplicated signal handlers called by BOTH Tier 2 (raw EffectService.RE.Event) and Tier 1 (module hooks)
 function CombatEngine.OnParryIndicator(attacker, isParryable)
+    if _G.__TheForge_RunEpoch ~= MY_RUN_EPOCH then
+        ScriptRunning = false
+        return
+    end
     if not ScriptRunning or not Config.AutoParry or typeof(attacker) ~= "Instance" or attacker == State.Character then return end
     if Config.AutoParryBossesOnly and not CombatEngine.IsBossMob(attacker) then return end
     local now = os.clock()
@@ -4201,7 +4244,7 @@ end)
 -- Holds weapon swings ~0.18s before a calibrated mob attack lands so Status.Attacking never locks out StartBlock,
 -- then pre-fires StartBlock early by Ping (or evades known unparryable red animations).
 task.spawn(function()
-    while ScriptRunning do
+    while ScriptRunning and _G.__TheForge_RunEpoch == MY_RUN_EPOCH do
         if Config.AutoParry and not State.IsAutoForging and State.HRP and State.Humanoid and State.Humanoid.Health > 0 then
             pcall(function()
                 local maxR = Config.AutoParryRange or 18.0
@@ -22589,7 +22632,7 @@ do
 
     ParrySettingsSection:Toggle({
         Title = "Only Auto Parry Bosses",
-        Desc = "Only parries & dodges Boss / Mini-Boss attacks (ignores normal mobs so you don't waste stamina)",
+        Desc = "Only parries & dodges big Bosses (every-10-wave/floor bosses, Boss Arena, Guild Bosses) — ignores normal wave mobs to save stamina",
         Value = Config.AutoParryBossesOnly,
         Callback = function(val)
             Config.AutoParryBossesOnly = val
